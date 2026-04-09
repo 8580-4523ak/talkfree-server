@@ -64,7 +64,7 @@ try {
   process.exit(1);
 }
 
-const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
@@ -79,28 +79,20 @@ app.get("/call", async (req, res) => {
   try {
     const to = req.query.to;
 
-    if (!to || typeof to !== "string" || to.trim() === "") {
-      return res.status(400).send("Missing ?to= phone number");
+    if (!to) {
+      return res.send("Missing ?to= number");
     }
 
-    const toTrimmed = to.trim();
-
-    await client.calls.create({
-      to: toTrimmed,
+    await twilioClient.calls.create({
+      to: String(to).trim(),
       from: process.env.TWILIO_CALLER_ID,
-      url:
-        process.env.VOICE_TWIML_URL ||
-        "https://talkfree-server.onrender.com/voice",
+      url: "https://talkfree-server.onrender.com/voice",
     });
 
-    res.send("Calling...");
+    res.send("Call triggered successfully");
   } catch (err) {
-    console.error("GET /call error:", err);
-    const status =
-      typeof err.status === "number" && err.status >= 400 && err.status < 600
-        ? err.status
-        : 500;
-    res.status(status).send("Error: " + err.message);
+    console.error(err);
+    res.send("Error: " + err.message);
   }
 });
 
