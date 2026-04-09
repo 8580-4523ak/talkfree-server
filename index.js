@@ -56,6 +56,15 @@ try {
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
+app.post("/voice", (req, res) => {
+  res.type("text/xml");
+  res.send(`
+    <Response>
+      <Say voice="alice">Hello Akash, your TalkFree server is working!</Say>
+    </Response>
+  `);
+});
+
 app.get("/token", (req, res) => {
   const identity = String(req.query.identity || "anonymous").slice(0, 128);
   const token = new AccessToken(
