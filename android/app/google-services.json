@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "144439786674",
+    "project_id": "talkfree-dd498",
+    "storage_bucket": "talkfree-dd498.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:144439786674:android:e3256dcbf1a48b3dd1ddab",
+        "android_client_info": {
+          "package_name": "com.dev.talkfree"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "144439786674-c9gon5rngk8nkfmkdncn30ocj2nr795d.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.dev.talkfree",
+            "certificate_hash": "97ceaf8e205da591aa0d8650ca4b0cb07a3e7854"
+          }
+        },
+        {
+          "client_id": "144439786674-fj2qtm1pq7tjvvma5et8sj4mpnmaj4ed.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAEXc1IEf_mS86CTRjnQc6v8-lUdgipffs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "144439786674-fj2qtm1pq7tjvvma5et8sj4mpnmaj4ed.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
