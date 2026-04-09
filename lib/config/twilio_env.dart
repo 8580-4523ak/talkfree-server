@@ -8,8 +8,8 @@ abstract final class TwilioEnv {
   static String? get accountSid => _norm(dotenv.env['TWILIO_ACCOUNT_SID']);
   static String? get authToken => _norm(dotenv.env['TWILIO_AUTH_TOKEN']);
 
-  /// Your Twilio SMS-capable number (E.164), e.g. +16624397919
-  static String? get phoneNumber => _norm(dotenv.env['TWILIO_PHONE_NUMBER']);
+  /// Your Twilio SMS / voice number (E.164). Same as server `TWILIO_CALLER_ID`.
+  static String? get phoneNumber => _norm(dotenv.env['TWILIO_CALLER_ID']);
 
   /// TwiML Bin (or webhook) URL for outbound [Calls] — returns Voice TwiML when the call connects.
   static String? get voiceTwimlUrl => _norm(dotenv.env['TWILIO_VOICE_TWIML_URL']);

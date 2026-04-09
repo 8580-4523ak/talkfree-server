@@ -20,7 +20,7 @@ Future<void> sendTwilioSMS(String recipientNumber, String messageBody) async {
     throw StateError('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing in .env');
   }
   if (from == null || from.isEmpty) {
-    throw StateError('TWILIO_PHONE_NUMBER missing in .env');
+    throw StateError('TWILIO_CALLER_ID missing in .env');
   }
   if (!_twilioAccountSid.hasMatch(sid)) {
     throw StateError(
