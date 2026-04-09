@@ -12,11 +12,9 @@ const twilio = require("twilio");
 
 const {
   TWILIO_ACCOUNT_SID,
-  TWILIO_API_KEY_SID,
-  TWILIO_API_KEY_SECRET,
-  TWILIO_TWIML_APP_SID,
+  TWILIO_AUTH_TOKEN,
   TWILIO_APP_SID,
-  TWILIO_CALLER_ID,
+  TWILIO_PHONE_NUMBER,
   PORT = 3000,
 } = process.env;
 
