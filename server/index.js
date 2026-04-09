@@ -29,6 +29,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+app.get("/", (req, res) => {
+  res.send("Server is alive");
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 function requireEnv(name, val) {
@@ -64,11 +69,10 @@ const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
-app.post("/voice", (req, res) => {
-  const vr = new twilio.twiml.VoiceResponse();
-  vr.say("Hello Akash, your TalkFree server is working");
+app.all("/voice", (req, res) => {
   res.type("text/xml");
-  res.send(vr.toString());
+  res.send(`     <Response>       <Say voice="alice">Hello Akash, your TalkFree server is working!</Say>     </Response>
+  `);
 });
 
 app.get("/call", async (req, res) => {
