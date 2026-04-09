@@ -26,6 +26,10 @@ const OUTGOING_APP_SID = String(
 ).trim();
 
 const app = express();
+app.use((req, res, next) => {
+  console.log("Incoming:", req.method, req.url);
+  next();
+});
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -70,6 +74,8 @@ const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
 app.all("/voice", (req, res) => {
+  console.log("🔥 Twilio hit /voice endpoint");
+
   res.type("text/xml");
   res.send(`     <Response>       <Say voice="alice">Hello Akash, your TalkFree server is working!</Say>     </Response>
   `);
