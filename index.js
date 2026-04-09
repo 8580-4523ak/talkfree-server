@@ -34,10 +34,9 @@ function requireEnv(name, val) {
 
 try {
   requireEnv("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID);
-  requireEnv("TWILIO_API_KEY_SID", TWILIO_API_KEY_SID);
-  requireEnv("TWILIO_API_KEY_SECRET", TWILIO_API_KEY_SECRET);
-  requireEnv("TWILIO_TWIML_APP_SID or TWILIO_APP_SID", OUTGOING_APP_SID);
-  requireEnv("TWILIO_CALLER_ID", TWILIO_CALLER_ID);
+  requireEnv("TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN);
+  requireEnv("TWILIO_APP_SID", TWILIO_APP_SID);
+  requireEnv("TWILIO_PHONE_NUMBER", TWILIO_PHONE_NUMBER);
 } catch (e) {
   console.error(e.message);
   const examplePath = path.join(__dirname, ".env.example");
