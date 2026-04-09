@@ -25,6 +25,7 @@ const OUTGOING_APP_SID = String(
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
 function requireEnv(name, val) {
@@ -53,6 +54,8 @@ try {
   process.exit(1);
 }
 
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
@@ -63,6 +66,29 @@ app.post("/voice", (req, res) => {
       <Say voice="alice">Hello Akash, your TalkFree server is working!</Say>
     </Response>
   `);
+});
+
+app.get("/call", async (req, res) => {
+  try {
+    const to = req.query.to;
+
+    if (!to || typeof to !== "string" || to.trim() === "") {
+      return res.status(400).send("Missing ?to= phone number");
+    }
+
+    const cleanNumber = to.trim();
+
+    await twilioClient.calls.create({
+      to: cleanNumber,
+      from: TWILIO_PHONE_NUMBER,
+      url: "https://talkfree-server.onrender.com/voice",
+    });
+
+    res.send("📞 Calling " + cleanNumber);
+  } catch (err) {
+    console.error("GET /call error:", err);
+    res.status(500).send("Error: " + err.message);
+  }
 });
 
 app.get("/token", (req, res) => {
@@ -87,7 +113,7 @@ app.post("/call", (req, res) => {
   if (!to) {
     vr.say({ voice: "alice" }, "No destination number.");
   } else {
-    const dial = vr.dial({ callerId: TWILIO_CALLER_ID });
+    const dial = vr.dial({ callerId: TWILIO_PHONE_NUMBER });
     dial.number(to);
   }
   res.type("text/xml");
