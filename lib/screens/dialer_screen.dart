@@ -1,16 +1,20 @@
+import 'dart:io' show Platform;
 import 'dart:math' show min;
 import 'dart:ui' show ImageFilter;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_picker/country_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../config/credits_policy.dart';
 import '../services/call_service.dart';
 import '../services/firestore_user_service.dart';
 import '../widgets/premium_ios_dial_pad.dart';
+import '../widgets/voip_gate_dialog.dart';
 import 'calling_screen.dart';
 
 /// Approximate per-minute rate hint by destination; swap for live pricing when available.
@@ -58,7 +62,7 @@ class _DialerScreenState extends State<DialerScreen>
     with TickerProviderStateMixin {
   final StringBuffer _digits = StringBuffer();
   bool _callBusy = false;
-  /// True only while [makeCall] is in flight — shows neon pulsing overlay.
+  /// True while opening / showing the in-call screen — neon pulsing overlay.
   bool _apiConnecting = false;
   late Country _country;
 
@@ -167,6 +171,55 @@ class _DialerScreenState extends State<DialerScreen>
     return out.toString();
   }
 
+  /// Microphone + (Android) Phone — required before opening [CallingScreen] (Twilio Voice SDK).
+  Future<bool> _ensureCallPermissionsForVoip() async {
+    if (kIsWeb) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('VoIP calls are not supported in this browser.')),
+      );
+      return false;
+    }
+
+    var mic = await Permission.microphone.status;
+    if (!mic.isGranted) {
+      mic = await Permission.microphone.request();
+    }
+    if (!mic.isGranted) {
+      if (!mounted) return false;
+      await showVoipGateDialog(
+        context,
+        title: 'Microphone required',
+        message:
+            'TalkFree needs microphone access for VoIP calls. '
+            'Tap Open Settings and allow Microphone for this app.',
+        icon: Icons.mic_rounded,
+      );
+      return false;
+    }
+
+    if (Platform.isAndroid) {
+      var phone = await Permission.phone.status;
+      if (!phone.isGranted) {
+        phone = await Permission.phone.request();
+      }
+      if (!phone.isGranted) {
+        if (!mounted) return false;
+        await showVoipGateDialog(
+          context,
+          title: 'Phone permission required',
+          message:
+              'Android needs Phone permission so Twilio can use the calling account '
+              'and place VoIP calls. Enable Phone access in Settings.',
+          icon: Icons.phone_in_talk_rounded,
+        );
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   Future<void> _onCall() async {
     if (_callBusy) return;
 
@@ -205,31 +258,23 @@ class _DialerScreenState extends State<DialerScreen>
       return;
     }
 
+    final allowed = await _ensureCallPermissionsForVoip();
+    if (!allowed || !mounted) return;
+
     setState(() {
       _callBusy = true;
       _apiConnecting = true;
     });
     _connectPulse.repeat();
     try {
-      try {
-        await makeCall(to);
-      } catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$e')),
-        );
-        return;
-      } finally {
-        _connectPulse.stop();
-        _connectPulse.reset();
-        if (mounted) {
-          setState(() => _apiConnecting = false);
-        }
-      }
       if (!mounted) return;
 
-      final insufficient = await Navigator.of(context).push<bool>(
-        PageRouteBuilder<bool>(
+      // Outbound calls use Twilio Voice SDK only ([CallingScreen.placePstnCall]).
+      // Do not call server GET /call here — it started a duplicate PSTN leg and could
+      // confuse the SDK or Twilio (two outbound attempts).
+
+      final result = await Navigator.of(context).push<CallingScreenResult?>(
+        PageRouteBuilder<CallingScreenResult?>(
           opaque: true,
           transitionDuration: const Duration(milliseconds: 380),
           pageBuilder: (_, animation, secondaryAnimation) => CallingScreen(
@@ -259,13 +304,35 @@ class _DialerScreenState extends State<DialerScreen>
         ),
       );
       if (!mounted) return;
-      if (insufficient == true) {
+      final r = result;
+      if (r == null) return;
+      if (r.insufficientCredits) {
+        final b = r.syncedBalance;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Insufficient credits')),
+          SnackBar(
+            content: Text(
+              b != null
+                  ? 'Insufficient credits. Current balance: $b credits.'
+                  : 'Insufficient credits',
+            ),
+          ),
+        );
+      } else if (r.syncedBalance != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Balance: ${r.syncedBalance} credits'),
+          ),
         );
       }
     } finally {
-      if (mounted) setState(() => _callBusy = false);
+      _connectPulse.stop();
+      _connectPulse.reset();
+      if (mounted) {
+        setState(() {
+          _callBusy = false;
+          _apiConnecting = false;
+        });
+      }
     }
   }
 

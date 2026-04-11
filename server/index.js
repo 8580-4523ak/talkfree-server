@@ -89,19 +89,55 @@ try {
   console.warn("Firebase Admin init failed — /grant-reward disabled:", e.message);
 }
 
-const voiceCallbackUrl = `${String(PUBLIC_BASE_URL).replace(/\/$/, "")}/voice`;
+const publicBase = String(PUBLIC_BASE_URL).replace(/\/$/, "");
+
+/**
+ * TwiML for PSTN outbound: dial `to` with caller ID. Used by:
+ * - Twilio Voice SDK (TwiML App Voice URL should be POST {PUBLIC_BASE_URL}/call)
+ * - REST twilioClient.calls.create `url` → use /twiml/voice so the callee leg gets real Dial, not /voice Say test.
+ */
+function voiceResponseDialPstn(toRaw) {
+  const vr = new twilio.twiml.VoiceResponse();
+  const to = toRaw != null ? String(toRaw).trim() : "";
+  if (!to) {
+    vr.say({ voice: "alice" }, "No destination number.");
+  } else {
+    const dial = vr.dial({ callerId: TWILIO_CALLER_ID });
+    dial.number(to);
+  }
+  return vr;
+}
+
+/** Optional test: GET /voice — Say only (do not use as calls.create `url` for real PSTN). */
+app.all("/voice", (req, res) => {
+  console.log("Twilio hit /voice (test Say)");
+  res.type("text/xml");
+  res.send(
+    new twilio.twiml.VoiceResponse()
+      .say({ voice: "alice" }, "TalkFree server voice test — use /twiml/voice or POST /call for Dial.")
+      .toString(),
+  );
+});
+
+/**
+ * TwiML Dial — for REST `calls.create({ url })` callbacks. Twilio sends To in query or body.
+ * GET /twiml/voice?To=+1... or POST with form field To.
+ */
+app.all("/twiml/voice", (req, res) => {
+  const to =
+    (req.body && (req.body.To || req.body.to)) ||
+    (req.query && (req.query.To || req.query.to)) ||
+    "";
+  res.type("text/xml");
+  res.send(voiceResponseDialPstn(to).toString());
+});
+
+const twimlDialUrl = `${publicBase}/twiml/voice`;
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
-app.all("/voice", (req, res) => {
-  console.log("🔥 Twilio hit /voice endpoint");
-
-  res.type("text/xml");
-  res.send(`     <Response>       <Say voice="alice">Hello Akash, your TalkFree server is working!</Say>     </Response>
-  `);
-});
-
+/** Legacy browser/test: GET /call?to= — triggers PSTN; TwiML URL must Dial (see /twiml/voice). */
 app.get("/call", async (req, res) => {
   try {
     const to = req.query.to;
@@ -113,7 +149,7 @@ app.get("/call", async (req, res) => {
     await twilioClient.calls.create({
       to: String(to).trim(),
       from: process.env.TWILIO_CALLER_ID,
-      url: voiceCallbackUrl,
+      url: twimlDialUrl,
     });
 
     res.send("Call triggered successfully");
@@ -140,7 +176,7 @@ app.get("/token", (req, res) => {
 });
 
 app.post("/call", async (req, res) => {
-  // Mobile app: JSON `{ "to": "+..." }` + `Authorization: Bearer <Firebase ID token>` (verify on server when ready).
+  // Mobile app: JSON `{ "to": "+..." }` — server-initiated PSTN (optional; Voice SDK uses TwiML App POST below).
   if (req.is("application/json")) {
     const toRaw = req.body && (req.body.to ?? req.body.To);
     if (toRaw == null || String(toRaw).trim() === "") {
@@ -151,7 +187,7 @@ app.post("/call", async (req, res) => {
       await twilioClient.calls.create({
         to,
         from: TWILIO_CALLER_ID,
-        url: voiceCallbackUrl,
+        url: twimlDialUrl,
       });
       return res.status(200).json({ ok: true, message: "Call triggered successfully" });
     } catch (err) {
@@ -160,17 +196,10 @@ app.post("/call", async (req, res) => {
     }
   }
 
-  // Twilio webhook (form-encoded): return TwiML to dial.
+  // Twilio Voice SDK / TwiML App webhook (application/x-www-form-urlencoded): return TwiML to <Dial> PSTN.
   const to = req.body.To || req.body.to;
-  const vr = new twilio.twiml.VoiceResponse();
-  if (!to) {
-    vr.say({ voice: "alice" }, "No destination number.");
-  } else {
-    const dial = vr.dial({ callerId: TWILIO_CALLER_ID });
-    dial.number(to);
-  }
   res.type("text/xml");
-  res.send(vr.toString());
+  res.send(voiceResponseDialPstn(to).toString());
 });
 
 const REWARD_GRANT_CREDITS = Number(process.env.REWARD_GRANT_CREDITS || 10);
@@ -237,7 +266,9 @@ app.get("/grant-reward", (_req, res) => {
 /**
  * POST /grant-reward — secured ad rewards (Flutter: GrantRewardService).
  * - Verifies Firebase ID token → uid.
- * - Updates `ad_progress` (and mirrors `ad_sub_counter` / `adRewardCycleCount`): +1 per ad; at 4 → reset to 0 and +10 reward credits.
+ * - Increments progress each successful request: internal counter 1→2→3→4; on the 4th ad
+ *   (`ad_progress` / `ad_sub_counter` cycle completes), adds REWARD_GRANT_CREDITS (default 10) and resets progress to 0.
+ * - Mirrors legacy fields: `adRewardCycleCount`, `adRewardsCount`, etc.
  * - Daily cap: max 24 ads / UTC day (`ads_watched_today`).
  * - Cooldown: must be ≥20s since `last_ad_timestamp` / `lastAdRewardAt` or returns **Wait** (429).
  */
@@ -444,9 +475,8 @@ app.post("/call-status", async (req, res) => {
   }
 
   const durationSec = parseTwilioDurationSeconds(body);
-  /** Full minutes billed (Twilio duration is seconds). */
+  /** Strict billing: finalCharge = max(10, ceil(durationSec / 60) * 10) with CALL_CREDITS_PER_MINUTE default 10. */
   const billedMinutes = Math.ceil(durationSec / 60);
-  /** Strict: at least one minute rate even for sub-minute / zero-duration completions. */
   const finalCharge = Math.max(
     CALL_CREDITS_PER_MINUTE,
     billedMinutes * CALL_CREDITS_PER_MINUTE,

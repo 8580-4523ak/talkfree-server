@@ -16,10 +16,6 @@ abstract final class CreditsPolicy {
 
   static const int connectedLiveCreditIntervalSec = 6;
 
-  /// First connected-time second when [connectedLiveCreditPerTick] applies after the initial [creditsPerCallTick] (minute one + one interval).
-  static const int connectedLiveCreditFirstTickSec =
-      60 + connectedLiveCreditIntervalSec;
-
   /// Must match server `CALL_CREDITS_PER_MINUTE` — billed as ceil(callMinutes) × this at call end.
   static const int callCreditsPerBilledMinute = 10;
 

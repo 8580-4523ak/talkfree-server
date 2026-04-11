@@ -5,13 +5,29 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:twilio_voice/twilio_voice.dart';
 
 import '../config/credits_policy.dart';
+import '../config/voice_backend_config.dart';
 import '../services/call_service.dart';
+import '../widgets/voip_gate_dialog.dart';
 import '../services/firestore_user_service.dart';
 import '../services/twilio_voip_facade.dart';
 import '../widgets/premium_ios_dial_pad.dart' show premiumDialCallGreen;
+
+/// Returned when [CallingScreen] closes; [syncedBalance] is set after disconnect via Firestore fetch.
+class CallingScreenResult {
+  const CallingScreenResult({
+    required this.insufficientCredits,
+    this.syncedBalance,
+  });
+
+  final bool insufficientCredits;
+
+  /// Authoritative usable credits from Firestore (e.g. after call end).
+  final int? syncedBalance;
+}
 
 class CallingScreen extends StatefulWidget {
   const CallingScreen({
@@ -29,9 +45,12 @@ class CallingScreen extends StatefulWidget {
 
 class _CallingScreenState extends State<CallingScreen>
     with WidgetsBindingObserver, TickerProviderStateMixin {
-  Timer? _durationTimer;
+  /// Elapsed call time (MM:SS) — 1 Hz while connected.
+  Timer? _elapsedTimer;
   int _elapsedSeconds = 0;
-  /// Local balance preview: set on connect (−[CreditsPolicy.creditsPerCallTick]), then periodic ticks.
+  /// Live UI: −1 credit every [CreditsPolicy.connectedLiveCreditIntervalSec] while connected.
+  Timer? _liveCreditTicker;
+  /// Local balance preview: −[CreditsPolicy.creditsPerCallTick] on connect, then −1 per ticker tick.
   int? _localCredits;
   StreamSubscription<CallEvent>? _callSub;
   String _statusLine = 'Connecting...';
@@ -63,26 +82,32 @@ class _CallingScreenState extends State<CallingScreen>
     });
   }
 
-  void _onConnectedTick(Timer timer) {
+  void _onElapsedTick(Timer _) {
     if (!mounted) return;
+    setState(() => _elapsedSeconds++);
+  }
+
+  void _onLiveCreditTick(Timer timer) {
+    if (!mounted) return;
+    final lc = _localCredits;
+    if (lc == null) return;
     setState(() {
-      _elapsedSeconds++;
-      final lc = _localCredits;
-      if (lc != null &&
-          _elapsedSeconds >= CreditsPolicy.connectedLiveCreditFirstTickSec &&
-          (_elapsedSeconds - CreditsPolicy.connectedLiveCreditFirstTickSec) %
-                  CreditsPolicy.connectedLiveCreditIntervalSec ==
-              0) {
-        _localCredits = lc - CreditsPolicy.connectedLiveCreditPerTick;
-        _creditPulse.forward(from: 0);
-      }
+      _localCredits = lc - CreditsPolicy.connectedLiveCreditPerTick;
+      _creditPulse.forward(from: 0);
     });
     final after = _localCredits;
-    if (after != null && after < 1) {
+    if (after != null && after <= 0) {
       timer.cancel();
-      _durationTimer = null;
+      _liveCreditTicker = null;
       unawaited(_autoHangupLowCredits());
     }
+  }
+
+  void _cancelConnectedTimers() {
+    _elapsedTimer?.cancel();
+    _elapsedTimer = null;
+    _liveCreditTicker?.cancel();
+    _liveCreditTicker = null;
   }
 
   Future<void> _startConnectedCreditTimer() async {
@@ -100,21 +125,25 @@ class _CallingScreenState extends State<CallingScreen>
     });
 
     final afterInitial = _localCredits ?? 0;
-    if (afterInitial < 1) {
+    if (afterInitial <= 0) {
       unawaited(_autoHangupLowCredits());
       return;
     }
 
-    _durationTimer?.cancel();
-    _durationTimer = Timer.periodic(const Duration(seconds: 1), _onConnectedTick);
+    _cancelConnectedTimers();
+    _elapsedSeconds = 0;
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), _onElapsedTick);
+    _liveCreditTicker = Timer.periodic(
+      Duration(seconds: CreditsPolicy.connectedLiveCreditIntervalSec),
+      _onLiveCreditTick,
+    );
   }
 
   Future<void> _autoHangupLowCredits() async {
     if (!mounted) return;
     if (_remoteEndedHandled) return;
     _remoteEndedHandled = true;
-    _durationTimer?.cancel();
-    _durationTimer = null;
+    _cancelConnectedTimers();
     CallService.instance.stopBilling();
     await _callSub?.cancel();
     _callSub = null;
@@ -125,7 +154,94 @@ class _CallingScreenState extends State<CallingScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Call ended — not enough credits.')),
       );
-      Navigator.of(context).pop(false);
+      await _popWithFirestoreSync(insufficientCredits: true);
+    }
+  }
+
+  /// Anti-cheat: final Firestore read so UI / parent can show authoritative balance after call.
+  Future<void> _popWithFirestoreSync({required bool insufficientCredits}) async {
+    if (!mounted) return;
+    int? synced;
+    try {
+      synced = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
+    } catch (_) {}
+    if (!mounted) return;
+    Navigator.of(context).pop(
+      CallingScreenResult(
+        insufficientCredits: insufficientCredits,
+        syncedBalance: synced,
+      ),
+    );
+  }
+
+  /// Shown when [TwilioVoipFacade.placePstnCall] does not return true (permissions, phone account, Twilio config).
+  Future<void> _showVoipStartFailedHelp() async {
+    if (!mounted) return;
+    var alreadyLeftCallingScreen = false;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1E293B),
+          title: Text(
+            'Could not start VoIP call',
+            style: GoogleFonts.poppins(
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+            ),
+          ),
+          content: SingleChildScrollView(
+            child: Text(
+              'Twilio Voice did not start the call. Check:\n\n'
+              '• Microphone & Phone permissions for this app.\n'
+              '• Android: enable this app as a calling account (ConnectionService).\n'
+              '• Twilio Console → TwiML Apps → same SID as server TWILIO_TWIML_APP_SID → '
+              'Voice request URL = ${VoiceBackendConfig.baseUrl}/call (POST, returns TwiML to <Dial>).',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                height: 1.45,
+                color: Colors.white70,
+              ),
+            ),
+          ),
+          actions: [
+            if (!kIsWeb && Platform.isAndroid)
+              TextButton(
+                onPressed: () async {
+                  Navigator.of(ctx).pop();
+                  if (!mounted) return;
+                  alreadyLeftCallingScreen = true;
+                  Navigator.of(context).pop(
+                    const CallingScreenResult(insufficientCredits: true),
+                  );
+                  await TwilioVoice.instance.openPhoneAccountSettings();
+                },
+                child: const Text('Calling account'),
+              ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(ctx).pop();
+                if (!mounted) return;
+                  alreadyLeftCallingScreen = true;
+                  Navigator.of(context).pop(
+                    const CallingScreenResult(insufficientCredits: true),
+                  );
+                  await openAppSettings();
+              },
+              child: const Text('App permissions'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+    if (mounted && !alreadyLeftCallingScreen) {
+      Navigator.of(context).pop(
+        const CallingScreenResult(insufficientCredits: true),
+      );
     }
   }
 
@@ -148,16 +264,19 @@ class _CallingScreenState extends State<CallingScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('VoIP is not supported on web.')),
       );
-      Navigator.of(context).pop(true);
+      Navigator.of(context).pop(
+        const CallingScreenResult(insufficientCredits: true),
+      );
       return;
     }
 
     final c = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
     if (!mounted) return;
     if (c < CreditsPolicy.minCreditsToStartCall) {
-      _durationTimer?.cancel();
-      _durationTimer = null;
-      Navigator.of(context).pop(true);
+      _cancelConnectedTimers();
+      Navigator.of(context).pop(
+        const CallingScreenResult(insufficientCredits: true),
+      );
       return;
     }
 
@@ -201,10 +320,7 @@ class _CallingScreenState extends State<CallingScreen>
         await sub.cancel();
         _callSub = null;
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not start call.')),
-          );
-          Navigator.of(context).pop(true);
+          await _showVoipStartFailedHelp();
         }
         return;
       }
@@ -223,27 +339,55 @@ class _CallingScreenState extends State<CallingScreen>
         },
         onError: (_) {},
       );
-    } catch (e) {
+    } catch (e, _) {
       await sub?.cancel();
       _callSub = null;
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Call failed: $e')),
+      final msg = e.toString();
+      final tokenOrServer = msg.contains('token') ||
+          msg.contains('Token') ||
+          msg.contains('HTTP') ||
+          msg.contains(VoiceBackendConfig.baseUrl) ||
+          msg.contains('setTokens');
+      if (tokenOrServer) {
+        await showVoipGateDialog(
+          context,
+          title: 'Voice service',
+          message:
+              'Could not load the Twilio access token from your server '
+              '(${VoiceBackendConfig.baseUrl}/token). '
+              'Ensure the Render app is live and Twilio keys are set.\n\n'
+              '$msg',
+          icon: Icons.cloud_sync_rounded,
+          primaryLabel: 'OK',
+          openSettingsOnPrimary: false,
+        );
+      } else {
+        await showVoipGateDialog(
+          context,
+          title: 'Call setup failed',
+          message: msg,
+          icon: Icons.error_outline_rounded,
+          primaryLabel: 'OK',
+          openSettingsOnPrimary: false,
+        );
+      }
+      if (!mounted) return;
+      Navigator.of(context).pop(
+        const CallingScreenResult(insufficientCredits: true),
       );
-      Navigator.of(context).pop(true);
     }
   }
 
   Future<void> _onInsufficientFromBilling() async {
-    _durationTimer?.cancel();
-    _durationTimer = null;
+    _cancelConnectedTimers();
     await _callSub?.cancel();
     _callSub = null;
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Not enough credits to continue.')),
       );
-      Navigator.of(context).pop(true);
+      await _popWithFirestoreSync(insufficientCredits: true);
     }
   }
 
@@ -251,12 +395,13 @@ class _CallingScreenState extends State<CallingScreen>
     if (_remoteEndedHandled) return;
     _remoteEndedHandled = true;
     if (!mounted) return;
-    _durationTimer?.cancel();
-    _durationTimer = null;
+    _cancelConnectedTimers();
     CallService.instance.stopBilling();
     await _callSub?.cancel();
     _callSub = null;
-    if (mounted) Navigator.of(context).pop(false);
+    if (mounted) {
+      await _popWithFirestoreSync(insufficientCredits: false);
+    }
   }
 
   @override
@@ -264,7 +409,7 @@ class _CallingScreenState extends State<CallingScreen>
     _callVisualPulse.dispose();
     _creditPulse.dispose();
     WidgetsBinding.instance.removeObserver(this);
-    _durationTimer?.cancel();
+    _cancelConnectedTimers();
     _callSub?.cancel();
     CallService.instance.stopBilling();
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
@@ -281,15 +426,16 @@ class _CallingScreenState extends State<CallingScreen>
   }
 
   Future<void> _endCall() async {
-    _durationTimer?.cancel();
-    _durationTimer = null;
+    _cancelConnectedTimers();
     CallService.instance.stopBilling();
     await _callSub?.cancel();
     _callSub = null;
     try {
       await TwilioVoipFacade.instance.hangUp();
     } catch (_) {}
-    if (mounted) Navigator.of(context).pop(false);
+    if (mounted) {
+      await _popWithFirestoreSync(insufficientCredits: false);
+    }
   }
 
   @override
