@@ -66,6 +66,8 @@ class _CallingScreenState extends State<CallingScreen>
   int? _creditsAtSessionStart;
   /// Twilio Call SID — required for POST /call-live-tick and /sync-call-billing.
   String? _activeCallSid;
+  /// Tier-2 settlement in progress — shows a light overlay so the 5s window does not feel frozen.
+  bool _finalizingBill = false;
 
   late final AnimationController _callVisualPulse = AnimationController(
     vsync: this,
@@ -265,17 +267,23 @@ class _CallingScreenState extends State<CallingScreen>
     }
   }
 
-  /// After hangup: [CallLiveBillingService.syncCallBilling] (same settlement as Twilio `/call-status`),
-  /// then refresh balance for the dialer.
+  /// After hangup: [CallLiveBillingService.runFinalSettlementWindow] (5s Tier-2 sync) then Firestore read
+  /// so the dialer does not flash the pre-call balance. Twilio `/call-status` still settles if the app died.
   Future<void> _popWithFirestoreSync({required bool insufficientCredits}) async {
     if (!mounted) return;
+    setState(() => _finalizingBill = true);
     int? synced;
     var serverBillingPending = false;
     try {
       final settled = await _fetchUsableCreditsAfterCallSettles();
       synced = settled.balance;
       serverBillingPending = settled.serverBillingPending;
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      if (mounted) {
+        setState(() => _finalizingBill = false);
+      }
+    }
     if (!mounted) return;
     Navigator.of(context).pop(
       CallingScreenResult(
@@ -302,14 +310,15 @@ class _CallingScreenState extends State<CallingScreen>
     }
 
     if (sid != null && sid.isNotEmpty) {
-      await Future<void>.delayed(const Duration(milliseconds: 700));
       if (!mounted) {
         return (balance: null, serverBillingPending: false);
       }
-      final syncedOk =
-          await CallLiveBillingService.instance.syncCallBilling(sid);
+      await CallLiveBillingService.instance.runFinalSettlementWindow(
+        callSid: sid,
+        window: const Duration(seconds: 5),
+      );
       if (kDebugMode) {
-        debugPrint('DEBUG: sync-call-billing completed: $syncedOk');
+        debugPrint('DEBUG: Tier-2 settlement window (5s) finished for $sid');
       }
     }
 
@@ -643,6 +652,10 @@ class _CallingScreenState extends State<CallingScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(CallService.instance.syncAfterAppResumed());
+      final sid = _activeCallSid;
+      if (sid != null && sid.isNotEmpty) {
+        unawaited(CallLiveBillingService.instance.flushPendingTicksForCall(sid));
+      }
     }
   }
 
@@ -661,15 +674,17 @@ class _CallingScreenState extends State<CallingScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0F172A),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-          child: Column(
-            children: [
-              const SizedBox(height: 24),
-              _ActiveCallPulseHeader(controller: _callVisualPulse),
+    return Stack(
+      children: [
+        Scaffold(
+          backgroundColor: const Color(0xFF0F172A),
+          body: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+              child: Column(
+                children: [
+                  const SizedBox(height: 24),
+                  _ActiveCallPulseHeader(controller: _callVisualPulse),
               const SizedBox(height: 28),
               Text(
                 widget.dialE164,
@@ -755,6 +770,46 @@ class _CallingScreenState extends State<CallingScreen>
           ),
         ),
       ),
+        ),
+        if (_finalizingBill)
+          Positioned.fill(
+            child: Material(
+              color: Colors.black.withValues(alpha: 0.45),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(
+                      width: 36,
+                      height: 36,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: Color(0xFF39FF14),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Finalizing bill…',
+                      style: GoogleFonts.inter(
+                        fontSize: 15,
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Syncing with server',
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

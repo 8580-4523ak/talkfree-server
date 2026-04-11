@@ -452,8 +452,15 @@ function resolveUidFromTwilioStatus(body, query) {
 const ALLOWED_LIVE_TICK_AMOUNTS = new Set([1, 10]);
 
 /**
- * Final settlement: Twilio duration → target charge, minus credits already taken via POST /call-live-tick
- * (tracked in `users/{uid}/voice_active_calls/{callSid}.liveDeductedCredits`).
+ * TalkFree Tier-2 settlement (server truth; backup: Twilio POST /call-status if app offline).
+ *
+ * Math (CALL_CREDITS_PER_MINUTE = credits per billed minute, default 10):
+ * - billedMinutes = ceil(durationSec / 60)  e.g. 61s → 2 minutes
+ * - finalCharge = max(CALL_CREDITS_PER_MINUTE, billedMinutes * CALL_CREDITS_PER_MINUTE)
+ * - prepaid = liveDeductedCredits from POST /call-live-tick (connect 10 + every 6s × 1)
+ * - remainder = finalCharge - prepaid → deduct from user; if prepaid > finalCharge, refund to paidCredits
+ *
+ * Firestore: `users/{uid}` fields paidCredits, rewardCredits, credits; history in `call_history/{callSid}`.
  */
 async function settleOutboundCallBill({
   uid: uidIn,
@@ -512,9 +519,12 @@ async function settleOutboundCallBill({
 
     let remainder = finalCharge - prepaid;
 
+    /** Credits returned to **paidCredits** only (audit: rewards vs purchased). */
+    let refundToPaidCredits = 0;
     if (remainder < 0) {
       const refund = -remainder;
       paid += refund;
+      refundToPaidCredits = refund;
       remainder = 0;
     }
 
@@ -539,8 +549,8 @@ async function settleOutboundCallBill({
     const totalCreditsOut = paid + reward;
     console.log(
       `[billing] settle user=${uid} callSid=${callSid} source=${source} durationSec=${ds} ` +
-        `finalCharge=${finalCharge} prepaid=${prepaid} remainderCharge=${charge} ` +
-        `creditsAppliedThisSettle=${creditsChargedThisSettle} balanceAfter=${totalCreditsOut}`,
+        `finalCharge=${finalCharge} prepaid=${prepaid} refundToPaidCredits=${refundToPaidCredits} ` +
+        `remainderCharge=${charge} creditsAppliedThisSettle=${creditsChargedThisSettle} balanceAfter=${totalCreditsOut}`,
     );
 
     t.update(userRef, {
@@ -561,6 +571,7 @@ async function settleOutboundCallBill({
         creditsPerMinute: CALL_CREDITS_PER_MINUTE,
         finalCharge,
         prepaidAppliedFromLiveTicks: prepaid,
+        refundToPaidCredits,
         creditsCharged: creditsChargedThisSettle,
         creditsAttempted: charge,
         partialDeduction: charge > 0 && creditsChargedThisSettle < charge,
