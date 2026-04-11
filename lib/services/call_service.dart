@@ -3,24 +3,25 @@ import 'dart:io';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import '../config/credits_policy.dart';
+import '../config/voice_backend_config.dart';
 import 'firestore_user_service.dart';
-import 'voice_service.dart';
+import 'terminate_call_service.dart';
 
-/// Real-time PSTN call billing: −[CreditsPolicy.creditsPerCallTick] every
-/// [CreditsPolicy.callTickInterval] in Firestore (reward first, then paid).
+/// In-call monitoring: estimated charge = ceil(elapsed min) × [CreditsPolicy.callCreditsPerBilledMinute].
+/// Actual deduction happens on the server via Twilio `/call-status` when the call completes.
 class CallService {
   CallService._();
   static final CallService instance = CallService._();
 
-  static const int _maxCatchUpTicks = 24;
-  static const int _maxDeductRetries = 6;
+  static const int _maxBalanceCheckRetries = 6;
 
   Timer? _timer;
   String? _uid;
   String? _twilioCallSid;
-  DateTime? _lastSuccessfulBillAt;
+  DateTime? _callStartTime;
   VoidCallback? _onInsufficientCredits;
   void Function(String message)? _onError;
   Future<void> Function()? _hangUpActiveCall;
@@ -42,42 +43,51 @@ class CallService {
     return false;
   }
 
-  Future<void> _deductWithRetry(String uid) async {
-    for (var attempt = 0; attempt < _maxDeductRetries; attempt++) {
-      try {
-        await FirestoreUserService.deductCallUsageTick(
-          uid,
-          CreditsPolicy.creditsPerCallTick,
-        );
-        return;
-      } catch (e) {
-        if (!_isRetriable(e) || attempt == _maxDeductRetries - 1) {
-          rethrow;
-        }
-        await Future<void>.delayed(Duration(milliseconds: 250 * (1 << attempt)));
+  /// Same as server: ceil(elapsedSeconds / 60).
+  static int billedMinutesFromElapsedSeconds(int elapsedSec) {
+    if (elapsedSec <= 0) return 0;
+    return (elapsedSec + 59) ~/ 60;
+  }
+
+  static int creditsNeededForElapsedSeconds(int elapsedSec) {
+    return billedMinutesFromElapsedSeconds(elapsedSec) *
+        CreditsPolicy.callCreditsPerBilledMinute;
+  }
+
+  /// Set when Twilio exposes the active Call SID (after ringing).
+  void setActiveCallSid(String? sid) {
+    final t = sid?.trim();
+    _twilioCallSid = (t != null && t.isNotEmpty) ? t : _twilioCallSid;
+  }
+
+  Future<void> _terminateTwilioCallIfPossible() async {
+    final sid = _twilioCallSid;
+    if (sid == null || sid.isEmpty) return;
+    try {
+      await TerminateCallService.instance.requestTerminate(sid);
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('TerminateCallService: $e');
       }
     }
   }
 
   Future<void> _shutdownForInsufficientCredits() async {
-    final sid = _twilioCallSid;
     final cb = _onInsufficientCredits;
     final hangUp = _hangUpActiveCall;
     _clearTimerOnly();
     _uid = null;
     _twilioCallSid = null;
-    _lastSuccessfulBillAt = null;
+    _callStartTime = null;
     _onInsufficientCredits = null;
     _onError = null;
     _hangUpActiveCall = null;
+
+    await _terminateTwilioCallIfPossible();
+
     if (hangUp != null) {
       try {
         await hangUp();
-      } catch (_) {}
-    }
-    if (sid != null && sid.isNotEmpty) {
-      try {
-        await VoiceService.cancelCall(sid);
       } catch (_) {}
     }
     cb?.call();
@@ -88,37 +98,43 @@ class CallService {
     _timer = null;
   }
 
-  /// Stops billing and clears state. Does **not** cancel Twilio (dialer does that).
+  /// Stops monitoring; does not hang up (calling UI handles hang up).
   void stopBilling() {
     _clearTimerOnly();
     _uid = null;
     _twilioCallSid = null;
-    _lastSuccessfulBillAt = null;
+    _callStartTime = null;
     _onInsufficientCredits = null;
     _onError = null;
     _hangUpActiveCall = null;
   }
 
-  Future<void> _runOneCycle() async {
+  Future<void> _runOneBalanceCheck() async {
     final uid = _uid;
-    if (uid == null) return;
+    final start = _callStartTime;
+    if (uid == null || start == null) return;
 
-    final balance = await FirestoreUserService.fetchUsableCredits(uid);
-    if (balance < CreditsPolicy.creditsPerCallTick) {
-      await _shutdownForInsufficientCredits();
-      return;
-    }
+    final elapsedSec = DateTime.now().difference(start).inSeconds;
+    final needed = creditsNeededForElapsedSeconds(elapsedSec);
 
-    try {
-      await _deductWithRetry(uid);
-      _lastSuccessfulBillAt = DateTime.now();
-    } on InsufficientCreditsException {
-      await _shutdownForInsufficientCredits();
-    } catch (e, st) {
-      if (kDebugMode) {
-        debugPrint('CallService billing cycle failed: $e\n$st');
+    for (var attempt = 0; attempt < _maxBalanceCheckRetries; attempt++) {
+      try {
+        final balance = await FirestoreUserService.fetchUsableCredits(uid);
+        if (balance < needed) {
+          await _shutdownForInsufficientCredits();
+          return;
+        }
+        return;
+      } catch (e) {
+        if (!_isRetriable(e) || attempt == _maxBalanceCheckRetries - 1) {
+          if (kDebugMode) {
+            debugPrint('CallService balance check failed: $e');
+          }
+          _onError?.call('$e');
+          return;
+        }
+        await Future<void>.delayed(Duration(milliseconds: 250 * (1 << attempt)));
       }
-      _onError?.call('$e');
     }
   }
 
@@ -133,51 +149,76 @@ class CallService {
     _timer = null;
 
     _uid = uid;
-    _twilioCallSid = twilioCallSid;
-    _lastSuccessfulBillAt = DateTime.now();
+    _twilioCallSid = twilioCallSid?.trim().isNotEmpty == true ? twilioCallSid!.trim() : null;
+    _callStartTime = DateTime.now();
     _hangUpActiveCall = hangUpActiveCall;
     _onInsufficientCredits = onInsufficientCredits;
     _onError = onError;
 
-    _timer = Timer.periodic(CreditsPolicy.callTickInterval, (_) {
-      unawaited(_runOneCycle());
+    unawaited(_runOneBalanceCheck());
+
+    _timer = Timer.periodic(CreditsPolicy.callBalanceCheckInterval, (_) {
+      unawaited(_runOneBalanceCheck());
     });
   }
 
-  /// Catches up ticks after app pause / background (timer may not fire).
+  /// After app resume — run an immediate balance check (timer may have stalled).
   Future<void> syncAfterAppResumed() async {
-    if (_uid == null || _lastSuccessfulBillAt == null) {
+    if (_uid == null || _callStartTime == null) return;
+    await _runOneBalanceCheck();
+  }
+}
+
+/// Normalizes dialer input to E.164. Without a leading `+`, uses [defaultCallingCode]
+/// (e.g. `91` for India, `1` for US).
+String formatDialInputToE164(
+  String raw, {
+  String defaultCallingCode = '91',
+}) {
+  final t = raw.trim();
+  if (t.isEmpty) return '';
+  if (t.startsWith('+')) {
+    final d = t.substring(1).replaceAll(RegExp(r'\D'), '');
+    return d.isEmpty ? '' : '+$d';
+  }
+  final d = t.replaceAll(RegExp(r'\D'), '');
+  if (d.isEmpty) return '';
+  return '+$defaultCallingCode$d';
+}
+
+/// GET `/call?to=<encoded>` via [VoiceBackendConfig.callUri] — same as browser.
+Future<void> makeCall(String number) async {
+  final normalized = _normalizeCallNumberForApi(number);
+  if (normalized.isEmpty) {
+    throw Exception('Invalid phone number');
+  }
+
+  final uri = VoiceBackendConfig.callUri(normalized);
+
+  try {
+    final response = await http
+        .get(uri)
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode == 200) {
       return;
     }
 
-    var bursts = 0;
-    while (bursts < _maxCatchUpTicks && _uid != null) {
-      final last = _lastSuccessfulBillAt;
-      if (last == null) break;
-      final nextDue = last.add(CreditsPolicy.callTickInterval);
-      if (!DateTime.now().isAfter(nextDue)) break;
-
-      final uid = _uid!;
-      final balance = await FirestoreUserService.fetchUsableCredits(uid);
-      if (balance < CreditsPolicy.creditsPerCallTick) {
-        await _shutdownForInsufficientCredits();
-        break;
-      }
-
-      try {
-        await _deductWithRetry(uid);
-        _lastSuccessfulBillAt = nextDue;
-        bursts++;
-      } on InsufficientCreditsException {
-        await _shutdownForInsufficientCredits();
-        break;
-      } catch (e, st) {
-        if (kDebugMode) {
-          debugPrint('CallService catch-up failed: $e\n$st');
-        }
-        _onError?.call('$e');
-        break;
-      }
+    throw Exception(
+      'Call failed (${response.statusCode}): ${response.body}',
+    );
+  } catch (e, st) {
+    if (kDebugMode) {
+      debugPrint('makeCall error: $e\n$st');
     }
+    rethrow;
   }
+}
+
+/// Spaces stripped; leading `+` preserved, otherwise prefix `+91`.
+String _normalizeCallNumberForApi(String raw) {
+  final noSpaces = raw.replaceAll(RegExp(r'\s'), '');
+  if (noSpaces.isEmpty) return '';
+  if (noSpaces.startsWith('+')) return noSpaces;
+  return '+91$noSpaces';
 }

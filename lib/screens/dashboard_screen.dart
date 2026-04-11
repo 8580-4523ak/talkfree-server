@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'dart:math' show max;
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -9,14 +13,26 @@ import '../theme/app_colors.dart';
 import '../theme/talkfree_colors.dart';
 import '../services/ad_service.dart';
 import '../services/firestore_user_service.dart';
+import '../services/grant_reward_service.dart';
+import 'call_history_screen.dart';
 import 'dialer_screen.dart';
 import 'number_selection_screen.dart';
 import 'sms_test_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
-  const DashboardScreen({super.key, required this.user});
+  const DashboardScreen({
+    super.key,
+    required this.user,
+    this.initialNavIndex = 0,
+  }) : assert(
+          initialNavIndex >= 0 && initialNavIndex < 2,
+          'initialNavIndex must be 0 (home) or 1 (dialer)',
+        );
 
   final User user;
+
+  /// `0` = home, `1` = dialer (e.g. after value intro).
+  final int initialNavIndex;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -24,34 +40,108 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _rewardedAdBusy = false;
-  int _navIndex = 0;
+  late int _navIndex;
 
-  Future<void> _onWatchRewardedAd(int cooldownRemaining) async {
-    if (_rewardedAdBusy || cooldownRemaining > 0) return;
+  /// Client-side cooldown after a rewarded ad finishes (sync with [CreditsPolicy.adRewardCooldownSeconds]).
+  Timer? _localAdCooldownTimer;
+  int _localAdCooldownSeconds = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _navIndex = widget.initialNavIndex;
+  }
+
+  @override
+  void dispose() {
+    _localAdCooldownTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Fires when the user earned reward — before `/grant-reward` — so the button locks immediately.
+  void _startPostAdCooldown() {
+    _localAdCooldownTimer?.cancel();
+    setState(() => _localAdCooldownSeconds = CreditsPolicy.adRewardCooldownSeconds);
+    _localAdCooldownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        _localAdCooldownSeconds -= 1;
+        if (_localAdCooldownSeconds <= 0) {
+          _localAdCooldownSeconds = 0;
+          _localAdCooldownTimer?.cancel();
+          _localAdCooldownTimer = null;
+        }
+      });
+    });
+  }
+
+  int _effectiveCooldown(int firestoreCooldown) =>
+      max(firestoreCooldown, _localAdCooldownSeconds);
+
+  Future<void> _onWatchRewardedAd(
+    int cooldownRemaining,
+    bool dailyLimitReached,
+  ) async {
+    if (_rewardedAdBusy) return;
+    if (dailyLimitReached) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Limit Reached')),
+      );
+      return;
+    }
+    if (cooldownRemaining > 0) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Please wait $cooldownRemaining seconds',
+          ),
+        ),
+      );
+      return;
+    }
     setState(() => _rewardedAdBusy = true);
     try {
       final earned = await AdService.instance.loadAndShowRewardedAd();
       if (!mounted) return;
       if (earned) {
+        _startPostAdCooldown();
         try {
-          await FirestoreUserService.applyRewardedAdGrant(widget.user.uid);
+          final result = await GrantRewardService.instance.requestMinuteGrant();
+          if (!mounted) return;
+          if (result.creditsAdded > 0) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Great! +${result.creditsAdded} credits added.',
+                ),
+              ),
+            );
+          } else {
+            final more = CreditsPolicy.adsRequiredForMinuteGrant - result.adSubCounter;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Ad ${result.adSubCounter}/${CreditsPolicy.adsRequiredForMinuteGrant} logged. '
+                  '$more more for +${CreditsPolicy.creditsPerMinuteGrant} credits!',
+                ),
+              ),
+            );
+          }
+        } on GrantRewardException catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(e.message)),
+          );
+        } catch (e) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Great! +${CreditsPolicy.creditsPerRewardedAd} credits added.',
+                'Could not sync reward. Pull to refresh or try again. ($e)',
               ),
             ),
-          );
-        } on AdRewardCooldownException catch (e) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(e.message)),
-          );
-        } on AdRewardDailyCapException catch (e) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(e.message)),
           );
         }
       } else {
@@ -94,12 +184,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final displayName =
         name != null && name.isNotEmpty ? name : 'TalkFree user';
 
-    return StreamBuilder<({int adsToday, int cooldownRemaining})>(
+    return StreamBuilder<
+        ({
+          int adsToday,
+          int cooldownRemaining,
+          int cycleProgress,
+          bool dailyLimitReached,
+        })>(
       stream: FirestoreUserService.watchAdRewardStatus(widget.user.uid),
       builder: (context, coolSnap) {
         final ad = coolSnap.data;
-        final cooldownRemaining = ad?.cooldownRemaining ?? 0;
+        final firestoreCooldown = ad?.cooldownRemaining ?? 0;
+        final cooldownRemaining = _effectiveCooldown(firestoreCooldown);
         final adsToday = ad?.adsToday ?? 0;
+        final cycleProgress = ad?.cycleProgress ?? 0;
+        final dailyLimitReached = ad?.dailyLimitReached ?? false;
 
         // One body subtree at a time — no IndexedStack (avoids touch bugs on some
         // OEM builds where an invisible sibling still wins hit testing).
@@ -111,13 +210,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 rewardedAdBusy: _rewardedAdBusy,
                 cooldownRemaining: cooldownRemaining,
                 adsToday: adsToday,
-                onWatchRewardedAd: () =>
-                    _onWatchRewardedAd(cooldownRemaining),
+                cycleProgress: cycleProgress,
+                dailyLimitReached: dailyLimitReached,
+                onWatchRewardedAd: () => _onWatchRewardedAd(
+                  cooldownRemaining,
+                  dailyLimitReached,
+                ),
                 onGoToDialer: () => setState(() => _navIndex = 1),
               )
             : DialerScreen(
                 key: const ValueKey<Object>('talkfree_dialer'),
                 user: widget.user,
+                onEarnMinutes: () => _onWatchRewardedAd(
+                  cooldownRemaining,
+                  dailyLimitReached,
+                ),
+                rewardedAdBusy: _rewardedAdBusy,
+                cooldownRemaining: cooldownRemaining,
+                rewardCycleProgress: cycleProgress,
+                rewardDailyLimitReached: dailyLimitReached,
               );
 
         return Scaffold(
@@ -126,6 +237,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       appBar: AppBar(
         title: Text(_navIndex == 0 ? 'Dashboard' : 'Dialer'),
         actions: [
+          IconButton(
+            tooltip: 'Call history',
+            icon: const Icon(Icons.history_rounded),
+            onPressed: () {
+              Navigator.of(context).push<void>(
+                MaterialPageRoute<void>(
+                  builder: (_) => CallHistoryScreen(user: widget.user),
+                ),
+              );
+            },
+          ),
           IconButton(
             tooltip: 'Chat',
             icon: const Icon(Icons.chat_bubble_outline_rounded),
@@ -159,7 +281,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: _EarnCreditsFloatingAction(
                     busy: _rewardedAdBusy,
                     cooldownRemaining: cooldownRemaining,
-                    onPressed: () => _onWatchRewardedAd(cooldownRemaining),
+                    cycleProgress: cycleProgress,
+                    dailyLimitReached: dailyLimitReached,
+                    onPressed: () => _onWatchRewardedAd(
+                      cooldownRemaining,
+                      dailyLimitReached,
+                    ),
                     onDebugLongPress: kDebugMode ? _debugAddCredits : null,
                   ),
                 )
@@ -199,6 +326,8 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.rewardedAdBusy,
     required this.cooldownRemaining,
     required this.adsToday,
+    required this.cycleProgress,
+    required this.dailyLimitReached,
     required this.onWatchRewardedAd,
     required this.onGoToDialer,
   });
@@ -209,6 +338,8 @@ class _DashboardHomeTab extends StatefulWidget {
   final bool rewardedAdBusy;
   final int cooldownRemaining;
   final int adsToday;
+  final int cycleProgress;
+  final bool dailyLimitReached;
   final Future<void> Function() onWatchRewardedAd;
   final VoidCallback onGoToDialer;
 
@@ -344,13 +475,15 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
             _WatchAdCtaButton(
               busy: widget.rewardedAdBusy,
               cooldownRemaining: widget.cooldownRemaining,
+              cycleProgress: widget.cycleProgress,
+              dailyLimitReached: widget.dailyLimitReached,
               onPressed: () {
                 widget.onWatchRewardedAd();
               },
             ),
             const SizedBox(height: 10),
             Text(
-              'Watch ${CreditsPolicy.adsPerMinute} ads = 1 minute',
+              'Watch ${CreditsPolicy.adsRequiredForMinuteGrant} ads = 1 minute (${CreditsPolicy.creditsPerMinuteGrant} credits)',
               textAlign: TextAlign.center,
               style: GoogleFonts.montserrat(
                 fontSize: 13,
@@ -806,12 +939,16 @@ class _EarnCreditsFloatingAction extends StatelessWidget {
   const _EarnCreditsFloatingAction({
     required this.busy,
     required this.cooldownRemaining,
+    required this.cycleProgress,
+    required this.dailyLimitReached,
     required this.onPressed,
     this.onDebugLongPress,
   });
 
   final bool busy;
   final int cooldownRemaining;
+  final int cycleProgress;
+  final bool dailyLimitReached;
   final VoidCallback onPressed;
   final Future<void> Function()? onDebugLongPress;
 
@@ -820,14 +957,14 @@ class _EarnCreditsFloatingAction extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final borderRadius = BorderRadius.circular(_radius);
-    final locked = busy || cooldownRemaining > 0;
+    final p = cycleProgress.clamp(0, CreditsPolicy.adsRequiredForMinuteGrant);
     return Material(
       color: Colors.transparent,
       elevation: 0,
       shadowColor: Colors.transparent,
       child: InkWell(
-        onTap: locked ? null : onPressed,
-        onLongPress: (onDebugLongPress != null && !locked)
+        onTap: (busy || dailyLimitReached || cooldownRemaining > 0) ? null : onPressed,
+        onLongPress: (onDebugLongPress != null && !busy)
             ? () {
                 onDebugLongPress!();
               }
@@ -865,57 +1002,121 @@ class _EarnCreditsFloatingAction extends StatelessWidget {
                         ),
                       ],
                     )
-                  : cooldownRemaining > 0
+                  : dailyLimitReached
                       ? Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(
-                              Icons.timer_outlined,
-                              color: Colors.white.withValues(alpha: 0.85),
-                              size: 26,
+                              Icons.block_rounded,
+                              color: Colors.white.withValues(alpha: 0.8),
+                              size: 22,
                             ),
-                            const SizedBox(width: 10),
+                            const SizedBox(width: 8),
                             Text(
-                              'Next ad in ${cooldownRemaining}s',
+                              'Limit Reached',
                               style: GoogleFonts.montserrat(
-                                fontSize: 14,
+                                fontSize: 13,
                                 fontWeight: FontWeight.w800,
-                                letterSpacing: 0.12,
-                                color: Colors.white.withValues(alpha: 0.92),
+                                color: Colors.white.withValues(alpha: 0.9),
                               ),
                             ),
                           ],
                         )
-                      : Row(
+                  : cooldownRemaining > 0
+                      ? Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(
-                              Icons.play_circle_filled_rounded,
-                              color: Colors.white.withValues(alpha: 0.98),
-                              size: 28,
-                              shadows: [
-                                Shadow(
-                                  color: Colors.black.withValues(alpha: 0.25),
-                                  blurRadius: 5,
-                                  offset: const Offset(0, 2),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.timer_outlined,
+                                  color: Colors.white.withValues(alpha: 0.85),
+                                  size: 26,
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  'Next ad in ${cooldownRemaining}s',
+                                  style: GoogleFonts.montserrat(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.12,
+                                    color: Colors.white.withValues(alpha: 0.92),
+                                  ),
                                 ),
                               ],
                             ),
-                            const SizedBox(width: 10),
+                            const SizedBox(height: 6),
                             Text(
-                              'Earn Credits 🎁',
+                              'Ad $p/${CreditsPolicy.adsRequiredForMinuteGrant} watched',
                               style: GoogleFonts.montserrat(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0.12,
-                                color: Colors.white,
-                                shadows: [
-                                  Shadow(
-                                    color: Colors.black.withValues(alpha: 0.28),
-                                    blurRadius: 7,
-                                    offset: const Offset(0, 2),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white.withValues(alpha: 0.75),
+                              ),
+                            ),
+                          ],
+                        )
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.play_circle_filled_rounded,
+                                  color: Colors.white.withValues(alpha: 0.98),
+                                  size: 28,
+                                  shadows: [
+                                    Shadow(
+                                      color: Colors.black.withValues(alpha: 0.25),
+                                      blurRadius: 5,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  'Earn Credits 🎁',
+                                  style: GoogleFonts.montserrat(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.12,
+                                    color: Colors.white,
+                                    shadows: [
+                                      Shadow(
+                                        color: Colors.black.withValues(alpha: 0.28),
+                                        blurRadius: 7,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
                                   ),
-                                ],
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            SizedBox(
+                              width: 200,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(3),
+                                child: LinearProgressIndicator(
+                                  value: p /
+                                      CreditsPolicy.adsRequiredForMinuteGrant,
+                                  minHeight: 4,
+                                  backgroundColor:
+                                      Colors.white.withValues(alpha: 0.2),
+                                  color: Colors.white.withValues(alpha: 0.9),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Ad $p/${CreditsPolicy.adsRequiredForMinuteGrant} watched',
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.montserrat(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white.withValues(alpha: 0.8),
                               ),
                             ),
                           ],
@@ -932,11 +1133,15 @@ class _WatchAdCtaButton extends StatefulWidget {
   const _WatchAdCtaButton({
     required this.busy,
     required this.cooldownRemaining,
+    required this.cycleProgress,
+    required this.dailyLimitReached,
     required this.onPressed,
   });
 
   final bool busy;
   final int cooldownRemaining;
+  final int cycleProgress;
+  final bool dailyLimitReached;
   final VoidCallback onPressed;
 
   @override
@@ -961,7 +1166,10 @@ class _WatchAdCtaButtonState extends State<_WatchAdCtaButton>
   late final Animation<double> _iconScale = Tween<double>(begin: 1.0, end: 1.14)
       .animate(CurvedAnimation(parent: _iconCtrl, curve: Curves.easeInOutCubic));
 
-  bool get _idle => !widget.busy && widget.cooldownRemaining <= 0;
+  bool get _idle =>
+      !widget.busy &&
+      widget.cooldownRemaining <= 0 &&
+      !widget.dailyLimitReached;
 
   @override
   void initState() {
@@ -976,7 +1184,8 @@ class _WatchAdCtaButtonState extends State<_WatchAdCtaButton>
   void didUpdateWidget(covariant _WatchAdCtaButton oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.busy != oldWidget.busy ||
-        widget.cooldownRemaining != oldWidget.cooldownRemaining) {
+        widget.cooldownRemaining != oldWidget.cooldownRemaining ||
+        widget.dailyLimitReached != oldWidget.dailyLimitReached) {
       if (_idle) {
         _pulseCtrl.repeat(reverse: true);
         _iconCtrl.repeat(reverse: true);
@@ -1012,13 +1221,21 @@ class _WatchAdCtaButtonState extends State<_WatchAdCtaButton>
   @override
   Widget build(BuildContext context) {
     final br = BorderRadius.circular(_radius);
-    final locked = widget.busy || widget.cooldownRemaining > 0;
+    final progress = widget.cycleProgress.clamp(
+          0,
+          CreditsPolicy.adsRequiredForMinuteGrant,
+        ) /
+        CreditsPolicy.adsRequiredForMinuteGrant;
     return Material(
       color: Colors.transparent,
       elevation: 0,
       shadowColor: Colors.transparent,
       child: InkWell(
-        onTap: locked ? null : widget.onPressed,
+        onTap: (widget.busy ||
+                widget.dailyLimitReached ||
+                widget.cooldownRemaining > 0)
+            ? null
+            : widget.onPressed,
         borderRadius: br,
         splashColor: Colors.white.withValues(alpha: 0.22),
         highlightColor: Colors.white.withValues(alpha: 0.1),
@@ -1066,6 +1283,29 @@ class _WatchAdCtaButtonState extends State<_WatchAdCtaButton>
                           ),
                         ],
                       )
+                    : widget.dailyLimitReached
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.block_rounded,
+                                color: Colors.white.withValues(alpha: 0.75),
+                                size: 28,
+                              ),
+                              const SizedBox(width: 10),
+                              Flexible(
+                                child: Text(
+                                  'Limit Reached',
+                                  textAlign: TextAlign.center,
+                                  style: GoogleFonts.montserrat(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white.withValues(alpha: 0.85),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          )
                     : widget.cooldownRemaining > 0
                         ? Row(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -1093,38 +1333,67 @@ class _WatchAdCtaButtonState extends State<_WatchAdCtaButton>
                               ),
                             ],
                           )
-                        : Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
+                        : Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              ScaleTransition(
-                                scale: _iconScale,
-                                child: Icon(
-                                  Icons.play_circle_filled_rounded,
-                                  color: Colors.white,
-                                  size: 32,
-                                  shadows: const [
-                                    Shadow(
-                                      color: Color(0x73000000),
-                                      blurRadius: 8,
-                                      offset: Offset(0, 2),
-                                    ),
-                                  ],
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: LinearProgressIndicator(
+                                  value: progress,
+                                  minHeight: 5,
+                                  backgroundColor:
+                                      Colors.white.withValues(alpha: 0.2),
+                                  color: Colors.white.withValues(alpha: 0.92),
                                 ),
                               ),
-                              const SizedBox(width: 12),
-                              Flexible(
-                                child: Text(
-                                  'Watch Ad → Get Free Credits 🎁',
-                                  textAlign: TextAlign.center,
-                                  maxLines: 2,
-                                  style: GoogleFonts.montserrat(
-                                    fontSize: 17,
-                                    fontWeight: FontWeight.w900,
-                                    height: 1.25,
-                                    letterSpacing: 0.2,
-                                    color: Colors.white,
-                                    shadows: _ctaTextShadows,
+                              const SizedBox(height: 12),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  ScaleTransition(
+                                    scale: _iconScale,
+                                    child: Icon(
+                                      Icons.play_circle_filled_rounded,
+                                      color: Colors.white,
+                                      size: 32,
+                                      shadows: const [
+                                        Shadow(
+                                          color: Color(0x73000000),
+                                          blurRadius: 8,
+                                          offset: Offset(0, 2),
+                                        ),
+                                      ],
+                                    ),
                                   ),
+                                  const SizedBox(width: 12),
+                                  Flexible(
+                                    child: Text(
+                                      'Watch Ad → Get Free Credits 🎁',
+                                      textAlign: TextAlign.center,
+                                      maxLines: 2,
+                                      style: GoogleFonts.montserrat(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w900,
+                                        height: 1.25,
+                                        letterSpacing: 0.2,
+                                        color: Colors.white,
+                                        shadows: _ctaTextShadows,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'Ad ${widget.cycleProgress}/${CreditsPolicy.adsRequiredForMinuteGrant} watched. ${CreditsPolicy.adsRequiredForMinuteGrant - widget.cycleProgress} more for 1 min!',
+                                textAlign: TextAlign.center,
+                                maxLines: 2,
+                                style: GoogleFonts.montserrat(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.3,
+                                  color: Colors.white.withValues(alpha: 0.88),
                                 ),
                               ),
                             ],
@@ -1148,10 +1417,12 @@ class _WalletCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<int>(
-      stream: FirestoreUserService.watchCredits(uid),
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: FirestoreUserService.watchUserDocument(uid),
       builder: (context, snapshot) {
-        final credits = snapshot.data ?? 0;
+        final credits = snapshot.hasData
+            ? FirestoreUserService.usableCreditsFromSnapshot(snapshot.data!)
+            : 0;
 
         return Container(
           width: double.infinity,

@@ -1,9 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 
-const Color premiumDialBackground = Color(0xFF0F172A);
-const Color premiumDialKeyFill = Color(0xFF1E293B);
+/// Elite dark shell + vibrant green accent (TalkFree premium dialer).
+const Color premiumDialBackground = Color(0xFF06090D);
+const Color premiumDialKeyFill = Color(0xFF121A22);
 const Color premiumDialCallGreen = Color(0xFF00D084);
+
+TextStyle eliteDialDigitStyle(double fontSize) => GoogleFonts.inter(
+      fontSize: fontSize,
+      fontWeight: FontWeight.w400,
+      color: Colors.white,
+      height: 1.0,
+      letterSpacing: 0.35,
+    );
+
+TextStyle eliteDialLettersStyle(double fontSize) => GoogleFonts.inter(
+      fontSize: fontSize,
+      fontWeight: FontWeight.w600,
+      letterSpacing: 1.15,
+      color: Colors.white.withValues(alpha: 0.42),
+      height: 1.0,
+    );
 
 class PremiumDialKeyData {
   const PremiumDialKeyData(this.digit, this.letters);
@@ -45,8 +63,7 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
   }
 
   Future<void> _tap() async {
-    HapticFeedback.lightImpact();
-    SystemSound.play(SystemSoundType.click);
+    HapticFeedback.selectionClick();
     await _c.forward();
     await _c.reverse();
     widget.onPressed();
@@ -54,8 +71,7 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
 
   Future<void> _longPress() async {
     if (widget.onLongPress == null) return;
-    HapticFeedback.lightImpact();
-    SystemSound.play(SystemSoundType.click);
+    HapticFeedback.mediumImpact();
     await _c.forward();
     await _c.reverse();
     widget.onLongPress!();
@@ -73,57 +89,96 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
           onLongPress:
               widget.onLongPress == null ? null : () => _longPress(),
           borderRadius: BorderRadius.circular(r),
-          splashColor: Colors.white.withValues(alpha: 0.08),
-          highlightColor: Colors.white.withValues(alpha: 0.04),
-          child: Ink(
-            height: widget.height,
-            decoration: BoxDecoration(
-              color: premiumDialKeyFill,
-              borderRadius: BorderRadius.circular(r),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.45),
-                  blurRadius: 8,
-                  offset: const Offset(0, 4),
-                ),
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.2),
-                  blurRadius: 2,
-                  offset: const Offset(0, 1),
-                ),
-              ],
-            ),
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    widget.data.digit,
-                    style: const TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.w300,
-                      color: Colors.white,
-                      height: 1.0,
-                    ),
+          splashColor: premiumDialCallGreen.withValues(alpha: 0.18),
+          highlightColor: premiumDialCallGreen.withValues(alpha: 0.08),
+          child: AnimatedBuilder(
+            animation: _c,
+            builder: (context, child) {
+              final p = CurvedAnimation(
+                parent: _c,
+                curve: Curves.easeOutCubic,
+              ).value;
+              final innerA = 0.035 + p * 0.38;
+              final borderA = 0.06 + p * 0.42;
+              return Ink(
+                height: widget.height,
+                decoration: BoxDecoration(
+                  color: premiumDialKeyFill,
+                  borderRadius: BorderRadius.circular(r),
+                  border: Border.all(
+                    color: premiumDialCallGreen.withValues(alpha: borderA),
                   ),
-                  if (widget.data.letters.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      widget.data.letters,
-                      style: TextStyle(
-                        fontSize: 9,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 1.2,
-                        color: Colors.white.withValues(alpha: 0.45),
-                        height: 1.0,
-                      ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.42),
+                      blurRadius: 10,
+                      offset: const Offset(0, 5),
                     ),
-                  ] else
-                    const SizedBox(height: 11),
-                ],
-              ),
-            ),
+                    BoxShadow(
+                      color: premiumDialCallGreen.withValues(alpha: 0.05 + p * 0.35),
+                      blurRadius: 14 + p * 8,
+                      spreadRadius: p * 1.2,
+                      offset: Offset(0, 4 - p * 2),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(r),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: RadialGradient(
+                            center: const Alignment(-0.35, -0.45),
+                            radius: 1.05,
+                            colors: [
+                              premiumDialCallGreen.withValues(alpha: innerA),
+                              premiumDialCallGreen.withValues(alpha: innerA * 0.25),
+                              Colors.transparent,
+                            ],
+                            stops: const [0.0, 0.42, 1.0],
+                          ),
+                        ),
+                      ),
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: RadialGradient(
+                            center: Alignment.bottomRight,
+                            radius: 1.2,
+                            colors: [
+                              Colors.white.withValues(alpha: 0.03 + p * 0.06),
+                              Colors.transparent,
+                            ],
+                            stops: const [0.0, 0.55],
+                          ),
+                        ),
+                      ),
+                      Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              widget.data.digit,
+                              style: eliteDialDigitStyle(26),
+                            ),
+                            if (widget.data.letters.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                widget.data.letters,
+                                style: eliteDialLettersStyle(9),
+                              ),
+                            ] else
+                              const SizedBox(height: 11),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
         ),
       ),
@@ -257,19 +312,25 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
       borderRadius: br,
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.38),
+          color: Colors.black.withValues(alpha: 0.32),
           blurRadius: 14,
           spreadRadius: 0,
           offset: const Offset(0, 6),
         ),
         BoxShadow(
-          color: premiumDialCallGreen.withValues(alpha: 0.32),
-          blurRadius: 20,
-          spreadRadius: 0,
+          color: premiumDialCallGreen.withValues(alpha: 0.18),
+          blurRadius: 18,
+          spreadRadius: -2,
+          offset: const Offset(0, 10),
+        ),
+        BoxShadow(
+          color: premiumDialCallGreen.withValues(alpha: 0.14),
+          blurRadius: 16,
+          spreadRadius: -4,
           offset: const Offset(0, 8),
         ),
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.12),
+          color: Colors.black.withValues(alpha: 0.1),
           blurRadius: 6,
           offset: const Offset(0, 2),
         ),
@@ -333,7 +394,7 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
                               const SizedBox(width: 10),
                               Text(
                                 'Call',
-                                style: TextStyle(
+                                style: GoogleFonts.inter(
                                   fontSize: 18,
                                   fontWeight: FontWeight.w600,
                                   letterSpacing: 0.3,

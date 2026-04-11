@@ -7,7 +7,7 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import 'config/twilio_env.dart';
 import 'theme/app_theme.dart';
-import 'screens/app_bootstrap.dart';
+import 'screens/app_root.dart';
 import 'screens/number_selection_screen.dart';
 
 Future<void> main() async {
@@ -47,7 +47,7 @@ class TalkFreeApp extends StatelessWidget {
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),
       themeMode: ThemeMode.dark,
-      home: const AppBootstrap(),
+      home: const TalkFreeRoot(),
       onGenerateRoute: (RouteSettings settings) {
         if (settings.name == NumberSelectionScreen.routeName) {
           return NumberSelectionScreen.createRoute(settings);

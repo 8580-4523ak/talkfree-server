@@ -444,8 +444,14 @@ app.post("/call-status", async (req, res) => {
   }
 
   const durationSec = parseTwilioDurationSeconds(body);
+  /** Full minutes billed (Twilio duration is seconds). */
   const billedMinutes = Math.ceil(durationSec / 60);
-  const creditsAttempted = billedMinutes * CALL_CREDITS_PER_MINUTE;
+  /** Strict: at least one minute rate even for sub-minute / zero-duration completions. */
+  const finalCharge = Math.max(
+    CALL_CREDITS_PER_MINUTE,
+    billedMinutes * CALL_CREDITS_PER_MINUTE,
+  );
+  const creditsAttempted = finalCharge;
   const from = String(body.From || "");
   const to = String(body.To || "");
 
@@ -482,7 +488,7 @@ app.post("/call-status", async (req, res) => {
       }
 
       let usable = paid + reward;
-      const charge = creditsAttempted;
+      const charge = finalCharge;
       let creditsCharged = 0;
       if (charge > 0 && usable > 0) {
         creditsCharged = usable < charge ? usable : charge;
@@ -514,6 +520,7 @@ app.post("/call-status", async (req, res) => {
           durationSeconds: durationSec,
           billedMinutes,
           creditsPerMinute: CALL_CREDITS_PER_MINUTE,
+          finalCharge,
           creditsAttempted: charge,
           creditsCharged,
           partialDeduction: charge > 0 && creditsCharged < charge,

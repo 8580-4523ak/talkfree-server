@@ -54,5 +54,8 @@ class TwilioVoipFacade {
 
   Future<bool?> hangUp() => TwilioVoice.instance.call.hangUp();
 
+  /// Available after ringing / connect (see Twilio Voice plugin).
+  Future<String?> getActiveCallSid() => TwilioVoice.instance.call.getSid();
+
   Stream<CallEvent> get callEvents => TwilioVoice.instance.callEventsListener;
 }

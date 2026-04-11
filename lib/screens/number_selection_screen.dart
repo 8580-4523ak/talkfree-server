@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../models/virtual_number.dart';
@@ -265,11 +266,12 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
       appBar: AppBar(
         title: const Text('Choose your number'),
       ),
-      body: StreamBuilder<int>(
-        stream: FirestoreUserService.watchCredits(widget.userUid),
-        initialData: widget.userCredits,
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: FirestoreUserService.watchUserDocument(widget.userUid),
         builder: (context, creditSnap) {
-          final credits = creditSnap.data ?? widget.userCredits;
+          final credits = creditSnap.hasData
+              ? FirestoreUserService.usableCreditsFromSnapshot(creditSnap.data!)
+              : widget.userCredits;
 
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,

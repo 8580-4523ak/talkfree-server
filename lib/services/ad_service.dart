@@ -3,7 +3,17 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
-/// Loads and shows Google [RewardedAd] (Google test unit IDs by default).
+import '../config/credits_policy.dart';
+
+/// AdMob **Rewarded** ads — load/show only.
+///
+/// [loadAndShowRewardedAd] completes with **`true` only if** the user earned the
+/// reward ([RewardedAd] `onUserEarnedReward`). If they close the ad early or
+/// the load/show fails, it returns **`false`**.
+///
+/// **Call `POST /grant-reward` only after `true`** — the UI starts a
+/// [CreditsPolicy.adRewardCooldownSeconds] client cooldown when an ad completes
+/// with reward; the server also enforces the same gap via `last_ad_timestamp`.
 class AdService {
   AdService._();
   static final AdService instance = AdService._();

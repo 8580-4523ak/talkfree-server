@@ -12,14 +12,14 @@ class InsufficientCreditsException implements Exception {
 }
 
 class AdRewardCooldownException implements Exception {
-  AdRewardCooldownException([this.message = 'Wait before watching another ad.']);
+  AdRewardCooldownException([this.message = 'Please wait before the next ad.']);
   final String message;
   @override
   String toString() => message;
 }
 
 class AdRewardDailyCapException implements Exception {
-  AdRewardDailyCapException([this.message = 'Daily ad limit reached.']);
+  AdRewardDailyCapException([this.message = 'Daily Limit Reached']);
   final String message;
   @override
   String toString() => message;
@@ -40,6 +40,26 @@ class FirestoreUserService {
   }
 
   static Timestamp? _ts(Map<String, dynamic> d, String k) => d[k] as Timestamp?;
+
+  /// Canonical reward fields (see `firestore_schema.md`). Falls back to legacy keys.
+  static int _readAdProgress(Map<String, dynamic> m) {
+    if (m.containsKey('ad_progress')) return _int(m['ad_progress']);
+    return _int(m['adRewardCycleCount']);
+  }
+
+  static int _readAdsWatchedToday(Map<String, dynamic> m, String dayKey) {
+    final reset =
+        m['last_reset_date'] as String? ?? m['adRewardsDayKey'] as String? ?? '';
+    if (reset != dayKey) return 0;
+    if (m.containsKey('ads_watched_today')) return _int(m['ads_watched_today']);
+    return _int(m['adRewardsCount']);
+  }
+
+  static Timestamp? _readLastAdTimestamp(Map<String, dynamic> m) {
+    final a = m['last_ad_timestamp'];
+    if (a is Timestamp) return a;
+    return m['lastAdRewardAt'] as Timestamp?;
+  }
 
   static void _migrateLegacyInPlace(Map<String, dynamic> d) {
     if (d.containsKey('paidCredits')) return;
@@ -62,6 +82,18 @@ class FirestoreUserService {
     if (reward > 0 && _rewardExpired(d)) reward = 0;
     return paid + reward;
   }
+
+  /// Real-time user document — use for credits UI synced everywhere.
+  static Stream<DocumentSnapshot<Map<String, dynamic>>> watchUserDocument(
+    String uid,
+  ) =>
+      _userRef(uid).snapshots();
+
+  /// Usable credits from a snapshot (same rules as [computeUsableCredits], no extra round-trip).
+  static int usableCreditsFromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) =>
+      computeUsableCredits(doc.data());
 
   static Future<void> expireRewardCreditsIfNeeded(String uid) async {
     await _db.runTransaction((tx) async {
@@ -93,8 +125,13 @@ class FirestoreUserService {
         'paidCredits': 0,
         'rewardCredits': 0,
         'number': 'none',
+        'ad_progress': 0,
+        'ads_watched_today': 0,
+        'last_reset_date': '',
+        'last_ad_timestamp': null,
         'adRewardsCount': 0,
         'adRewardsDayKey': '',
+        'adRewardCycleCount': 0,
         'createdAt': FieldValue.serverTimestamp(),
       });
       return;
@@ -105,14 +142,26 @@ class FirestoreUserService {
       await ref.update({
         'paidCredits': legacy,
         'rewardCredits': 0,
+        'ad_progress': d['ad_progress'] ?? d['adRewardCycleCount'] ?? 0,
+        'ads_watched_today': d['ads_watched_today'] ?? d['adRewardsCount'] ?? 0,
+        'last_reset_date':
+            d['last_reset_date'] ?? d['adRewardsDayKey'] ?? '',
         'adRewardsCount': d['adRewardsCount'] ?? 0,
         'adRewardsDayKey': d['adRewardsDayKey'] ?? '',
+        'adRewardCycleCount': d['adRewardCycleCount'] ?? 0,
       });
     }
   }
 
-  /// +[CreditsPolicy.creditsPerRewardedAd] to [rewardCredits], cooldown, daily cap, 24h expiry.
-  static Future<void> applyRewardedAdGrant(String uid) async {
+  /// Records one rewarded-ad view: daily cap, cooldown, sub-counter toward 4 ads.
+  /// If [serverGrantNeeded] is true, call [GrantRewardService.requestMinuteGrant].
+  static Future<
+      ({
+        bool serverGrantNeeded,
+        int cycleProgress,
+      })> registerRewardedAdWatch(String uid) async {
+    var serverGrantNeeded = false;
+    var cycleProgressOut = 0;
     await _db.runTransaction((tx) async {
       final ref = _userRef(uid);
       final snap = await tx.get(ref);
@@ -120,31 +169,24 @@ class FirestoreUserService {
       final m = Map<String, dynamic>.from(snap.data()!);
       _migrateLegacyInPlace(m);
 
-      var paid = _int(m['paidCredits']);
-      var reward = _int(m['rewardCredits']);
-      var exp = _ts(m, 'rewardCreditsExpiresAt');
-
-      if (reward > 0 && _rewardExpired(m)) {
-        reward = 0;
-        exp = null;
-      }
-
       final now = DateTime.now().toUtc();
       final dayKey =
           '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
 
-      var count = _int(m['adRewardsCount']);
-      var storedDay = m['adRewardsDayKey'] as String? ?? '';
+      var count = _readAdsWatchedToday(m, dayKey);
+      var storedDay =
+          m['last_reset_date'] as String? ?? m['adRewardsDayKey'] as String? ?? '';
       if (storedDay != dayKey) {
         count = 0;
         storedDay = dayKey;
       }
 
-      final lastTs = _ts(m, 'lastAdRewardAt');
+      final lastTs = _readLastAdTimestamp(m);
       if (lastTs != null) {
         final elapsed = now.difference(lastTs.toDate().toUtc()).inSeconds;
         if (elapsed < CreditsPolicy.adRewardCooldownSeconds) {
-          throw AdRewardCooldownException();
+          final wait = CreditsPolicy.adRewardCooldownSeconds - elapsed;
+          throw AdRewardCooldownException('Please wait $wait seconds');
         }
       }
 
@@ -152,19 +194,29 @@ class FirestoreUserService {
         throw AdRewardDailyCapException();
       }
 
-      reward += CreditsPolicy.creditsPerRewardedAd;
-      exp = Timestamp.fromDate(now.add(CreditsPolicy.freeRewardCreditTtl));
+      var cycle = _readAdProgress(m);
+      cycle += 1;
+      if (cycle >= CreditsPolicy.adsRequiredForMinuteGrant) {
+        cycle = 0;
+        serverGrantNeeded = true;
+      }
+      cycleProgressOut = cycle;
 
       tx.update(ref, {
-        'paidCredits': paid,
-        'rewardCredits': reward,
-        'rewardCreditsExpiresAt': exp,
-        'credits': paid + reward,
+        'ad_progress': cycle,
+        'ads_watched_today': count + 1,
+        'last_reset_date': storedDay,
+        'last_ad_timestamp': FieldValue.serverTimestamp(),
+        'adRewardCycleCount': cycle,
         'adRewardsCount': count + 1,
         'adRewardsDayKey': storedDay,
         'lastAdRewardAt': FieldValue.serverTimestamp(),
       });
     });
+    return (
+      serverGrantNeeded: serverGrantNeeded,
+      cycleProgress: cycleProgressOut,
+    );
   }
 
   static Future<void> addPaidCredits(String uid, int amount) async {
@@ -243,42 +295,68 @@ class FirestoreUserService {
     return computeUsableCredits(snap.data());
   }
 
+  /// Live usable total — maps [watchUserDocument] (Firestore pushes; stays in sync across screens).
   static Stream<int> watchCredits(String uid) {
-    return _userRef(uid).snapshots().asyncMap((doc) async {
-      if (!doc.exists) return 0;
-      await expireRewardCreditsIfNeeded(uid);
-      final fresh = await _userRef(uid).get();
-      return computeUsableCredits(fresh.data());
-    });
+    return watchUserDocument(uid).map(usableCreditsFromSnapshot);
   }
 
-  static ({int adsToday, int cooldownRemaining}) _adRewardStatusFromSnap(
+  static ({
+    int adsToday,
+    int cooldownRemaining,
+    int cycleProgress,
+    bool dailyLimitReached,
+  }) _adRewardStatusFromSnap(
     DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
-    if (!doc.exists) return (adsToday: 0, cooldownRemaining: 0);
+    if (!doc.exists) {
+      return (
+        adsToday: 0,
+        cooldownRemaining: 0,
+        cycleProgress: 0,
+        dailyLimitReached: false,
+      );
+    }
     final m = doc.data()!;
     final now = DateTime.now().toUtc();
     final dayKey =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-    final storedDay = m['adRewardsDayKey'] as String? ?? '';
-    final count = storedDay == dayKey ? _int(m['adRewardsCount']) : 0;
+    final count = _readAdsWatchedToday(m, dayKey);
+    final cycleProgress = _readAdProgress(m);
 
     var cool = 0;
-    final last = _ts(m, 'lastAdRewardAt');
+    final last = _readLastAdTimestamp(m);
     if (last != null) {
       final elapsed = now.difference(last.toDate().toUtc()).inSeconds;
       if (elapsed < CreditsPolicy.adRewardCooldownSeconds) {
         cool = CreditsPolicy.adRewardCooldownSeconds - elapsed;
       }
     }
-    return (adsToday: count, cooldownRemaining: cool);
+    final cap = CreditsPolicy.maxRewardedAdsPerDay;
+    final dailyLimitReached = count >= cap;
+    return (
+      adsToday: count,
+      cooldownRemaining: cool,
+      cycleProgress: cycleProgress,
+      dailyLimitReached: dailyLimitReached,
+    );
   }
 
-  static Stream<({int adsToday, int cooldownRemaining})> watchAdRewardStatus(
+  static Stream<
+      ({
+        int adsToday,
+        int cooldownRemaining,
+        int cycleProgress,
+        bool dailyLimitReached,
+      })> watchAdRewardStatus(
     String uid,
   ) {
     return Stream.multi((listener) {
-      listener.add((adsToday: 0, cooldownRemaining: 0));
+      listener.add((
+        adsToday: 0,
+        cooldownRemaining: 0,
+        cycleProgress: 0,
+        dailyLimitReached: false,
+      ));
       DocumentSnapshot<Map<String, dynamic>>? latest;
       Timer? timer;
       late final StreamSubscription<DocumentSnapshot<Map<String, dynamic>>> sub;
@@ -328,4 +406,15 @@ class FirestoreUserService {
       'number': e164,
     });
   }
+
+  /// Outbound call rows — written by server Twilio `/call-status` (`settledAt`, `to`, etc.).
+  static Stream<QuerySnapshot<Map<String, dynamic>>> watchCallHistory(
+    String uid, {
+    int limit = 100,
+  }) =>
+      _userRef(uid)
+          .collection('call_history')
+          .orderBy('settledAt', descending: true)
+          .limit(limit)
+          .snapshots();
 }

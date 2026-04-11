@@ -1,22 +1,32 @@
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-
+/// Production TalkFree voice API on Render — single source of truth (no env/ngrok overrides).
 abstract final class VoiceBackendConfig {
   VoiceBackendConfig._();
 
-  /// Default when `VOICE_BACKEND_BASE_URL` is unset (e.g. ngrok for local server).
-  static const String _defaultBaseUrl =
-      'https://649b-223-181-96-18.ngrok-free.app';
+  static const String _host = 'talkfree-server.onrender.com';
 
-  /// Base URL only, no trailing slash. `.env` overrides default.
-  static String get baseUrl {
-    final v = dotenv.env['VOICE_BACKEND_BASE_URL']?.trim();
-    final raw = (v != null && v.isNotEmpty) ? v : _defaultBaseUrl;
-    return raw.replaceAll(RegExp(r'/$'), '');
+  /// `https://talkfree-server.onrender.com` (no trailing slash).
+  static const String productionOrigin = 'https://talkfree-server.onrender.com';
+
+  /// Base URL only, no trailing slash.
+  static String get baseUrl => productionOrigin;
+
+  /// `GET /call?to=<number>` — query built with [Uri.https] so `+` encodes correctly.
+  static Uri callUri(String to) {
+    return Uri.https(_host, '/call', <String, String>{'to': to});
   }
 
+  /// `GET /token?identity=<id>` for Twilio Voice access token.
   static Uri tokenUri(String identity) {
-    return Uri.parse('$baseUrl/token').replace(
-      queryParameters: {'identity': identity},
+    return Uri.https(
+      _host,
+      '/token',
+      <String, String>{'identity': identity},
     );
   }
+
+  /// `POST /grant-reward` — Firebase ID token in `Authorization` (server adds credits).
+  static Uri grantRewardUri() => Uri.https(_host, '/grant-reward');
+
+  /// `POST /terminate-call` — JSON `{ "callSid": "CA..." }` when balance cannot cover talk time.
+  static Uri terminateCallUri() => Uri.https(_host, '/terminate-call');
 }

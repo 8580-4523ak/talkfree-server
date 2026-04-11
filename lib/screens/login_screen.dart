@@ -1,12 +1,18 @@
+import 'dart:math' as math;
+import 'dart:ui';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:lottie/lottie.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../auth_service.dart';
 import '../config/legal_urls.dart';
 import '../theme/app_colors.dart';
-import '../theme/talkfree_colors.dart';
+
+/// Vibrant green accent — matches dialer / intro.
+const Color _neon = Color(0xFF00D084);
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -15,14 +21,37 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> {
+class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin {
   bool _busy = false;
-  final _phoneController = TextEditingController();
-  String _countryCode = '+91';
+
+  late final AnimationController _drift = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 28),
+  )..repeat();
+
+  late final AnimationController _lines = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 10),
+  )..repeat();
+
+  late final AnimationController _textStagger = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1800),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _textStagger.forward();
+    });
+  }
 
   @override
   void dispose() {
-    _phoneController.dispose();
+    _drift.dispose();
+    _lines.dispose();
+    _textStagger.dispose();
     super.dispose();
   }
 
@@ -31,19 +60,6 @@ class _LoginScreenState extends State<LoginScreen> {
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
-  }
-
-  void _onSendOtp() {
-    final phone = _phoneController.text.trim();
-    if (phone.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter phone number')),
-      );
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('OTP: $_countryCode $phone (coming soon)')),
-    );
   }
 
   Future<void> _onGoogleSignIn() async {
@@ -88,390 +104,442 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  void _pickCountryCode() {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: TalkFreeColors.cardBg,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020814),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: _drift,
+              builder: (context, _) {
+                final t = _drift.value * math.pi * 2;
+                return Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment(math.cos(t) * 0.45, math.sin(t) * 0.35),
+                      end: Alignment(-math.cos(t * 0.9) * 0.4, 1.0),
+                      colors: const [
+                        Color(0xFF020814),
+                        Color(0xFF061238),
+                        Color(0xFF040A1A),
+                        Color(0xFF020A14),
+                      ],
+                      stops: const [0.0, 0.35, 0.72, 1.0],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: _drift,
+              builder: (context, _) {
+                final t = _drift.value * math.pi * 2;
+                return Transform.translate(
+                  offset: Offset(math.sin(t) * 14, math.cos(t * 0.85) * 10),
+                  child: Opacity(
+                    opacity: 0.42,
+                    child: Lottie.asset(
+                      'assets/lottie/global_map.json',
+                      fit: BoxFit.cover,
+                      repeat: true,
+                      frameRate: FrameRate.max,
+                      errorBuilder: (context, error, _) =>
+                          const SizedBox.expand(),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: _lines,
+              builder: (context, _) {
+                return CustomPaint(
+                  painter: _LoginNeonConnectionsPainter(
+                    progress: _lines.value,
+                  ),
+                );
+              },
+            ),
+          ),
+          SafeArea(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minHeight: constraints.maxHeight,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const SizedBox(height: 32),
+                        _LoginGlassCard(
+                          busy: _busy,
+                          textStagger: _textStagger,
+                          onGoogle: _onGoogleSignIn,
+                          onAnonymous: _continueWithoutSignIn,
+                          onOpenTerms: () => _openUrl(LegalUrls.termsOfUse),
+                          onOpenPrivacy: () => _openUrl(LegalUrls.privacyPolicy),
+                        ),
+                        const SizedBox(height: 28),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              title: Text('+91 India', style: GoogleFonts.inter(color: Colors.white)),
-              onTap: () {
-                setState(() => _countryCode = '+91');
-                Navigator.pop(ctx);
-              },
+    );
+  }
+}
+
+class _LoginGlassCard extends StatelessWidget {
+  const _LoginGlassCard({
+    required this.busy,
+    required this.textStagger,
+    required this.onGoogle,
+    required this.onAnonymous,
+    required this.onOpenTerms,
+    required this.onOpenPrivacy,
+  });
+
+  final bool busy;
+  final Animation<double> textStagger;
+  final VoidCallback onGoogle;
+  final VoidCallback onAnonymous;
+  final VoidCallback onOpenTerms;
+  final VoidCallback onOpenPrivacy;
+
+  static const _headlines = [
+    'Welcome to TalkFree',
+    'International calls. Zero hassle.',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    const radius = 28.0;
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(22, 28, 22, 24),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(radius),
+            border: Border.all(
+              color: _neon.withValues(alpha: 0.14),
             ),
-            ListTile(
-              title: Text('+1 United States', style: GoogleFonts.inter(color: Colors.white)),
-              onTap: () {
-                setState(() => _countryCode = '+1');
-                Navigator.pop(ctx);
-              },
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Colors.white.withValues(alpha: 0.1),
+                _neon.withValues(alpha: 0.04),
+                Colors.white.withValues(alpha: 0.05),
+              ],
             ),
-          ],
+            boxShadow: [
+              BoxShadow(
+                color: _neon.withValues(alpha: 0.12),
+                blurRadius: 28,
+                spreadRadius: -4,
+              ),
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.35),
+                blurRadius: 28,
+                offset: const Offset(0, 16),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < _headlines.length; i++)
+                _StaggeredLine(
+                  controller: textStagger,
+                  index: i,
+                  lineCount: _headlines.length,
+                  child: Text(
+                    _headlines[i],
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.poppins(
+                      fontSize: i == 0 ? 26 : 15,
+                      fontWeight: i == 0 ? FontWeight.w700 : FontWeight.w500,
+                      height: 1.35,
+                      color: i == 0
+                          ? Colors.white.withValues(alpha: 0.96)
+                          : AppColors.textMutedOnDark.withValues(alpha: 0.92),
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 28),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: busy ? null : onGoogle,
+                  borderRadius: BorderRadius.circular(18),
+                  splashColor: Colors.white.withValues(alpha: 0.15),
+                  child: Ink(
+                    height: 56,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: _neon.withValues(alpha: 0.16),
+                      ),
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Colors.white.withValues(alpha: 0.14),
+                          _neon.withValues(alpha: 0.08),
+                          Colors.white.withValues(alpha: 0.06),
+                        ],
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: _neon.withValues(alpha: 0.1),
+                          blurRadius: 18,
+                          spreadRadius: -2,
+                        ),
+                      ],
+                    ),
+                    child: Center(
+                      child: busy
+                          ? SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.2,
+                                color: _neon.withValues(alpha: 0.95),
+                              ),
+                            )
+                          : Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.g_mobiledata_rounded,
+                                  size: 32,
+                                  color: Colors.white.withValues(alpha: 0.95),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Continue with Google',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 0.2,
+                                    color: Colors.white.withValues(alpha: 0.95),
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: busy ? null : onAnonymous,
+                  borderRadius: BorderRadius.circular(18),
+                  splashColor: _neon.withValues(alpha: 0.12),
+                  child: Ink(
+                    height: 52,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: _neon.withValues(alpha: 0.14),
+                      ),
+                      color: Colors.white.withValues(alpha: 0.04),
+                    ),
+                    child: Center(
+                      child: Text(
+                        'Continue without signing in',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.15,
+                          color: Colors.white.withValues(alpha: 0.88),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 28),
+              Text(
+                'By continuing, you agree to our',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  fontSize: 12,
+                  height: 1.4,
+                  color: AppColors.textMutedOnDark,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 4,
+                children: [
+                  TextButton(
+                    onPressed: onOpenTerms,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(
+                      'Terms',
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: _neon.withValues(alpha: 0.95),
+                        decoration: TextDecoration.underline,
+                        decorationColor: _neon.withValues(alpha: 0.7),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '&',
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      color: AppColors.textMutedOnDark,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: onOpenPrivacy,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(
+                      'Privacy',
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: _neon.withValues(alpha: 0.95),
+                        decoration: TextDecoration.underline,
+                        decorationColor: _neon.withValues(alpha: 0.7),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+class _StaggeredLine extends StatelessWidget {
+  const _StaggeredLine({
+    required this.controller,
+    required this.index,
+    required this.lineCount,
+    required this.child,
+  });
+
+  final Animation<double> controller;
+  final int index;
+  final int lineCount;
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    const radius = 16.0;
-
-    return Scaffold(
-      backgroundColor: AppColors.darkBackground,
-      body: Container(
-        width: double.infinity,
-        height: double.infinity,
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              AppColors.darkBackgroundDeep,
-              AppColors.darkBackground,
-            ],
-          ),
-        ),
-        child: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              return SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const SizedBox(height: 40),
-                      Center(
-                        child: Container(
-                          width: 88,
-                          height: 88,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: AppColors.primary.withValues(alpha: 0.15),
-                            border: Border.all(
-                              color: AppColors.primary.withValues(alpha: 0.45),
-                              width: 1.5,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.35),
-                                blurRadius: 24,
-                                offset: const Offset(0, 10),
-                              ),
-                            ],
-                          ),
-                          child: Icon(
-                            Icons.phone_in_talk_rounded,
-                            size: 40,
-                            color: AppColors.primary,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 28),
-                      Text(
-                        'Welcome to TalkFree',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.poppins(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.textOnDark,
-                          height: 1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Start calling worldwide for free',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.inter(
-                          fontSize: 15,
-                          height: 1.45,
-                          fontWeight: FontWeight.w400,
-                          color: AppColors.textMutedOnDark,
-                        ),
-                      ),
-                      const SizedBox(height: 40),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Material(
-                            color: TalkFreeColors.cardBg,
-                            borderRadius: BorderRadius.circular(radius),
-                            child: InkWell(
-                              onTap: _busy ? null : _pickCountryCode,
-                              borderRadius: BorderRadius.circular(radius),
-                              child: Container(
-                                width: 96,
-                                height: 56,
-                                alignment: Alignment.center,
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(radius),
-                                  border: Border.all(
-                                    color: AppColors.primary.withValues(alpha: 0.35),
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withValues(alpha: 0.2),
-                                      blurRadius: 12,
-                                      offset: const Offset(0, 4),
-                                    ),
-                                  ],
-                                ),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Text(
-                                      _countryCode,
-                                      style: GoogleFonts.inter(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w600,
-                                        color: AppColors.textOnDark,
-                                      ),
-                                    ),
-                                    Icon(
-                                      Icons.arrow_drop_down_rounded,
-                                      color: AppColors.textMutedOnDark,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: TextField(
-                              controller: _phoneController,
-                              enabled: !_busy,
-                              keyboardType: TextInputType.phone,
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                color: AppColors.textOnDark,
-                              ),
-                              decoration: InputDecoration(
-                                hintText: 'Phone number',
-                                hintStyle: GoogleFonts.inter(
-                                  color: AppColors.textMutedOnDark,
-                                ),
-                                filled: true,
-                                fillColor: TalkFreeColors.cardBg,
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 18,
-                                  vertical: 16,
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(radius),
-                                  borderSide: BorderSide(
-                                    color: AppColors.primary.withValues(alpha: 0.35),
-                                  ),
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(radius),
-                                  borderSide: BorderSide(
-                                    color: AppColors.primary.withValues(alpha: 0.35),
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(radius),
-                                  borderSide: const BorderSide(
-                                    color: AppColors.primary,
-                                    width: 1.5,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 24),
-                      Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          onTap: _busy ? null : _onSendOtp,
-                          borderRadius: BorderRadius.circular(radius),
-                          child: Ink(
-                            height: 56,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(radius),
-                              gradient: const LinearGradient(
-                                colors: [
-                                  Color(0xFF00E09A),
-                                  AppColors.primary,
-                                  Color(0xFF00B875),
-                                ],
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: AppColors.primary.withValues(alpha: 0.45),
-                                  blurRadius: 20,
-                                  offset: const Offset(0, 8),
-                                ),
-                              ],
-                            ),
-                            child: Center(
-                              child: Text(
-                                'Send OTP',
-                                style: GoogleFonts.poppins(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.onPrimary,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      OutlinedButton(
-                        onPressed: _busy ? null : _onGoogleSignIn,
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.textOnDark,
-                          side: BorderSide(
-                            color: AppColors.textOnDark.withValues(alpha: 0.25),
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          minimumSize: const Size.fromHeight(52),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(radius),
-                          ),
-                          backgroundColor: TalkFreeColors.cardBg.withValues(alpha: 0.5),
-                        ),
-                        child: _busy
-                            ? SizedBox(
-                                height: 22,
-                                width: 22,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: AppColors.primary,
-                                ),
-                              )
-                            : Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.g_mobiledata_rounded,
-                                    size: 28,
-                                    color: AppColors.textOnDark,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'Continue with Google',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                      ),
-                      const SizedBox(height: 12),
-                      Center(
-                        child: TextButton(
-                          onPressed: _busy ? null : _continueWithoutSignIn,
-                          child: Text(
-                            'Continue without sign in',
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textMutedOnDark,
-                              decoration: TextDecoration.underline,
-                              decorationColor: AppColors.textMutedOnDark,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 48),
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 20),
-                        child: Column(
-                          children: [
-                            Text(
-                              'By continuing, you agree to our',
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.inter(
-                                fontSize: 12,
-                                height: 1.4,
-                                color: AppColors.textMutedOnDark,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Wrap(
-                              alignment: WrapAlignment.center,
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              spacing: 4,
-                              children: [
-                                TextButton(
-                                  onPressed: () =>
-                                      _openUrl(LegalUrls.termsOfUse),
-                                  style: TextButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 4,
-                                    ),
-                                    minimumSize: Size.zero,
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  child: Text(
-                                    'Terms',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.primary,
-                                      decoration: TextDecoration.underline,
-                                    ),
-                                  ),
-                                ),
-                                Text(
-                                  '&',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 12,
-                                    color: AppColors.textMutedOnDark,
-                                  ),
-                                ),
-                                TextButton(
-                                  onPressed: () =>
-                                      _openUrl(LegalUrls.privacyPolicy),
-                                  style: TextButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 4,
-                                    ),
-                                    minimumSize: Size.zero,
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  child: Text(
-                                    'Privacy',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.primary,
-                                      decoration: TextDecoration.underline,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
+    final start = index / (lineCount + 1);
+    final end = ((index + 1) / (lineCount + 1)).clamp(0.05, 1.0);
+    final anim = CurvedAnimation(
+      parent: controller,
+      curve: Interval(
+        start,
+        end,
+        curve: Curves.easeOutCubic,
       ),
     );
+    return Padding(
+      padding: EdgeInsets.only(bottom: index == lineCount - 1 ? 0 : 10),
+      child: AnimatedBuilder(
+        animation: anim,
+        builder: (context, _) {
+          return SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.2),
+              end: Offset.zero,
+            ).animate(anim),
+            child: FadeTransition(
+              opacity: anim,
+              child: child,
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Neon “call paths” over the map — subtle, slow pulse.
+class _LoginNeonConnectionsPainter extends CustomPainter {
+  _LoginNeonConnectionsPainter({required this.progress});
+
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+    final paths = <Path>[
+      Path()
+        ..moveTo(w * 0.08, h * 0.35)
+        ..quadraticBezierTo(w * 0.42, h * 0.12, w * 0.88, h * 0.28),
+      Path()
+        ..moveTo(w * 0.12, h * 0.62)
+        ..quadraticBezierTo(w * 0.48, h * 0.45, w * 0.9, h * 0.55),
+      Path()
+        ..moveTo(w * 0.18, h * 0.82)
+        ..quadraticBezierTo(w * 0.52, h * 0.68, w * 0.86, h * 0.78),
+      Path()
+        ..moveTo(w * 0.05, h * 0.48)
+        ..quadraticBezierTo(w * 0.38, h * 0.22, w * 0.72, h * 0.42),
+    ];
+
+    for (var i = 0; i < paths.length; i++) {
+      final phase = (progress + i * 0.22) % 1.0;
+      final a = 0.08 + 0.12 * (1 - phase);
+      final paint = Paint()
+        ..color = _neon.withValues(alpha: a)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.1 + phase * 0.4
+        ..strokeCap = StrokeCap.round;
+      canvas.drawPath(paths[i], paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _LoginNeonConnectionsPainter oldDelegate) {
+    return oldDelegate.progress != progress;
   }
 }

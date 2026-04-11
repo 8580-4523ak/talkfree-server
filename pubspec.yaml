@@ -45,6 +45,8 @@ dependencies:
   url_launcher: ^6.3.2
   twilio_voice: ^0.3.2+2
   firebase_messaging: ^16.1.3
+  country_picker: ^2.0.27
+  lottie: ^3.3.2
 
 
 
@@ -73,6 +75,7 @@ flutter:
 
   assets:
     - .env
+    - assets/lottie/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
