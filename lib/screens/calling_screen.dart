@@ -49,15 +49,22 @@ class CallingScreen extends StatefulWidget {
   State<CallingScreen> createState() => _CallingScreenState();
 }
 
+String _formatMmSs(int totalSeconds) {
+  final s = totalSeconds < 0 ? 0 : totalSeconds;
+  final m = s ~/ 60;
+  final r = s % 60;
+  return '${m.toString().padLeft(2, '0')}:${r.toString().padLeft(2, '0')}';
+}
+
 class _CallingScreenState extends State<CallingScreen>
     with WidgetsBindingObserver, TickerProviderStateMixin {
-  /// Elapsed call time (MM:SS) — 1 Hz while connected.
+  /// Elapsed call time (MM:SS) — 1 Hz while connected (isolated from full-screen rebuilds).
   Timer? _elapsedTimer;
-  int _elapsedSeconds = 0;
+  final ValueNotifier<int> _elapsedNotifier = ValueNotifier<int>(0);
   /// Live UI: −1 credit every [CreditsPolicy.connectedLiveCreditIntervalSec] while connected.
   Timer? _liveCreditTicker;
-  /// Local balance preview: −[CreditsPolicy.creditsPerCallTick] on connect, then −1 per ticker tick.
-  int? _localCredits;
+  /// Local balance preview (isolated from full-screen rebuilds).
+  final ValueNotifier<int?> _creditsNotifier = ValueNotifier<int?>(null);
   StreamSubscription<CallEvent>? _callSub;
   String _statusLine = 'Connecting...';
   bool _remoteEndedHandled = false;
@@ -79,15 +86,18 @@ class _CallingScreenState extends State<CallingScreen>
     duration: const Duration(milliseconds: 420),
   );
 
-  String get _mmSs {
-    final m = _elapsedSeconds ~/ 60;
-    final s = _elapsedSeconds % 60;
-    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-  }
+  /// Cached so the 1 Hz timer subtree does not re-resolve fonts every tick.
+  late final TextStyle _elapsedTimerTextStyle;
 
   @override
   void initState() {
     super.initState();
+    _elapsedTimerTextStyle = GoogleFonts.poppins(
+      fontSize: 56,
+      fontWeight: FontWeight.w300,
+      color: Colors.white,
+      letterSpacing: 2,
+    );
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_bootstrap());
@@ -96,17 +106,13 @@ class _CallingScreenState extends State<CallingScreen>
 
   void _onElapsedTick(Timer _) {
     if (!mounted) return;
-    if (kDebugMode && _elapsedSeconds == 0) {
+    if (kDebugMode && _elapsedNotifier.value == 0) {
       debugPrint('DEBUG: _elapsedTimer first tick (1 Hz) — call is Connected');
     }
-    setState(() => _elapsedSeconds++);
+    _elapsedNotifier.value++;
   }
 
   void _onLiveCreditTick(Timer timer) {
-    unawaited(_applyServerLiveTick(timer));
-  }
-
-  Future<void> _applyServerLiveTick(Timer timer) async {
     if (!mounted) return;
     final sid = _activeCallSid;
     if (sid == null || sid.isEmpty) return;
@@ -116,30 +122,39 @@ class _CallingScreenState extends State<CallingScreen>
         '${CreditsPolicy.connectedLiveCreditPerTick}',
       );
     }
-    final ok = await CallLiveBillingService.instance.postLiveTick(
-      callSid: sid,
-      amount: CreditsPolicy.connectedLiveCreditPerTick,
-    );
-    if (!mounted) return;
-    if (!ok && kDebugMode) {
-      debugPrint('DEBUG: call-live-tick failed (will retry on next tick)');
-    }
-    int display;
-    try {
-      display = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
-    } catch (_) {
-      return;
-    }
-    if (!mounted) return;
-    setState(() {
-      _localCredits = display;
-      _creditPulse.forward(from: 0);
-    });
-    if (display <= 0) {
-      timer.cancel();
-      _liveCreditTicker = null;
-      unawaited(_autoHangupLowCredits());
-    }
+    // Chain only — no await in this path so the periodic callback returns immediately
+    // after scheduling work; billing order unchanged (POST then Firestore read).
+    CallLiveBillingService.instance
+        .postLiveTick(
+          callSid: sid,
+          amount: CreditsPolicy.connectedLiveCreditPerTick,
+        )
+        .then((bool ok) async {
+          if (!mounted) return null;
+          if (!ok && kDebugMode) {
+            debugPrint('DEBUG: call-live-tick failed (will retry on next tick)');
+          }
+          try {
+            return await FirestoreUserService.fetchUsableCredits(widget.user.uid);
+          } catch (_) {
+            return null;
+          }
+        })
+        .then((int? display) {
+          if (display == null || !mounted) return;
+          _creditsNotifier.value = display;
+          _creditPulse.forward(from: 0);
+          if (display <= 0) {
+            timer.cancel();
+            _liveCreditTicker = null;
+            unawaited(_autoHangupLowCredits());
+          }
+        })
+        .catchError((Object e, StackTrace st) {
+          if (kDebugMode) {
+            debugPrint('DEBUG: live-tick chain: $e');
+          }
+        });
   }
 
   void _cancelConnectedTimers() {
@@ -187,9 +202,9 @@ class _CallingScreenState extends State<CallingScreen>
       if (kDebugMode) {
         debugPrint('DEBUG: No CallSid yet — elapsed only, no live billing ticks');
       }
-      setState(() => _localCredits = credits);
+      _creditsNotifier.value = credits;
       _cancelConnectedTimers();
-      _elapsedSeconds = 0;
+      _elapsedNotifier.value = 0;
       _elapsedTimer = Timer.periodic(const Duration(seconds: 1), _onElapsedTick);
       return;
     }
@@ -201,13 +216,11 @@ class _CallingScreenState extends State<CallingScreen>
       );
     }
 
-    setState(() {
-      _localCredits = credits;
-      _creditPulse.forward(from: 0);
-    });
+    _creditsNotifier.value = credits;
+    _creditPulse.forward(from: 0);
 
     _cancelConnectedTimers();
-    _elapsedSeconds = 0;
+    _elapsedNotifier.value = 0;
     _elapsedTimer = Timer.periodic(const Duration(seconds: 1), _onElapsedTick);
     _liveCreditTicker = Timer.periodic(
       Duration(seconds: CreditsPolicy.connectedLiveCreditIntervalSec),
@@ -609,6 +622,8 @@ class _CallingScreenState extends State<CallingScreen>
 
   @override
   void dispose() {
+    _elapsedNotifier.dispose();
+    _creditsNotifier.dispose();
     _callVisualPulse.dispose();
     _creditPulse.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -657,92 +672,105 @@ class _CallingScreenState extends State<CallingScreen>
               child: Column(
                 children: [
                   const SizedBox(height: 24),
-                  _ActiveCallPulseHeader(controller: _callVisualPulse),
-              const SizedBox(height: 28),
-              Text(
-                widget.dialE164,
-                textAlign: TextAlign.center,
-                style: GoogleFonts.poppins(
-                  fontSize: 26,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                _statusLine,
-                style: GoogleFonts.poppins(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.white70,
-                ),
-              ),
-              if (!kIsWeb &&
-                  Platform.isAndroid &&
-                  (_statusLine == 'Connected' || _statusLine == 'Calling...')) ...[
-                const SizedBox(height: 10),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Text(
-                    'This call uses Twilio VoIP inside TalkFree — not the cellular dialer. '
-                    'Some phones show the system Phone bar on top; hang up here to end the call.',
+                  RepaintBoundary(
+                    child: _ActiveCallPulseHeader(controller: _callVisualPulse),
+                  ),
+                  const SizedBox(height: 28),
+                  Text(
+                    widget.dialE164,
                     textAlign: TextAlign.center,
-                    style: GoogleFonts.inter(
-                      fontSize: 12,
-                      height: 1.4,
-                      color: Colors.white54,
-                    ),
-                  ),
-                ),
-              ],
-              if (_localCredits != null) ...[
-                const SizedBox(height: 20),
-                _NeonCreditsBalance(
-                  credits: _localCredits!,
-                  pulse: _creditPulse,
-                ),
-              ],
-              const Spacer(),
-              Text(
-                _mmSs,
-                style: GoogleFonts.poppins(
-                  fontSize: 56,
-                  fontWeight: FontWeight.w300,
-                  color: Colors.white,
-                  letterSpacing: 2,
-                ),
-              ),
-              const Spacer(),
-              SizedBox(
-                width: double.infinity,
-                height: 72,
-                child: FilledButton.icon(
-                  onPressed: _endCall,
-                  icon: const Icon(Icons.call_end_rounded, size: 26),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xFFC62828),
-                    foregroundColor: Colors.white,
-                    elevation: 4,
-                    shadowColor: Colors.red.withValues(alpha: 0.45),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  label: Text(
-                    'Hang up',
                     style: GoogleFonts.poppins(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                      letterSpacing: 0.5,
                     ),
                   ),
-                ),
+                  const SizedBox(height: 16),
+                  Text(
+                    _statusLine,
+                    style: GoogleFonts.poppins(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.white70,
+                    ),
+                  ),
+                  if (!kIsWeb &&
+                      Platform.isAndroid &&
+                      (_statusLine == 'Connected' || _statusLine == 'Calling...')) ...[
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Text(
+                        'This call uses Twilio VoIP inside TalkFree — not the cellular dialer. '
+                        'Some phones show the system Phone bar on top; hang up here to end the call.',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          height: 1.4,
+                          color: Colors.white54,
+                        ),
+                      ),
+                    ),
+                  ],
+                  ValueListenableBuilder<int?>(
+                    valueListenable: _creditsNotifier,
+                    builder: (context, credits, _) {
+                      if (credits == null) return const SizedBox.shrink();
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(height: 20),
+                          RepaintBoundary(
+                            child: _NeonCreditsBalance(
+                              credits: credits,
+                              pulse: _creditPulse,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                  const Spacer(),
+                  ValueListenableBuilder<int>(
+                    valueListenable: _elapsedNotifier,
+                    builder: (context, elapsedSec, _) {
+                      return Text(
+                        _formatMmSs(elapsedSec),
+                        style: _elapsedTimerTextStyle,
+                      );
+                    },
+                  ),
+                  const Spacer(),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 72,
+                    child: FilledButton.icon(
+                      onPressed: _endCall,
+                      icon: const Icon(Icons.call_end_rounded, size: 26),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFC62828),
+                        foregroundColor: Colors.white,
+                        elevation: 4,
+                        shadowColor: Colors.red.withValues(alpha: 0.45),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                      ),
+                      label: Text(
+                        'Hang up',
+                        style: GoogleFonts.poppins(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                ],
               ),
-              const SizedBox(height: 24),
-            ],
+            ),
           ),
-        ),
-      ),
         ),
         if (_finalizingBill)
           Positioned.fill(

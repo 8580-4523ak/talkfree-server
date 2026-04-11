@@ -3,7 +3,7 @@ import 'dart:math' show max;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show immutable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -18,6 +18,96 @@ import 'call_history_screen.dart';
 import 'dialer_screen.dart';
 import 'number_selection_screen.dart';
 import 'sms_test_screen.dart';
+
+/// Immutable rewarded-ad row for ValueNotifier (equality avoids redundant notifies).
+@immutable
+class _AdRewardView {
+  const _AdRewardView({
+    required this.adsToday,
+    required this.cycleProgress,
+    required this.cooldownRemaining,
+    required this.dailyLimitReached,
+  });
+
+  final int adsToday;
+  final int cycleProgress;
+  final int cooldownRemaining;
+  final bool dailyLimitReached;
+
+  _AdRewardView copyWith({
+    int? adsToday,
+    int? cycleProgress,
+    int? cooldownRemaining,
+    bool? dailyLimitReached,
+  }) {
+    return _AdRewardView(
+      adsToday: adsToday ?? this.adsToday,
+      cycleProgress: cycleProgress ?? this.cycleProgress,
+      cooldownRemaining: cooldownRemaining ?? this.cooldownRemaining,
+      dailyLimitReached: dailyLimitReached ?? this.dailyLimitReached,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        other is _AdRewardView &&
+            other.adsToday == adsToday &&
+            other.cycleProgress == cycleProgress &&
+            other.cooldownRemaining == cooldownRemaining &&
+            other.dailyLimitReached == dailyLimitReached;
+  }
+
+  @override
+  int get hashCode => Object.hash(adsToday, cycleProgress, cooldownRemaining, dailyLimitReached);
+}
+
+/// Smooth numeric change for wallet / stats (no logic — display only).
+class _AnimatedIntText extends StatefulWidget {
+  const _AnimatedIntText({
+    required this.value,
+    required this.style,
+  });
+
+  final int value;
+  final TextStyle style;
+
+  @override
+  State<_AnimatedIntText> createState() => _AnimatedIntTextState();
+}
+
+class _AnimatedIntTextState extends State<_AnimatedIntText> {
+  late int _from;
+
+  @override
+  void initState() {
+    super.initState();
+    _from = widget.value;
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedIntText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value) {
+      _from = oldWidget.value;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<int>(
+      tween: IntTween(begin: _from, end: widget.value),
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+      builder: (context, v, _) {
+        return Text(
+          '$v',
+          style: widget.style,
+        );
+      },
+    );
+  }
+}
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({
@@ -46,37 +136,105 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Timer? _localAdCooldownTimer;
   int _localAdCooldownSeconds = 0;
 
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _userDocSub;
+  Timer? _cooldownWallClock;
+  DocumentSnapshot<Map<String, dynamic>>? _latestUserDoc;
+
+  final ValueNotifier<int> _credits = ValueNotifier<int>(0);
+  final ValueNotifier<_AdRewardView> _adView = ValueNotifier<_AdRewardView>(
+    const _AdRewardView(
+      adsToday: 0,
+      cycleProgress: 0,
+      cooldownRemaining: 0,
+      dailyLimitReached: false,
+    ),
+  );
+
+  void _setAdViewIfChanged(_AdRewardView next) {
+    if (_adView.value == next) return;
+    _adView.value = next;
+  }
+
+  /// Single source of truth from cached snapshot + local post-ad cooldown (no full Scaffold rebuild).
+  void _refreshFromLatestSnapshot() {
+    final snap = _latestUserDoc;
+    if (snap == null) return;
+    final t = FirestoreUserService.adRewardStatusFromSnapshot(snap);
+    final cool = max(t.cooldownRemaining, _localAdCooldownSeconds);
+    _setAdViewIfChanged(
+      _AdRewardView(
+        adsToday: t.adsToday,
+        cycleProgress: t.cycleProgress,
+        cooldownRemaining: cool,
+        dailyLimitReached: t.dailyLimitReached,
+      ),
+    );
+    final cr = FirestoreUserService.usableCreditsFromSnapshot(snap);
+    if (_credits.value != cr) {
+      _credits.value = cr;
+    }
+  }
+
+  void _applyOptimisticAdWatched() {
+    final v = _adView.value;
+    final nextCycle =
+        (v.cycleProgress + 1) >= CreditsPolicy.adsRequiredForMinuteGrant
+            ? 0
+            : v.cycleProgress + 1;
+    _setAdViewIfChanged(
+      v.copyWith(
+        adsToday: v.adsToday + 1,
+        cycleProgress: nextCycle,
+        dailyLimitReached:
+            v.adsToday + 1 >= CreditsPolicy.maxRewardedAdsPerDay,
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
     _navIndex = widget.initialNavIndex;
+    _userDocSub =
+        FirestoreUserService.watchUserDocument(widget.user.uid).listen(
+      (snap) {
+        _latestUserDoc = snap;
+        _refreshFromLatestSnapshot();
+      },
+      onError: (_) {},
+    );
+    _cooldownWallClock = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      _refreshFromLatestSnapshot();
+    });
   }
 
   @override
   void dispose() {
+    _userDocSub?.cancel();
+    _cooldownWallClock?.cancel();
     _localAdCooldownTimer?.cancel();
+    _credits.dispose();
+    _adView.dispose();
     super.dispose();
   }
 
   /// Fires when the user earned reward — before `/grant-reward` — so the button locks immediately.
   void _startPostAdCooldown() {
     _localAdCooldownTimer?.cancel();
-    setState(() => _localAdCooldownSeconds = CreditsPolicy.adRewardCooldownSeconds);
+    _localAdCooldownSeconds = CreditsPolicy.adRewardCooldownSeconds;
+    _refreshFromLatestSnapshot();
     _localAdCooldownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      setState(() {
-        _localAdCooldownSeconds -= 1;
-        if (_localAdCooldownSeconds <= 0) {
-          _localAdCooldownSeconds = 0;
-          _localAdCooldownTimer?.cancel();
-          _localAdCooldownTimer = null;
-        }
-      });
+      _localAdCooldownSeconds -= 1;
+      if (_localAdCooldownSeconds <= 0) {
+        _localAdCooldownSeconds = 0;
+        _localAdCooldownTimer?.cancel();
+        _localAdCooldownTimer = null;
+      }
+      _refreshFromLatestSnapshot();
     });
   }
-
-  int _effectiveCooldown(int firestoreCooldown) =>
-      max(firestoreCooldown, _localAdCooldownSeconds);
 
   Future<void> _onWatchRewardedAd(
     int cooldownRemaining,
@@ -106,6 +264,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final earned = await AdService.instance.loadAndShowRewardedAd();
       if (!mounted) return;
       if (earned) {
+        _applyOptimisticAdWatched();
         _startPostAdCooldown();
         try {
           final result = await GrantRewardService.instance.requestMinuteGrant();
@@ -184,134 +343,134 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final displayName =
         name != null && name.isNotEmpty ? name : 'TalkFree user';
 
-    return StreamBuilder<
-        ({
-          int adsToday,
-          int cooldownRemaining,
-          int cycleProgress,
-          bool dailyLimitReached,
-        })>(
-      stream: FirestoreUserService.watchAdRewardStatus(widget.user.uid),
-      builder: (context, coolSnap) {
-        final ad = coolSnap.data;
-        final firestoreCooldown = ad?.cooldownRemaining ?? 0;
-        final cooldownRemaining = _effectiveCooldown(firestoreCooldown);
-        final adsToday = ad?.adsToday ?? 0;
-        final cycleProgress = ad?.cycleProgress ?? 0;
-        final dailyLimitReached = ad?.dailyLimitReached ?? false;
+    // Credits outer so balance-only updates don't rebuild rewarded-ad UI (and vice versa).
+    return ValueListenableBuilder<int>(
+      valueListenable: _credits,
+      builder: (context, credits, _) {
+        return ValueListenableBuilder<_AdRewardView>(
+          valueListenable: _adView,
+          builder: (context, ad, _) {
+            final cooldownRemaining = ad.cooldownRemaining;
+            final adsToday = ad.adsToday;
+            final cycleProgress = ad.cycleProgress;
+            final dailyLimitReached = ad.dailyLimitReached;
 
-        // One body subtree at a time — no IndexedStack (avoids touch bugs on some
-        // OEM builds where an invisible sibling still wins hit testing).
-        final Widget tabBody = _navIndex == 0
-            ? _DashboardHomeTab(
-                user: widget.user,
-                displayName: displayName,
-                theme: theme,
-                rewardedAdBusy: _rewardedAdBusy,
-                cooldownRemaining: cooldownRemaining,
-                adsToday: adsToday,
-                cycleProgress: cycleProgress,
-                dailyLimitReached: dailyLimitReached,
-                onWatchRewardedAd: () => _onWatchRewardedAd(
-                  cooldownRemaining,
-                  dailyLimitReached,
-                ),
-                onGoToDialer: () => setState(() => _navIndex = 1),
-              )
-            : DialerScreen(
-                key: const ValueKey<Object>('talkfree_dialer'),
-                user: widget.user,
-                onEarnMinutes: () => _onWatchRewardedAd(
-                  cooldownRemaining,
-                  dailyLimitReached,
-                ),
-                rewardedAdBusy: _rewardedAdBusy,
-                cooldownRemaining: cooldownRemaining,
-                rewardCycleProgress: cycleProgress,
-                rewardDailyLimitReached: dailyLimitReached,
-              );
-
-        return Scaffold(
-      // Opaque material layer — avoids “ghost” hit targets on some GPUs.
-      backgroundColor: theme.colorScheme.surface,
-      appBar: AppBar(
-        title: Text(_navIndex == 0 ? 'Dashboard' : 'Dialer'),
-        actions: [
-          IconButton(
-            tooltip: 'Call history',
-            icon: const Icon(Icons.history_rounded),
-            onPressed: () {
-              Navigator.of(context).push<void>(
-                MaterialPageRoute<void>(
-                  builder: (_) => CallHistoryScreen(user: widget.user),
-                ),
-              );
-            },
-          ),
-          IconButton(
-            tooltip: 'Chat',
-            icon: const Icon(Icons.chat_bubble_outline_rounded),
-            onPressed: () {
-              Navigator.of(context).push<void>(
-                MaterialPageRoute<void>(
-                  builder: (_) => const SmsTestScreen(),
-                ),
-              );
-            },
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Settings — coming soon.')),
-              );
-            },
-          ),
-          IconButton(
-            tooltip: 'Sign out',
-            icon: const Icon(Icons.logout_outlined),
-            onPressed: () => AuthService().signOut(),
-          ),
-        ],
-      ),
-          floatingActionButton: _navIndex == 0
-              ? Padding(
-                  padding: const EdgeInsets.only(bottom: 20),
-                  child: _EarnCreditsFloatingAction(
-                    busy: _rewardedAdBusy,
+            // One body subtree at a time — no IndexedStack (avoids touch bugs on some
+            // OEM builds where an invisible sibling still wins hit testing).
+            final Widget tabBody = _navIndex == 0
+                ? _DashboardHomeTab(
+                    user: widget.user,
+                    displayName: displayName,
+                    theme: theme,
+                    rewardedAdBusy: _rewardedAdBusy,
                     cooldownRemaining: cooldownRemaining,
+                    adsToday: adsToday,
                     cycleProgress: cycleProgress,
                     dailyLimitReached: dailyLimitReached,
-                    onPressed: () => _onWatchRewardedAd(
+                    credits: credits,
+                    onWatchRewardedAd: () => _onWatchRewardedAd(
                       cooldownRemaining,
                       dailyLimitReached,
                     ),
-                    onDebugLongPress: kDebugMode ? _debugAddCredits : null,
+                    onGoToDialer: () => setState(() => _navIndex = 1),
+                  )
+                : DialerScreen(
+                    key: const ValueKey<Object>('talkfree_dialer'),
+                    user: widget.user,
+                    onEarnMinutes: () => _onWatchRewardedAd(
+                      cooldownRemaining,
+                      dailyLimitReached,
+                    ),
+                    rewardedAdBusy: _rewardedAdBusy,
+                    cooldownRemaining: cooldownRemaining,
+                    rewardCycleProgress: cycleProgress,
+                    rewardDailyLimitReached: dailyLimitReached,
+                  );
+
+            return Scaffold(
+              backgroundColor: theme.colorScheme.surface,
+              appBar: AppBar(
+                title: Text(_navIndex == 0 ? 'Dashboard' : 'Dialer'),
+                actions: [
+                  IconButton(
+                    tooltip: 'Call history',
+                    icon: const Icon(Icons.history_rounded),
+                    onPressed: () {
+                      Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) => CallHistoryScreen(user: widget.user),
+                        ),
+                      );
+                    },
                   ),
-                )
-              : null,
-          body: Material(
-            color: theme.colorScheme.surface,
-            child: tabBody,
-          ),
-          bottomNavigationBar: BottomNavigationBar(
-            currentIndex: _navIndex,
-            onTap: (i) => setState(() => _navIndex = i),
-            type: BottomNavigationBarType.fixed,
-            items: const [
-              BottomNavigationBarItem(
-                icon: Icon(Icons.home_outlined),
-                activeIcon: Icon(Icons.home_rounded),
-                label: 'Home',
+                  IconButton(
+                    tooltip: 'Chat',
+                    icon: const Icon(Icons.chat_bubble_outline_rounded),
+                    onPressed: () {
+                      Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const SmsTestScreen(),
+                        ),
+                      );
+                    },
+                  ),
+                  IconButton(
+                    tooltip: 'Settings',
+                    icon: const Icon(Icons.settings_outlined),
+                    onPressed: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Settings — coming soon.')),
+                      );
+                    },
+                  ),
+                  IconButton(
+                    tooltip: 'Sign out',
+                    icon: const Icon(Icons.logout_outlined),
+                    onPressed: () => AuthService().signOut(),
+                  ),
+                ],
               ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.dialpad_outlined),
-                activeIcon: Icon(Icons.dialpad_rounded),
-                label: 'Dialer',
+              floatingActionButton: _navIndex == 0
+                  ? Padding(
+                      padding: const EdgeInsets.only(bottom: 20),
+                      child: RepaintBoundary(
+                        child: _EarnCreditsFloatingAction(
+                          busy: _rewardedAdBusy,
+                          cooldownRemaining: cooldownRemaining,
+                          cycleProgress: cycleProgress,
+                          dailyLimitReached: dailyLimitReached,
+                          onPressed: () => _onWatchRewardedAd(
+                            cooldownRemaining,
+                            dailyLimitReached,
+                          ),
+                          onDebugLongPress: kDebugMode ? _debugAddCredits : null,
+                        ),
+                      ),
+                    )
+                  : null,
+              body: Material(
+                color: theme.colorScheme.surface,
+                child: tabBody,
               ),
-            ],
-          ),
+              bottomNavigationBar: BottomNavigationBar(
+                currentIndex: _navIndex,
+                onTap: (i) => setState(() => _navIndex = i),
+                type: BottomNavigationBarType.fixed,
+                items: const [
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.home_outlined),
+                    activeIcon: Icon(Icons.home_rounded),
+                    label: 'Home',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.dialpad_outlined),
+                    activeIcon: Icon(Icons.dialpad_rounded),
+                    label: 'Dialer',
+                  ),
+                ],
+              ),
+            );
+          },
         );
       },
     );
@@ -328,6 +487,7 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.adsToday,
     required this.cycleProgress,
     required this.dailyLimitReached,
+    required this.credits,
     required this.onWatchRewardedAd,
     required this.onGoToDialer,
   });
@@ -340,6 +500,8 @@ class _DashboardHomeTab extends StatefulWidget {
   final int adsToday;
   final int cycleProgress;
   final bool dailyLimitReached;
+  /// Balance from parent [ValueNotifier] (single Firestore listener).
+  final int credits;
   final Future<void> Function() onWatchRewardedAd;
   final VoidCallback onGoToDialer;
 
@@ -470,123 +632,126 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
               ],
             ),
             const SizedBox(height: 28),
-            _WalletCard(uid: widget.user.uid),
+            RepaintBoundary(
+              child: _WalletCard(credits: widget.credits),
+            ),
             const SizedBox(height: 20),
-            _WatchAdCtaButton(
-              busy: widget.rewardedAdBusy,
-              cooldownRemaining: widget.cooldownRemaining,
-              cycleProgress: widget.cycleProgress,
-              dailyLimitReached: widget.dailyLimitReached,
-              onPressed: () {
-                widget.onWatchRewardedAd();
-              },
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Watch ${CreditsPolicy.adsRequiredForMinuteGrant} ads = 1 minute (${CreditsPolicy.creditsPerMinuteGrant} credits)',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.montserrat(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                height: 1.35,
-                color: TalkFreeColors.offWhite,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '${widget.adsToday} / ${CreditsPolicy.maxRewardedAdsPerDay} ads this period',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.montserrat(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                height: 1.35,
-                color: widget.theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            if (widget.cooldownRemaining > 0) ...[
-              const SizedBox(height: 6),
-              Text(
-                'Next ad in ${widget.cooldownRemaining}s',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.montserrat(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  height: 1.35,
-                  color: TalkFreeColors.beigeGold,
-                ),
-              ),
-            ],
-            const SizedBox(height: 28),
-            StreamBuilder<int>(
-              stream: FirestoreUserService.watchCredits(widget.user.uid),
-              builder: (context, snap) {
-                final credits = snap.data ?? 0;
-                final estMinutes =
-                    (credits / CreditsPolicy.creditsPerMinute).toStringAsFixed(1);
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: _DashboardStatCard(
-                        icon: Icons.call_made_rounded,
-                        label: 'Calls made',
-                        value: '0',
-                        caption: 'All time',
+            RepaintBoundary(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _WatchAdCtaButton(
+                    busy: widget.rewardedAdBusy,
+                    cooldownRemaining: widget.cooldownRemaining,
+                    cycleProgress: widget.cycleProgress,
+                    dailyLimitReached: widget.dailyLimitReached,
+                    onPressed: () {
+                      widget.onWatchRewardedAd();
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Watch ${CreditsPolicy.adsRequiredForMinuteGrant} ads = 1 minute (${CreditsPolicy.creditsPerMinuteGrant} credits)',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.montserrat(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      height: 1.35,
+                      color: TalkFreeColors.offWhite,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    child: Text(
+                      '${widget.adsToday} / ${CreditsPolicy.maxRewardedAdsPerDay} ads this period',
+                      key: ValueKey<int>(widget.adsToday),
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.montserrat(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        height: 1.35,
+                        color: widget.theme.colorScheme.onSurfaceVariant,
                       ),
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: _DashboardStatCard(
-                        icon: Icons.timer_outlined,
-                        label: 'Minutes',
-                        value: estMinutes,
-                        caption: 'Est. from balance',
+                  ),
+                  if (widget.cooldownRemaining > 0) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Next ad in ${widget.cooldownRemaining}s',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.montserrat(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        height: 1.35,
+                        color: TalkFreeColors.beigeGold,
                       ),
                     ),
                   ],
-                );
-              },
+                ],
+              ),
+            ),
+            const SizedBox(height: 28),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: _DashboardStatCard(
+                    icon: Icons.call_made_rounded,
+                    label: 'Calls made',
+                    value: '0',
+                    caption: 'All time',
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: _DashboardStatCard(
+                    icon: Icons.timer_outlined,
+                    label: 'Minutes',
+                    value: (widget.credits / CreditsPolicy.creditsPerMinute)
+                        .toStringAsFixed(1),
+                    caption: 'Est. from balance',
+                    animatedValue: true,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 28),
             _RecentActivitySection(
               onOpenDialer: widget.onGoToDialer,
             ),
             const SizedBox(height: 32),
-            StreamBuilder<int>(
-              stream: FirestoreUserService.watchCredits(widget.user.uid),
-              builder: (context, creditSnap) {
-                final credits = creditSnap.data ?? 0;
-                return FilledButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).pushNamed(
-                      NumberSelectionScreen.routeName,
-                      arguments: NumberSelectionRouteArgs(
-                        userUid: widget.user.uid,
-                        userCredits: credits,
-                      ),
-                    );
-                  },
-                  icon: const Icon(
-                    Icons.phone_android_rounded,
-                    color: Colors.white,
-                  ),
-                  label: Text(
-                    'Get Your Number',
-                    style: GoogleFonts.montserrat(
-                      fontWeight: FontWeight.w700,
-                      color: TalkFreeColors.onPrimary,
-                    ),
-                  ),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: TalkFreeColors.beigeGold,
-                    foregroundColor: TalkFreeColors.onPrimary,
-                    minimumSize: const Size.fromHeight(54),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.of(context).pushNamed(
+                  NumberSelectionScreen.routeName,
+                  arguments: NumberSelectionRouteArgs(
+                    userUid: widget.user.uid,
+                    userCredits: widget.credits,
                   ),
                 );
               },
+              icon: const Icon(
+                Icons.phone_android_rounded,
+                color: Colors.white,
+              ),
+              label: Text(
+                'Get Your Number',
+                style: GoogleFonts.montserrat(
+                  fontWeight: FontWeight.w700,
+                  color: TalkFreeColors.onPrimary,
+                ),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: TalkFreeColors.beigeGold,
+                foregroundColor: TalkFreeColors.onPrimary,
+                minimumSize: const Size.fromHeight(54),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
             ),
             const SizedBox(height: 8),
           ],
@@ -602,12 +767,14 @@ class _DashboardStatCard extends StatelessWidget {
     required this.label,
     required this.value,
     required this.caption,
+    this.animatedValue = false,
   });
 
   final IconData icon;
   final String label;
   final String value;
   final String caption;
+  final bool animatedValue;
 
   @override
   Widget build(BuildContext context) {
@@ -653,16 +820,43 @@ class _DashboardStatCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          Text(
-            value,
-            style: GoogleFonts.montserrat(
-              fontSize: 26,
-              fontWeight: FontWeight.w800,
-              height: 1.05,
-              color: TalkFreeColors.offWhite,
-              letterSpacing: -0.5,
-            ),
-          ),
+          animatedValue
+              ? AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 240),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, anim) => FadeTransition(
+                    opacity: anim,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0, 0.06),
+                        end: Offset.zero,
+                      ).animate(anim),
+                      child: child,
+                    ),
+                  ),
+                  child: Text(
+                    value,
+                    key: ValueKey<String>(value),
+                    style: GoogleFonts.montserrat(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      height: 1.05,
+                      color: TalkFreeColors.offWhite,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                )
+              : Text(
+                  value,
+                  style: GoogleFonts.montserrat(
+                    fontSize: 26,
+                    fontWeight: FontWeight.w800,
+                    height: 1.05,
+                    color: TalkFreeColors.offWhite,
+                    letterSpacing: -0.5,
+                  ),
+                ),
           const SizedBox(height: 6),
           Text(
             caption,
@@ -1385,15 +1579,20 @@ class _WatchAdCtaButtonState extends State<_WatchAdCtaButton>
                                 ],
                               ),
                               const SizedBox(height: 8),
-                              Text(
-                                'Ad ${widget.cycleProgress}/${CreditsPolicy.adsRequiredForMinuteGrant} watched. ${CreditsPolicy.adsRequiredForMinuteGrant - widget.cycleProgress} more for 1 min!',
-                                textAlign: TextAlign.center,
-                                maxLines: 2,
-                                style: GoogleFonts.montserrat(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  height: 1.3,
-                                  color: Colors.white.withValues(alpha: 0.88),
+                              AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 220),
+                                switchInCurve: Curves.easeOutCubic,
+                                child: Text(
+                                  'Ad ${widget.cycleProgress}/${CreditsPolicy.adsRequiredForMinuteGrant} watched. ${CreditsPolicy.adsRequiredForMinuteGrant - widget.cycleProgress} more for 1 min!',
+                                  key: ValueKey<int>(widget.cycleProgress),
+                                  textAlign: TextAlign.center,
+                                  maxLines: 2,
+                                  style: GoogleFonts.montserrat(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.3,
+                                    color: Colors.white.withValues(alpha: 0.88),
+                                  ),
                                 ),
                               ),
                             ],
@@ -1408,23 +1607,16 @@ class _WatchAdCtaButtonState extends State<_WatchAdCtaButton>
 }
 
 class _WalletCard extends StatelessWidget {
-  const _WalletCard({required this.uid});
+  const _WalletCard({required this.credits});
 
-  final String uid;
+  final int credits;
 
   static const double _outerR = 18;
   static const double _innerR = 16.5;
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: FirestoreUserService.watchUserDocument(uid),
-      builder: (context, snapshot) {
-        final credits = snapshot.hasData
-            ? FirestoreUserService.usableCreditsFromSnapshot(snapshot.data!)
-            : 0;
-
-        return Container(
+    return Container(
           width: double.infinity,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(_outerR),
@@ -1500,8 +1692,8 @@ class _WalletCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  Text(
-                    '$credits',
+                  _AnimatedIntText(
+                    value: credits,
                     style: GoogleFonts.montserrat(
                       fontSize: 46,
                       height: 1.02,
@@ -1531,7 +1723,5 @@ class _WalletCard extends StatelessWidget {
             ),
           ),
         );
-      },
-    );
   }
 }

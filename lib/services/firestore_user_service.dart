@@ -341,6 +341,21 @@ class FirestoreUserService {
     );
   }
 
+  /// Derives rewarded-ad UI fields from the latest user document (same rules as streams).
+  /// Cooldown uses wall-clock vs [last_ad_timestamp] — callers can re-run this every second
+  /// from a cached snapshot to update the countdown without extra Firestore reads.
+  static ({
+    int adsToday,
+    int cooldownRemaining,
+    int cycleProgress,
+    bool dailyLimitReached,
+  }) adRewardStatusFromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) =>
+      _adRewardStatusFromSnap(doc);
+
+  /// Emits when the user document changes only (no 1 Hz timer — avoids global UI rebuilds).
+  /// Recompute cooldown locally with [adRewardStatusFromSnapshot] + a 1 s tick if needed.
   static Stream<
       ({
         int adsToday,
@@ -349,40 +364,8 @@ class FirestoreUserService {
         bool dailyLimitReached,
       })> watchAdRewardStatus(
     String uid,
-  ) {
-    return Stream.multi((listener) {
-      listener.add((
-        adsToday: 0,
-        cooldownRemaining: 0,
-        cycleProgress: 0,
-        dailyLimitReached: false,
-      ));
-      DocumentSnapshot<Map<String, dynamic>>? latest;
-      Timer? timer;
-      late final StreamSubscription<DocumentSnapshot<Map<String, dynamic>>> sub;
-      sub = _userRef(uid).snapshots().listen(
-        (snap) {
-          latest = snap;
-          listener.add(_adRewardStatusFromSnap(snap));
-        },
-        onError: listener.addError,
-        onDone: () {
-          timer?.cancel();
-          listener.close();
-        },
-      );
-      timer = Timer.periodic(const Duration(seconds: 1), (_) {
-        final s = latest;
-        if (s != null) {
-          listener.add(_adRewardStatusFromSnap(s));
-        }
-      });
-      listener.onCancel = () {
-        sub.cancel();
-        timer?.cancel();
-      };
-    });
-  }
+  ) =>
+      watchUserDocument(uid).map(_adRewardStatusFromSnap);
 
   static Stream<String?> watchAllocatedNumber(String uid) {
     return _userRef(uid).snapshots().map((doc) {
