@@ -1,4 +1,6 @@
 import 'dart:io' show Platform;
+
+import 'package:twilio_voice/twilio_voice.dart';
 import 'dart:math' show min;
 import 'dart:ui' show ImageFilter;
 
@@ -9,12 +11,12 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:permission_handler/permission_handler.dart';
 import '../config/credits_policy.dart';
+import '../config/voice_backend_config.dart';
 import '../services/call_service.dart';
 import '../services/firestore_user_service.dart';
+import '../utils/voip_runtime_permissions.dart';
 import '../widgets/premium_ios_dial_pad.dart';
-import '../widgets/voip_gate_dialog.dart';
 import 'calling_screen.dart';
 
 /// Approximate per-minute rate hint by destination; swap for live pricing when available.
@@ -171,7 +173,7 @@ class _DialerScreenState extends State<DialerScreen>
     return out.toString();
   }
 
-  /// Microphone + (Android) Phone — required before opening [CallingScreen] (Twilio Voice SDK).
+  /// Microphone + (Android) Phone — system prompts first; app Settings only if permanently denied.
   Future<bool> _ensureCallPermissionsForVoip() async {
     if (kIsWeb) {
       if (!mounted) return false;
@@ -181,45 +183,12 @@ class _DialerScreenState extends State<DialerScreen>
       return false;
     }
 
-    var mic = await Permission.microphone.status;
-    if (!mic.isGranted) {
-      mic = await Permission.microphone.request();
-    }
-    if (!mic.isGranted) {
-      if (!mounted) return false;
-      await showVoipGateDialog(
-        context,
-        title: 'Microphone required',
-        message:
-            'TalkFree needs microphone access for VoIP calls. '
-            'Tap Open Settings and allow Microphone for this app.',
-        icon: Icons.mic_rounded,
-      );
-      return false;
-    }
-
-    if (Platform.isAndroid) {
-      var phone = await Permission.phone.status;
-      if (!phone.isGranted) {
-        phone = await Permission.phone.request();
-      }
-      if (!phone.isGranted) {
-        if (!mounted) return false;
-        await showVoipGateDialog(
-          context,
-          title: 'Phone permission required',
-          message:
-              'Android needs Phone permission so Twilio can use the calling account '
-              'and place VoIP calls. Enable Phone access in Settings.',
-          icon: Icons.phone_in_talk_rounded,
-        );
-        return false;
-      }
-    }
-
-    return true;
+    if (!mounted) return false;
+    return ensureVoipRuntimePermissions(context);
   }
 
+  /// In-app VoIP only: [TwilioVoipFacade] + [CallingScreen] (neon in-call UI).
+  /// Does **not** use [url_launcher], `tel:` URIs, or the system phone app — stays inside TalkFree.
   Future<void> _onCall() async {
     if (_callBusy) return;
 
@@ -315,6 +284,19 @@ class _DialerScreenState extends State<DialerScreen>
                   ? 'Insufficient credits. Current balance: $b credits.'
                   : 'Insufficient credits',
             ),
+          ),
+        );
+      } else if (r.serverBillingPending) {
+        final b = r.syncedBalance;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              b != null
+                  ? 'Balance still $b credits — server may be slow. If it does not drop, check Twilio '
+                      'Status Callback → ${VoiceBackendConfig.baseUrl}/call-status'
+                  : 'Credits usually update shortly after the call. If not, check Twilio Status Callback on your server.',
+            ),
+            duration: const Duration(seconds: 7),
           ),
         );
       } else if (r.syncedBalance != null) {
@@ -425,6 +407,40 @@ class _DialerScreenState extends State<DialerScreen>
                         },
                       ),
                     ),
+                    if (!kIsWeb && Platform.isAndroid) ...[
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                        child: TextButton.icon(
+                          onPressed: () async {
+                            try {
+                              await TwilioVoice.instance.openPhoneAccountSettings();
+                            } catch (_) {
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Could not open Calling accounts.'),
+                                ),
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.phone_in_talk_rounded, size: 18),
+                          label: Text(
+                            'VoIP: enable TalkFree in Calling accounts (required once)',
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              color: Colors.white60,
+                              decoration: TextDecoration.underline,
+                              decorationColor: Colors.white38,
+                            ),
+                            textAlign: TextAlign.start,
+                          ),
+                          style: TextButton.styleFrom(
+                            alignment: Alignment.centerLeft,
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -517,7 +533,7 @@ class _DialerScreenState extends State<DialerScreen>
   }
 }
 
-/// Full-screen dim + neon green pulsing rings while the Render `/call` API runs.
+/// Full-screen dim + neon green pulsing rings while [CallingScreen] opens (Twilio Voice SDK).
 class _DialerConnectingOverlay extends StatelessWidget {
   const _DialerConnectingOverlay({required this.pulse});
 

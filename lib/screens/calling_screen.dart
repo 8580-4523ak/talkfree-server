@@ -13,6 +13,7 @@ import '../config/voice_backend_config.dart';
 import '../services/call_service.dart';
 import '../widgets/voip_gate_dialog.dart';
 import '../services/firestore_user_service.dart';
+import '../services/call_live_billing_service.dart';
 import '../services/twilio_voip_facade.dart';
 import '../widgets/premium_ios_dial_pad.dart' show premiumDialCallGreen;
 
@@ -21,12 +22,17 @@ class CallingScreenResult {
   const CallingScreenResult({
     required this.insufficientCredits,
     this.syncedBalance,
+    this.serverBillingPending = false,
   });
 
   final bool insufficientCredits;
 
   /// Authoritative usable credits from Firestore (e.g. after call end).
   final int? syncedBalance;
+
+  /// True if the call connected but Firestore still matched the pre-call balance after waiting
+  /// for Twilio `/call-status` (webhook delay or misconfiguration).
+  final bool serverBillingPending;
 }
 
 class CallingScreen extends StatefulWidget {
@@ -56,6 +62,10 @@ class _CallingScreenState extends State<CallingScreen>
   String _statusLine = 'Connecting...';
   bool _remoteEndedHandled = false;
   bool _connectedCreditTimerStarted = false;
+  /// Firestore usable credits at dial (before connect). Used to wait for server billing after hangup.
+  int? _creditsAtSessionStart;
+  /// Twilio Call SID — required for POST /call-live-tick and /sync-call-billing.
+  String? _activeCallSid;
 
   late final AnimationController _callVisualPulse = AnimationController(
     vsync: this,
@@ -84,19 +94,46 @@ class _CallingScreenState extends State<CallingScreen>
 
   void _onElapsedTick(Timer _) {
     if (!mounted) return;
+    if (kDebugMode && _elapsedSeconds == 0) {
+      debugPrint('DEBUG: _elapsedTimer first tick (1 Hz) — call is Connected');
+    }
     setState(() => _elapsedSeconds++);
   }
 
   void _onLiveCreditTick(Timer timer) {
+    unawaited(_applyServerLiveTick(timer));
+  }
+
+  Future<void> _applyServerLiveTick(Timer timer) async {
     if (!mounted) return;
-    final lc = _localCredits;
-    if (lc == null) return;
+    final sid = _activeCallSid;
+    if (sid == null || sid.isEmpty) return;
+    if (kDebugMode) {
+      debugPrint(
+        'DEBUG: _liveCreditTicker → POST /call-live-tick amount '
+        '${CreditsPolicy.connectedLiveCreditPerTick}',
+      );
+    }
+    final ok = await CallLiveBillingService.instance.postLiveTick(
+      callSid: sid,
+      amount: CreditsPolicy.connectedLiveCreditPerTick,
+    );
+    if (!mounted) return;
+    if (!ok && kDebugMode) {
+      debugPrint('DEBUG: call-live-tick failed (will retry on next tick)');
+    }
+    int display;
+    try {
+      display = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
+    } catch (_) {
+      return;
+    }
+    if (!mounted) return;
     setState(() {
-      _localCredits = lc - CreditsPolicy.connectedLiveCreditPerTick;
+      _localCredits = display;
       _creditPulse.forward(from: 0);
     });
-    final after = _localCredits;
-    if (after != null && after <= 0) {
+    if (display <= 0) {
       timer.cancel();
       _liveCreditTicker = null;
       unawaited(_autoHangupLowCredits());
@@ -111,7 +148,20 @@ class _CallingScreenState extends State<CallingScreen>
   }
 
   Future<void> _startConnectedCreditTimer() async {
-    if (_connectedCreditTimerStarted || !mounted) return;
+    if (kDebugMode) {
+      debugPrint(
+        'DEBUG: _startConnectedCreditTimer() entered — '
+        'alreadyStarted=$_connectedCreditTimerStarted mounted=$mounted',
+      );
+    }
+    if (_connectedCreditTimerStarted || !mounted) {
+      if (kDebugMode) {
+        debugPrint(
+          'DEBUG: _startConnectedCreditTimer() skipped (duplicate connect or unmounted)',
+        );
+      }
+      return;
+    }
     _connectedCreditTimerStarted = true;
 
     final credits = await FirestoreUserService.fetchUsableCredits(
@@ -119,13 +169,64 @@ class _CallingScreenState extends State<CallingScreen>
     );
     if (!mounted) return;
 
+    var sid = _activeCallSid ?? '';
+    for (var i = 0; i < 50 && sid.isEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (!mounted) return;
+      final g = await TwilioVoipFacade.instance.getActiveCallSid();
+      if (g != null && g.isNotEmpty) {
+        sid = g;
+        _activeCallSid = g;
+        CallService.instance.setActiveCallSid(g);
+      }
+    }
+
+    if (sid.isEmpty) {
+      if (kDebugMode) {
+        debugPrint('DEBUG: No CallSid yet — elapsed only, no live billing ticks');
+      }
+      setState(() => _localCredits = credits);
+      _cancelConnectedTimers();
+      _elapsedSeconds = 0;
+      _elapsedTimer = Timer.periodic(const Duration(seconds: 1), _onElapsedTick);
+      return;
+    }
+
+    if (kDebugMode) {
+      debugPrint(
+        'DEBUG: Connected → POST /call-live-tick amount ${CreditsPolicy.creditsPerCallTick}',
+      );
+    }
+
+    final okInitial = await CallLiveBillingService.instance.postLiveTick(
+      callSid: sid,
+      amount: CreditsPolicy.creditsPerCallTick,
+    );
+    if (!mounted) return;
+    if (!okInitial && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Could not reach billing server for this call. Credits may update when the call ends.',
+          ),
+        ),
+      );
+    }
+
+    final afterServer = await FirestoreUserService.fetchUsableCredits(
+      widget.user.uid,
+    );
+    if (!mounted) return;
+
     setState(() {
-      _localCredits = credits - CreditsPolicy.creditsPerCallTick;
+      _localCredits = afterServer;
       _creditPulse.forward(from: 0);
     });
 
-    final afterInitial = _localCredits ?? 0;
-    if (afterInitial <= 0) {
+    if (afterServer <= 0) {
+      if (kDebugMode) {
+        debugPrint('DEBUG: Connected → balance ≤0 after initial server deduct');
+      }
       unawaited(_autoHangupLowCredits());
       return;
     }
@@ -137,6 +238,12 @@ class _CallingScreenState extends State<CallingScreen>
       Duration(seconds: CreditsPolicy.connectedLiveCreditIntervalSec),
       _onLiveCreditTick,
     );
+    if (kDebugMode) {
+      debugPrint(
+        'DEBUG: Started _elapsedTimer (1s) + _liveCreditTicker → /call-live-tick '
+        '(${CreditsPolicy.connectedLiveCreditIntervalSec}s)',
+      );
+    }
   }
 
   Future<void> _autoHangupLowCredits() async {
@@ -158,20 +265,87 @@ class _CallingScreenState extends State<CallingScreen>
     }
   }
 
-  /// Anti-cheat: final Firestore read so UI / parent can show authoritative balance after call.
+  /// After hangup: [CallLiveBillingService.syncCallBilling] (same settlement as Twilio `/call-status`),
+  /// then refresh balance for the dialer.
   Future<void> _popWithFirestoreSync({required bool insufficientCredits}) async {
     if (!mounted) return;
     int? synced;
+    var serverBillingPending = false;
     try {
-      synced = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
+      final settled = await _fetchUsableCreditsAfterCallSettles();
+      synced = settled.balance;
+      serverBillingPending = settled.serverBillingPending;
     } catch (_) {}
     if (!mounted) return;
     Navigator.of(context).pop(
       CallingScreenResult(
         insufficientCredits: insufficientCredits,
         syncedBalance: synced,
+        serverBillingPending: serverBillingPending,
       ),
     );
+  }
+
+  Future<({int? balance, bool serverBillingPending})>
+      _fetchUsableCreditsAfterCallSettles() async {
+    final uid = widget.user.uid;
+    final baseline = _creditsAtSessionStart;
+    final sid = _activeCallSid;
+
+    if (baseline == null || !_connectedCreditTimerStarted) {
+      try {
+        final v = await FirestoreUserService.fetchUsableCredits(uid);
+        return (balance: v, serverBillingPending: false);
+      } catch (_) {
+        return (balance: null, serverBillingPending: false);
+      }
+    }
+
+    if (sid != null && sid.isNotEmpty) {
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      if (!mounted) {
+        return (balance: null, serverBillingPending: false);
+      }
+      final syncedOk =
+          await CallLiveBillingService.instance.syncCallBilling(sid);
+      if (kDebugMode) {
+        debugPrint('DEBUG: sync-call-billing completed: $syncedOk');
+      }
+    }
+
+    const maxAttempts = 8;
+    const delay = Duration(milliseconds: 400);
+    int? last;
+
+    for (var i = 0; i < maxAttempts; i++) {
+      if (!mounted) {
+        return (balance: last, serverBillingPending: false);
+      }
+      try {
+        last = await FirestoreUserService.fetchUsableCredits(uid);
+      } catch (_) {
+        if (i == maxAttempts - 1) {
+          return (balance: last, serverBillingPending: true);
+        }
+        await Future<void>.delayed(delay);
+        continue;
+      }
+
+      if (last < baseline) {
+        return (balance: last, serverBillingPending: false);
+      }
+      if (i < maxAttempts - 1) {
+        await Future<void>.delayed(delay);
+      }
+    }
+
+    final pending = last != null && last >= baseline;
+    if (pending && kDebugMode) {
+      debugPrint(
+        'DEBUG: Balance still ≥ pre-call after sync — check Render / Twilio /call-status',
+      );
+    }
+    return (balance: last, serverBillingPending: pending);
   }
 
   /// Shown when [TwilioVoipFacade.placePstnCall] does not return true (permissions, phone account, Twilio config).
@@ -253,6 +427,7 @@ class _CallingScreenState extends State<CallingScreen>
       final sid = await TwilioVoipFacade.instance.getActiveCallSid();
       if (sid != null && sid.isNotEmpty) {
         CallService.instance.setActiveCallSid(sid);
+        setState(() => _activeCallSid = sid);
         return;
       }
     }
@@ -272,6 +447,7 @@ class _CallingScreenState extends State<CallingScreen>
 
     final c = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
     if (!mounted) return;
+    _creditsAtSessionStart = c;
     if (c < CreditsPolicy.minCreditsToStartCall) {
       _cancelConnectedTimers();
       Navigator.of(context).pop(
@@ -289,11 +465,21 @@ class _CallingScreenState extends State<CallingScreen>
 
       sub = TwilioVoipFacade.instance.callEvents.listen((event) {
         if (!mounted) return;
+        final status = event.name;
+        if (kDebugMode) {
+          debugPrint('DEBUG: Call Status is $status');
+        }
         switch (event) {
           case CallEvent.ringing:
             setState(() => _statusLine = 'Calling...');
             break;
           case CallEvent.connected:
+            if (kDebugMode) {
+              debugPrint(
+                'DEBUG: CallEvent.connected → UI Connected + '
+                '_startConnectedCreditTimer() (local −credits + timers)',
+              );
+            }
             setState(() => _statusLine = 'Connected');
             unawaited(_startConnectedCreditTimer());
             break;
@@ -301,6 +487,12 @@ class _CallingScreenState extends State<CallingScreen>
             setState(() => _statusLine = 'Connecting...');
             break;
           case CallEvent.reconnected:
+            if (kDebugMode) {
+              debugPrint(
+                'DEBUG: CallEvent.reconnected → UI Connected + '
+                '_startConnectedCreditTimer()',
+              );
+            }
             setState(() => _statusLine = 'Connected');
             unawaited(_startConnectedCreditTimer());
             break;
@@ -327,6 +519,12 @@ class _CallingScreenState extends State<CallingScreen>
 
       unawaited(_pollActiveCallSid());
 
+      if (kDebugMode) {
+        debugPrint(
+          'DEBUG: placePstnCall ok → CallService.startBilling(); '
+          'live pulses use POST /call-live-tick, final settle: /sync-call-billing + Twilio /call-status',
+        );
+      }
       CallService.instance.startBilling(
         uid: widget.user.uid,
         twilioCallSid: null,
@@ -344,12 +542,33 @@ class _CallingScreenState extends State<CallingScreen>
       _callSub = null;
       if (!mounted) return;
       final msg = e.toString();
-      final tokenOrServer = msg.contains('token') ||
-          msg.contains('Token') ||
-          msg.contains('HTTP') ||
-          msg.contains(VoiceBackendConfig.baseUrl) ||
-          msg.contains('setTokens');
+      final callingAccount = msg.contains('Calling account disabled');
+      if (callingAccount) {
+        // Not a runtime permission — OEM "Calling accounts" toggle. Open system UI directly;
+        // runtime mic/phone were already requested on the dialer.
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Turn ON TalkFree (or Twilio) in Calling accounts — the settings screen will open.',
+              ),
+              duration: Duration(seconds: 5),
+            ),
+          );
+          try {
+            await TwilioVoice.instance.openPhoneAccountSettings();
+          } catch (_) {}
+        }
+        if (!mounted) return;
+      }
+      final tokenOrServer = !callingAccount &&
+          (msg.contains('token') ||
+              msg.contains('Token') ||
+              msg.contains('HTTP') ||
+              msg.contains(VoiceBackendConfig.baseUrl) ||
+              msg.contains('setTokens'));
       if (tokenOrServer) {
+        if (!mounted) return;
         await showVoipGateDialog(
           context,
           title: 'Voice service',
@@ -362,7 +581,9 @@ class _CallingScreenState extends State<CallingScreen>
           primaryLabel: 'OK',
           openSettingsOnPrimary: false,
         );
-      } else {
+        if (!mounted) return;
+      } else if (!callingAccount) {
+        if (!mounted) return;
         await showVoipGateDialog(
           context,
           title: 'Call setup failed',
@@ -469,6 +690,24 @@ class _CallingScreenState extends State<CallingScreen>
                   color: Colors.white70,
                 ),
               ),
+              if (!kIsWeb &&
+                  Platform.isAndroid &&
+                  (_statusLine == 'Connected' || _statusLine == 'Calling...')) ...[
+                const SizedBox(height: 10),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    'This call uses Twilio VoIP inside TalkFree — not the cellular dialer. '
+                    'Some phones show the system Phone bar on top; hang up here to end the call.',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      height: 1.4,
+                      color: Colors.white54,
+                    ),
+                  ),
+                ),
+              ],
               if (_localCredits != null) ...[
                 const SizedBox(height: 20),
                 _NeonCreditsBalance(

@@ -47,7 +47,10 @@ class TwilioVoipFacade {
     if (Platform.isAndroid) {
       await TwilioVoice.instance.registerPhoneAccount();
       if (!await TwilioVoice.instance.isPhoneAccountEnabled()) {
-        await TwilioVoice.instance.openPhoneAccountSettings();
+        throw StateError(
+          'Calling account disabled: enable TalkFree’s phone account for VoIP in Android '
+          '(Settings → Calling accounts / SIMs, or use Open calling settings in the app).',
+        );
       }
       await TwilioVoice.instance.requestCallPhonePermission();
       await TwilioVoice.instance.requestReadPhoneStatePermission();

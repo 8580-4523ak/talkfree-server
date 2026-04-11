@@ -416,10 +416,21 @@ app.post("/grant-reward", async (req, res) => {
 
 const CALL_CREDITS_PER_MINUTE = Number(process.env.CALL_CREDITS_PER_MINUTE || 10);
 
+/** Non-empty Firebase Auth uid — all billing writes use `users/{uid}`. */
+function requireFirebaseUid(uid) {
+  const u = String(uid || "").trim();
+  if (!u) {
+    throw Object.assign(new Error("Missing or empty user id for billing"), { http: 400 });
+  }
+  return u;
+}
+
 function parseTwilioDurationSeconds(body) {
   const raw =
     body.Duration ??
     body.CallDuration ??
+    body.DialCallDuration ??
+    body.RecordingDuration ??
     body.duration ??
     body.callDuration ??
     "0";
@@ -436,6 +447,328 @@ function resolveUidFromTwilioStatus(body, query) {
   if (m) return m[1].trim();
   return null;
 }
+
+/** Matches Flutter [CreditsPolicy] live tick amounts (10 = connect pulse, 1 = periodic). */
+const ALLOWED_LIVE_TICK_AMOUNTS = new Set([1, 10]);
+
+/**
+ * Final settlement: Twilio duration → target charge, minus credits already taken via POST /call-live-tick
+ * (tracked in `users/{uid}/voice_active_calls/{callSid}.liveDeductedCredits`).
+ */
+async function settleOutboundCallBill({
+  uid: uidIn,
+  callSid,
+  durationSec,
+  from,
+  to,
+  twilioCallStatus,
+  source,
+}) {
+  if (!firebaseAdmin) {
+    throw new Error("Firebase not configured");
+  }
+  const uid = requireFirebaseUid(uidIn);
+  const db = firebaseAdmin.firestore();
+  const { FieldValue } = firebaseAdmin.firestore;
+
+  const ds = Number(durationSec) || 0;
+  const billedMinutes = Math.ceil(ds / 60);
+  const finalCharge = Math.max(
+    CALL_CREDITS_PER_MINUTE,
+    billedMinutes * CALL_CREDITS_PER_MINUTE,
+  );
+
+  await db.runTransaction(async (t) => {
+    const userRef = db.collection("users").doc(uid);
+    const historyRef = userRef.collection("call_history").doc(callSid);
+    const liveRef = userRef.collection("voice_active_calls").doc(callSid);
+
+    const existing = await t.get(historyRef);
+    if (existing.exists && existing.data()?.settled === true) {
+      return;
+    }
+
+    const userSnap = await t.get(userRef);
+    if (!userSnap.exists) {
+      throw Object.assign(new Error("User document missing"), { http: 404 });
+    }
+
+    const liveSnap = await t.get(liveRef);
+    const prepaid = Number(liveSnap.exists ? liveSnap.data()?.liveDeductedCredits || 0 : 0);
+
+    const d = userSnap.data();
+    let paid = Number(d.paidCredits ?? 0);
+    let reward = Number(d.rewardCredits ?? 0);
+    const now = new Date();
+    const expTs = d.rewardCreditsExpiresAt;
+    if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < now) {
+      paid += reward;
+      reward = 0;
+    }
+    if (d.paidCredits === undefined && d.credits != null) {
+      paid = Number(d.credits);
+      reward = 0;
+    }
+
+    let remainder = finalCharge - prepaid;
+
+    if (remainder < 0) {
+      const refund = -remainder;
+      paid += refund;
+      remainder = 0;
+    }
+
+    let usable = paid + reward;
+    const charge = remainder;
+    let creditsChargedThisSettle = 0;
+    if (charge > 0 && usable > 0) {
+      creditsChargedThisSettle = usable < charge ? usable : charge;
+      let left = creditsChargedThisSettle;
+      const takeReward = left < reward ? left : reward;
+      reward -= takeReward;
+      left -= takeReward;
+      paid -= left;
+      usable = paid + reward;
+    }
+
+    let rewardExpOut = null;
+    if (reward > 0) {
+      rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+    }
+
+    const totalCreditsOut = paid + reward;
+    console.log(
+      `[billing] settle user=${uid} callSid=${callSid} source=${source} durationSec=${ds} ` +
+        `finalCharge=${finalCharge} prepaid=${prepaid} remainderCharge=${charge} ` +
+        `creditsAppliedThisSettle=${creditsChargedThisSettle} balanceAfter=${totalCreditsOut}`,
+    );
+
+    t.update(userRef, {
+      paidCredits: paid,
+      rewardCredits: reward,
+      rewardCreditsExpiresAt: rewardExpOut,
+      credits: totalCreditsOut,
+    });
+
+    t.set(
+      historyRef,
+      {
+        firebaseUid: uid,
+        callSid,
+        twilioCallStatus: String(twilioCallStatus || "completed"),
+        durationSeconds: ds,
+        billedMinutes,
+        creditsPerMinute: CALL_CREDITS_PER_MINUTE,
+        finalCharge,
+        prepaidAppliedFromLiveTicks: prepaid,
+        creditsCharged: creditsChargedThisSettle,
+        creditsAttempted: charge,
+        partialDeduction: charge > 0 && creditsChargedThisSettle < charge,
+        from,
+        to,
+        settled: true,
+        settledAt: FieldValue.serverTimestamp(),
+        source: source || "unknown",
+      },
+      { merge: true },
+    );
+
+    t.delete(liveRef);
+  });
+}
+
+/**
+ * POST /call-live-tick — Firebase Bearer; JSON `{ "callSid": "CA...", "amount": 1|10 }`.
+ * Deducts credits on the server and increments live session total (reconciled at call end).
+ */
+app.post("/call-live-tick", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const bm = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!bm) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = requireFirebaseUid((await firebaseAdmin.auth().verifyIdToken(bm[1])).uid);
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  const callSid = String(req.body?.callSid || req.body?.CallSid || "").trim();
+  const amount = Number(req.body?.amount);
+  if (!callSid) {
+    return res.status(400).json({ error: "Missing callSid" });
+  }
+  if (!Number.isFinite(amount) || !ALLOWED_LIVE_TICK_AMOUNTS.has(amount)) {
+    return res.status(400).json({ error: "Invalid amount (allowed: 1 or 10)" });
+  }
+
+  let call;
+  try {
+    call = await twilioClient.calls(callSid).fetch();
+  } catch (e) {
+    console.warn("/call-live-tick: Twilio fetch failed", e.message);
+    return res.status(400).json({ error: "Could not fetch call" });
+  }
+  const from = String(call.from || "");
+  const cm = /^client:(.+)$/i.exec(from);
+  if (!cm || cm[1].trim() !== uid) {
+    return res.status(403).json({ error: "Call does not belong to this user" });
+  }
+
+  const db = firebaseAdmin.firestore();
+  const { FieldValue } = firebaseAdmin.firestore;
+
+  try {
+    await db.runTransaction(async (t) => {
+      const userRef = db.collection("users").doc(uid);
+      const liveRef = userRef.collection("voice_active_calls").doc(callSid);
+      const userSnap = await t.get(userRef);
+      if (!userSnap.exists) {
+        throw Object.assign(new Error("User document missing"), { http: 404 });
+      }
+
+      const d = userSnap.data();
+      let paid = Number(d.paidCredits ?? 0);
+      let reward = Number(d.rewardCredits ?? 0);
+      const now = new Date();
+      const expTs = d.rewardCreditsExpiresAt;
+      if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < now) {
+        paid += reward;
+        reward = 0;
+      }
+      if (d.paidCredits === undefined && d.credits != null) {
+        paid = Number(d.credits);
+        reward = 0;
+      }
+
+      let usable = paid + reward;
+      if (usable < amount) {
+        throw Object.assign(new Error("Insufficient credits"), { http: 402 });
+      }
+
+      let left = amount;
+      const takeReward = left < reward ? left : reward;
+      reward -= takeReward;
+      left -= takeReward;
+      paid -= left;
+      usable = paid + reward;
+
+      let rewardExpOut = null;
+      if (reward > 0) {
+        rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+      }
+
+      const bal = paid + reward;
+      console.log(
+        `[billing] call-live-tick user=${uid} callSid=${callSid} amount=${amount} balanceAfter=${bal}`,
+      );
+      t.update(userRef, {
+        paidCredits: paid,
+        rewardCredits: reward,
+        rewardCreditsExpiresAt: rewardExpOut,
+        credits: bal,
+      });
+      t.set(
+        liveRef,
+        {
+          firebaseUid: uid,
+          liveDeductedCredits: FieldValue.increment(amount),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    });
+  } catch (e) {
+    const code = e.http || 500;
+    if (code === 402) {
+      return res.status(402).json({ error: "Insufficient credits" });
+    }
+    if (code === 404) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    console.error("/call-live-tick:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+  return res.status(200).json({ ok: true });
+});
+
+/**
+ * POST /sync-call-billing — Firebase Bearer; JSON `{ "callSid": "CA..." }`.
+ * Fetches Twilio call duration and runs the same settlement as Twilio `/call-status` (idempotent).
+ */
+app.post("/sync-call-billing", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const bm = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!bm) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = requireFirebaseUid((await firebaseAdmin.auth().verifyIdToken(bm[1])).uid);
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  const callSid = String(req.body?.callSid || req.body?.CallSid || "").trim();
+  if (!callSid) {
+    return res.status(400).json({ error: "Missing callSid" });
+  }
+
+  let call;
+  let durationSec = 0;
+  try {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      call = await twilioClient.calls(callSid).fetch();
+      const durationRaw = Number.parseInt(String(call.duration != null ? call.duration : "0"), 10);
+      durationSec = Number.isFinite(durationRaw) ? durationRaw : 0;
+      const st = String(call.status || "");
+      if (durationSec > 0 || st === "completed" || st === "canceled" || st === "failed") {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 600));
+    }
+  } catch (e) {
+    console.warn("/sync-call-billing: Twilio fetch failed", e.message);
+    return res.status(400).json({ error: "Could not fetch call" });
+  }
+  const from = String(call.from || "");
+  const cm = /^client:(.+)$/i.exec(from);
+  if (!cm || cm[1].trim() !== uid) {
+    return res.status(403).json({ error: "Call does not belong to this user" });
+  }
+
+  const to = String(call.to || "");
+  console.log(
+    `[billing] sync-call-billing user=${uid} callSid=${callSid} twilioStatus=${call.status} durationSec=${durationSec}`,
+  );
+
+  try {
+    await settleOutboundCallBill({
+      uid,
+      callSid,
+      durationSec,
+      from,
+      to,
+      twilioCallStatus: String(call.status || "completed"),
+      source: "sync_call_billing",
+    });
+  } catch (e) {
+    const code = e.http || 500;
+    if (code === 404) {
+      return res.status(200).json({ ok: true, skipped: true });
+    }
+    console.error("/sync-call-billing:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+  return res.status(200).json({ ok: true });
+});
 
 /**
  * Twilio StatusCallback — set in Twilio Console (Voice app / number) to:
@@ -468,100 +801,43 @@ app.post("/call-status", async (req, res) => {
     return res.status(400).type("text/plain").send("Missing CallSid");
   }
 
-  const uid = resolveUidFromTwilioStatus(body, req.query);
-  if (!uid) {
-    console.warn("/call-status: could not resolve user (need client: identity or ?uid=)");
+  const uidRaw = resolveUidFromTwilioStatus(body, req.query);
+  if (!uidRaw) {
+    console.warn(
+      "/call-status: could not resolve user (need From=client:<firebaseUid> on Voice SDK calls)",
+      "From=",
+      body.From,
+      "keys=",
+      Object.keys(body || {}),
+    );
+    return res.status(200).type("text/plain").send("OK");
+  }
+
+  let uid;
+  try {
+    uid = requireFirebaseUid(uidRaw);
+  } catch (e) {
+    console.warn("/call-status: invalid uid", uidRaw);
     return res.status(200).type("text/plain").send("OK");
   }
 
   const durationSec = parseTwilioDurationSeconds(body);
-  /** Strict billing: finalCharge = max(10, ceil(durationSec / 60) * 10) with CALL_CREDITS_PER_MINUTE default 10. */
-  const billedMinutes = Math.ceil(durationSec / 60);
-  const finalCharge = Math.max(
-    CALL_CREDITS_PER_MINUTE,
-    billedMinutes * CALL_CREDITS_PER_MINUTE,
-  );
-  const creditsAttempted = finalCharge;
   const from = String(body.From || "");
   const to = String(body.To || "");
 
-  const { FieldValue } = firebaseAdmin.firestore;
-  const db = firebaseAdmin.firestore();
+  console.log(
+    `[billing] call-status webhook user=${uid} callSid=${callSid} durationSec=${durationSec} CallStatus=${body.CallStatus}`,
+  );
 
   try {
-    await db.runTransaction(async (t) => {
-      const userRef = db.collection("users").doc(uid);
-      const historyRef = userRef.collection("call_history").doc(callSid);
-
-      const existing = await t.get(historyRef);
-      if (existing.exists && existing.data()?.settled === true) {
-        return;
-      }
-
-      const userSnap = await t.get(userRef);
-      if (!userSnap.exists) {
-        throw Object.assign(new Error("User document missing"), { http: 404 });
-      }
-
-      const d = userSnap.data();
-      let paid = Number(d.paidCredits ?? 0);
-      let reward = Number(d.rewardCredits ?? 0);
-      const now = new Date();
-      const expTs = d.rewardCreditsExpiresAt;
-      if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < now) {
-        paid += reward;
-        reward = 0;
-      }
-      if (d.paidCredits === undefined && d.credits != null) {
-        paid = Number(d.credits);
-        reward = 0;
-      }
-
-      let usable = paid + reward;
-      const charge = finalCharge;
-      let creditsCharged = 0;
-      if (charge > 0 && usable > 0) {
-        creditsCharged = usable < charge ? usable : charge;
-        let left = creditsCharged;
-        const takeReward = left < reward ? left : reward;
-        reward -= takeReward;
-        left -= takeReward;
-        paid -= left;
-        usable = paid + reward;
-      }
-
-      let rewardExpOut = null;
-      if (reward > 0) {
-        rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
-      }
-
-      t.update(userRef, {
-        paidCredits: paid,
-        rewardCredits: reward,
-        rewardCreditsExpiresAt: rewardExpOut,
-        credits: paid + reward,
-      });
-
-      t.set(
-        historyRef,
-        {
-          callSid,
-          twilioCallStatus: String(body.CallStatus || "completed"),
-          durationSeconds: durationSec,
-          billedMinutes,
-          creditsPerMinute: CALL_CREDITS_PER_MINUTE,
-          finalCharge,
-          creditsAttempted: charge,
-          creditsCharged,
-          partialDeduction: charge > 0 && creditsCharged < charge,
-          from,
-          to,
-          settled: true,
-          settledAt: FieldValue.serverTimestamp(),
-          source: "twilio_status_callback",
-        },
-        { merge: true },
-      );
+    await settleOutboundCallBill({
+      uid,
+      callSid,
+      durationSec,
+      from,
+      to,
+      twilioCallStatus: String(body.CallStatus || "completed"),
+      source: "twilio_status_callback",
     });
   } catch (e) {
     const code = e.http || 500;

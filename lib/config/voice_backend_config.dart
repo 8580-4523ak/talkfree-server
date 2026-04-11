@@ -29,4 +29,10 @@ abstract final class VoiceBackendConfig {
 
   /// `POST /terminate-call` — JSON `{ "callSid": "CA..." }` when balance cannot cover talk time.
   static Uri terminateCallUri() => Uri.https(_host, '/terminate-call');
+
+  /// `POST /call-live-tick` — JSON `{ "callSid", "amount" }` (secured live credit pulses).
+  static Uri callLiveTickUri() => Uri.https(_host, '/call-live-tick');
+
+  /// `POST /sync-call-billing` — JSON `{ "callSid" }` after hangup (same settlement as Twilio `/call-status`).
+  static Uri syncCallBillingUri() => Uri.https(_host, '/sync-call-billing');
 }

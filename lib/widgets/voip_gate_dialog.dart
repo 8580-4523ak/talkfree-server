@@ -4,7 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../theme/app_colors.dart';
 
-/// Dark, styled dialog — permissions or voice setup; primary action opens system Settings.
+/// Dark, styled dialog — permissions or voice setup; primary opens [onPrimaryAction] or app settings.
 Future<void> showVoipGateDialog(
   BuildContext context, {
   required String title,
@@ -12,6 +12,7 @@ Future<void> showVoipGateDialog(
   IconData icon = Icons.shield_rounded,
   String primaryLabel = 'Open Settings',
   bool openSettingsOnPrimary = true,
+  Future<void> Function()? onPrimaryAction,
 }) async {
   final go = await showDialog<bool>(
     context: context,
@@ -131,7 +132,11 @@ Future<void> showVoipGateDialog(
       );
     },
   );
-  if (go == true && openSettingsOnPrimary && context.mounted) {
-    await openAppSettings();
+  if (go == true && context.mounted) {
+    if (onPrimaryAction != null) {
+      await onPrimaryAction();
+    } else if (openSettingsOnPrimary) {
+      await openAppSettings();
+    }
   }
 }
