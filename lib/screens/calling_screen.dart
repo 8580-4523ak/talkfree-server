@@ -196,42 +196,15 @@ class _CallingScreenState extends State<CallingScreen>
 
     if (kDebugMode) {
       debugPrint(
-        'DEBUG: Connected → POST /call-live-tick amount ${CreditsPolicy.creditsPerCallTick}',
+        'DEBUG: Connected → no immediate live charge; first /call-live-tick (1) after '
+        '${CreditsPolicy.connectedLiveCreditIntervalSec}s (min charge still applied at settlement)',
       );
     }
-
-    final okInitial = await CallLiveBillingService.instance.postLiveTick(
-      callSid: sid,
-      amount: CreditsPolicy.creditsPerCallTick,
-    );
-    if (!mounted) return;
-    if (!okInitial && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Could not reach billing server for this call. Credits may update when the call ends.',
-          ),
-        ),
-      );
-    }
-
-    final afterServer = await FirestoreUserService.fetchUsableCredits(
-      widget.user.uid,
-    );
-    if (!mounted) return;
 
     setState(() {
-      _localCredits = afterServer;
+      _localCredits = credits;
       _creditPulse.forward(from: 0);
     });
-
-    if (afterServer <= 0) {
-      if (kDebugMode) {
-        debugPrint('DEBUG: Connected → balance ≤0 after initial server deduct');
-      }
-      unawaited(_autoHangupLowCredits());
-      return;
-    }
 
     _cancelConnectedTimers();
     _elapsedSeconds = 0;

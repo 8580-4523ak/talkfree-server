@@ -454,10 +454,9 @@ const ALLOWED_LIVE_TICK_AMOUNTS = new Set([1, 10]);
 /**
  * TalkFree Tier-2 settlement (server truth; backup: Twilio POST /call-status if app offline).
  *
- * Math (CALL_CREDITS_PER_MINUTE = credits per billed minute, default 10):
- * - billedMinutes = ceil(durationSec / 60)  e.g. 61s → 2 minutes
- * - finalCharge = max(CALL_CREDITS_PER_MINUTE, billedMinutes * CALL_CREDITS_PER_MINUTE)
- * - prepaid = liveDeductedCredits from POST /call-live-tick (connect 10 + every 6s × 1)
+ * Math (1 live tick = 6s = 1 credit):
+ * - finalCharge = ceil(durationSec / 6)  e.g. 12s → 2, 0s → 0
+ * - prepaid = liveDeductedCredits from POST /call-live-tick (every 6s × 1)
  * - remainder = finalCharge - prepaid → deduct from user; if prepaid > finalCharge, refund to paidCredits
  *
  * Firestore: `users/{uid}` fields paidCredits, rewardCredits, credits; history in `call_history/{callSid}`.
@@ -479,11 +478,7 @@ async function settleOutboundCallBill({
   const { FieldValue } = firebaseAdmin.firestore;
 
   const ds = Number(durationSec) || 0;
-  const billedMinutes = Math.ceil(ds / 60);
-  const finalCharge = Math.max(
-    CALL_CREDITS_PER_MINUTE,
-    billedMinutes * CALL_CREDITS_PER_MINUTE,
-  );
+  const finalCharge = Math.ceil(ds / 6);
 
   await db.runTransaction(async (t) => {
     const userRef = db.collection("users").doc(uid);
@@ -567,7 +562,7 @@ async function settleOutboundCallBill({
         callSid,
         twilioCallStatus: String(twilioCallStatus || "completed"),
         durationSeconds: ds,
-        billedMinutes,
+        billedSixSecondTicks: finalCharge,
         creditsPerMinute: CALL_CREDITS_PER_MINUTE,
         finalCharge,
         prepaidAppliedFromLiveTicks: prepaid,
