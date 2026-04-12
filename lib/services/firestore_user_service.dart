@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 
 import '../config/credits_policy.dart';
 
@@ -95,6 +97,33 @@ class FirestoreUserService {
   ) =>
       computeUsableCredits(doc.data());
 
+  /// E.164 or `null` — checks `assigned_number` and legacy number fields.
+  static String? assignedNumberFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    for (final key in [
+      'assigned_number',
+      'virtual_number',
+      'allocatedNumber',
+      'number',
+    ]) {
+      final v = data[key];
+      if (v is String) {
+        final t = v.trim();
+        if (t.isNotEmpty && t != 'none') return t;
+      }
+    }
+    return null;
+  }
+
+  /// Lifetime rewarded-ad views (`ads_watched_count` only — no daily fallback).
+  static int lifetimeAdsWatchedFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return 0;
+    final v = data['ads_watched_count'];
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return 0;
+  }
+
   static Future<void> expireRewardCreditsIfNeeded(String uid) async {
     await _db.runTransaction((tx) async {
       final ref = _userRef(uid);
@@ -116,22 +145,194 @@ class FirestoreUserService {
     });
   }
 
+  /// Creates `users/{uid}` for new sign-ins or refreshes email; returns current usable credits.
+  /// New users get [CreditsPolicy.initialCreditsForNewUser] (0 — `paidCredits`/`credits`, `rewardCredits: 0`) and `virtual_number: null`.
+  static Future<int> syncUserWithFirestoreOnLogin(User user) async {
+    final ref = _userRef(user.uid);
+    final email = user.email?.trim() ?? '';
+
+    final existing = await ref.get();
+    if (existing.exists) {
+      await expireRewardCreditsIfNeeded(user.uid);
+      final data = existing.data()!;
+      final updates = <String, dynamic>{};
+      if (email.isNotEmpty && (data['email'] as String?) != email) {
+        updates['email'] = email;
+      }
+      if (data['isGuest'] != user.isAnonymous) {
+        updates['isGuest'] = user.isAnonymous;
+      }
+      _backfillCanonicalUserFields(data, updates);
+      if (updates.isNotEmpty) {
+        await ref.update(updates);
+      }
+      final after = await ref.get();
+      return computeUsableCredits(after.data());
+    }
+
+    if (email.isNotEmpty) {
+      final dup = await _db
+          .collection('users')
+          .where('email', isEqualTo: email)
+          .limit(1)
+          .get();
+      if (dup.docs.isNotEmpty && dup.docs.first.id != user.uid && kDebugMode) {
+        debugPrint(
+          'Firestore: email "$email" exists on another doc; creating users/${user.uid}',
+        );
+      }
+    }
+
+    await ref.set(_newUserDocumentData(user));
+    return CreditsPolicy.initialCreditsForNewUser;
+  }
+
+  /// Adds missing canonical fields for older `users/{uid}` documents (non-destructive).
+  static void _backfillCanonicalUserFields(
+    Map<String, dynamic> data,
+    Map<String, dynamic> updates,
+  ) {
+    if (!data.containsKey('assigned_number')) {
+      updates['assigned_number'] = data['virtual_number'] ?? data['allocatedNumber'];
+    }
+    if (!data.containsKey('ads_watched_count')) {
+      updates['ads_watched_count'] =
+          _int(data['ads_watched_today'] ?? data['adRewardsCount']);
+    }
+    if (!data.containsKey('created_at') && data['createdAt'] != null) {
+      updates['created_at'] = data['createdAt'];
+    }
+  }
+
+  static Map<String, dynamic> _newUserDocumentData(User user) {
+    final email = user.email?.trim() ?? '';
+    final initial = CreditsPolicy.initialCreditsForNewUser;
+    return <String, dynamic>{
+      'uid': user.uid,
+      'email': email,
+      'isGuest': user.isAnonymous,
+      'credits': initial,
+      'assigned_number': null,
+      'virtual_number': null,
+      'paidCredits': initial,
+      'rewardCredits': 0,
+      'rewardCreditsExpiresAt': null,
+      'number': 'none',
+      'allocatedNumber': null,
+      'ad_progress': 0,
+      'ads_watched_today': 0,
+      'ads_watched_count': 0,
+      'last_reset_date': '',
+      'last_ad_timestamp': null,
+      'adRewardsCount': 0,
+      'adRewardsDayKey': '',
+      'adRewardCycleCount': 0,
+      'created_at': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+    };
+  }
+
+  /// Sets authoritative total usable credits (paid bucket only; clears reward bucket).
+  /// Call after local logic for ads/calls when you need to push a computed balance to Firestore.
+  static Future<void> updateCreditsInCloud(int newBalance) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw StateError('Not signed in');
+    }
+    if (newBalance < 0) {
+      throw ArgumentError.value(newBalance, 'newBalance', 'must be >= 0');
+    }
+    await _userRef(user.uid).update(<String, Object?>{
+      'paidCredits': newBalance,
+      'rewardCredits': 0,
+      'rewardCreditsExpiresAt': null,
+      'credits': newBalance,
+    });
+  }
+
+  /// Pushes [newBalance] (usable total) to `users/{uid}` while preserving reward
+  /// credits when possible. If the document already matches [newBalance], still
+  /// refreshes `credits` and bucket fields so clients get a snapshot quickly.
+  static Future<void> syncUsableCreditsToCloud(int newBalance) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw StateError('Not signed in');
+    }
+    if (newBalance < 0) {
+      throw ArgumentError.value(newBalance, 'newBalance', 'must be >= 0');
+    }
+    await _db.runTransaction((tx) async {
+      final ref = _userRef(user.uid);
+      final snap = await tx.get(ref);
+      if (!snap.exists) throw StateError('User document missing');
+      final m = Map<String, dynamic>.from(snap.data()!);
+      _migrateLegacyInPlace(m);
+      var paid = _int(m['paidCredits']);
+      var reward = _int(m['rewardCredits']);
+      Timestamp? exp = _ts(m, 'rewardCreditsExpiresAt');
+      if (reward > 0 && _rewardExpired(m)) {
+        paid += reward;
+        reward = 0;
+        exp = null;
+      }
+      final current = paid + reward;
+      if (current == newBalance) {
+        tx.update(ref, <String, Object?>{
+          'paidCredits': paid,
+          'rewardCredits': reward,
+          'rewardCreditsExpiresAt': reward > 0 ? exp : null,
+          'credits': newBalance,
+        });
+        return;
+      }
+      final newPaid = paid + (newBalance - current);
+      if (newPaid < 0) {
+        throw ArgumentError.value(
+          newBalance,
+          'newBalance',
+          'would make paidCredits negative',
+        );
+      }
+      tx.update(ref, <String, Object?>{
+        'paidCredits': newPaid,
+        'rewardCredits': reward,
+        'rewardCreditsExpiresAt': reward > 0 ? exp : null,
+        'credits': newPaid + reward,
+      });
+    });
+  }
+
   static Future<void> ensureUserDocument(String uid) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null && user.uid == uid) {
+      await syncUserWithFirestoreOnLogin(user);
+      return;
+    }
+
     final ref = _userRef(uid);
     final snap = await ref.get();
     if (!snap.exists) {
-      await ref.set({
-        'credits': 0,
-        'paidCredits': 0,
+      final initial = CreditsPolicy.initialCreditsForNewUser;
+      await ref.set(<String, dynamic>{
+        'uid': uid,
+        'email': '',
+        'isGuest': true,
+        'credits': initial,
+        'assigned_number': null,
+        'virtual_number': null,
+        'paidCredits': initial,
         'rewardCredits': 0,
         'number': 'none',
+        'allocatedNumber': null,
         'ad_progress': 0,
         'ads_watched_today': 0,
+        'ads_watched_count': 0,
         'last_reset_date': '',
         'last_ad_timestamp': null,
         'adRewardsCount': 0,
         'adRewardsDayKey': '',
         'adRewardCycleCount': 0,
+        'created_at': FieldValue.serverTimestamp(),
         'createdAt': FieldValue.serverTimestamp(),
       });
       return;
@@ -205,6 +406,7 @@ class FirestoreUserService {
       tx.update(ref, {
         'ad_progress': cycle,
         'ads_watched_today': count + 1,
+        'ads_watched_count': count + 1,
         'last_reset_date': storedDay,
         'last_ad_timestamp': FieldValue.serverTimestamp(),
         'adRewardCycleCount': cycle,
@@ -371,6 +573,14 @@ class FirestoreUserService {
     return _userRef(uid).snapshots().map((doc) {
       final data = doc.data();
       if (data == null) return null;
+      final assigned = data['assigned_number'];
+      if (assigned is String && assigned.isNotEmpty && assigned != 'none') {
+        return assigned;
+      }
+      final virtual = data['virtual_number'];
+      if (virtual is String && virtual.isNotEmpty && virtual != 'none') {
+        return virtual;
+      }
       final allocated = data['allocatedNumber'];
       if (allocated is String && allocated.isNotEmpty && allocated != 'none') {
         return allocated;
@@ -385,9 +595,18 @@ class FirestoreUserService {
 
   static Future<void> setAllocatedNumber(String uid, String e164) async {
     await _userRef(uid).update({
+      'assigned_number': e164,
+      'virtual_number': e164,
       'allocatedNumber': e164,
       'number': e164,
     });
+  }
+
+  /// Inbound SMS / OTP — real-time stream on **`users/{uid}/messages/{messageId}`** (same path as rules).
+  /// Server writes `createdAt` via `FieldValue.serverTimestamp()`; [InboxScreen] sorts newest first client-side.
+  /// Each document may use `body`/`text`, `from`, `createdAt`/`timestamp` (flexible schema).
+  static Stream<QuerySnapshot<Map<String, dynamic>>> watchInboxMessages(String uid) {
+    return _userRef(uid).collection('messages').snapshots();
   }
 
   /// Outbound call rows — written by server Twilio `/call-status` (`settledAt`, `to`, etc.).

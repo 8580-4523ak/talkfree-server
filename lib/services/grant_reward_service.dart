@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../config/voice_backend_config.dart';
+import 'billing_service.dart';
+import 'firestore_user_service.dart';
 
 /// Result of POST `/grant-reward` (server increments [adSubCounter], may add credits).
 class GrantRewardResult {
@@ -88,10 +90,19 @@ class GrantRewardService {
     }
 
     final j = jsonDecode(response.body) as Map<String, dynamic>?;
-    return GrantRewardResult(
+    final result = GrantRewardResult(
       creditsAdded: (j?['creditsAdded'] as num?)?.toInt() ?? 0,
       adSubCounter: (j?['adSubCounter'] as num?)?.toInt() ?? 0,
       adsWatchedToday: (j?['adsWatchedToday'] as num?)?.toInt() ?? 0,
     );
+    try {
+      final balance = await FirestoreUserService.fetchUsableCredits(user.uid);
+      await BillingService.instance.syncCreditsToCloud(balance);
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('post-grant credit sync: $e\n$st');
+      }
+    }
+    return result;
   }
 }

@@ -2,17 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-/// Elite dark shell + vibrant green accent (TalkFree premium dialer).
-const Color premiumDialBackground = Color(0xFF06090D);
-const Color premiumDialKeyFill = Color(0xFF121A22);
-const Color premiumDialCallGreen = Color(0xFF00D084);
+/// Elite dark shell + emerald accent (TalkFree premium dialer).
+const Color premiumDialBackground = Color(0xFF0F172A);
+const Color premiumDialKeyFill = Color(0xFF1E293B);
+const Color premiumDialCallGreen = Color(0xFF10B981);
 
 TextStyle eliteDialDigitStyle(double fontSize) => GoogleFonts.inter(
       fontSize: fontSize,
-      fontWeight: FontWeight.w400,
+      fontWeight: FontWeight.w300,
       color: Colors.white,
       height: 1.0,
-      letterSpacing: 0.35,
+      letterSpacing: 0.5,
     );
 
 TextStyle eliteDialLettersStyle(double fontSize) => GoogleFonts.inter(
@@ -161,7 +161,7 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
                           children: [
                             Text(
                               widget.data.digit,
-                              style: eliteDialDigitStyle(26),
+                              style: eliteDialDigitStyle(30),
                             ),
                             if (widget.data.letters.isNotEmpty) ...[
                               const SizedBox(height: 2),
@@ -306,103 +306,76 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
   @override
   Widget build(BuildContext context) {
     final enabled = !widget.busy && widget.onPressed != null;
-    const r = 32.0;
-    final br = BorderRadius.circular(r);
+    const diameter = 76.0;
     final outerShadow = BoxDecoration(
-      borderRadius: br,
+      shape: BoxShape.circle,
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.32),
-          blurRadius: 14,
-          spreadRadius: 0,
-          offset: const Offset(0, 6),
-        ),
-        BoxShadow(
-          color: premiumDialCallGreen.withValues(alpha: 0.18),
+          color: Colors.black.withValues(alpha: 0.38),
           blurRadius: 18,
-          spreadRadius: -2,
-          offset: const Offset(0, 10),
-        ),
-        BoxShadow(
-          color: premiumDialCallGreen.withValues(alpha: 0.14),
-          blurRadius: 16,
-          spreadRadius: -4,
+          spreadRadius: 0,
           offset: const Offset(0, 8),
         ),
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.1),
-          blurRadius: 6,
-          offset: const Offset(0, 2),
+          color: premiumDialCallGreen.withValues(alpha: 0.35),
+          blurRadius: 24,
+          spreadRadius: -4,
+          offset: const Offset(0, 10),
         ),
       ],
     );
 
-    return Padding(
-      padding: EdgeInsets.symmetric(horizontal: widget.horizontalMargin),
-      child: ScaleTransition(
-        scale: _scale,
-        child: Material(
-          color: Colors.transparent,
-          elevation: 0,
-          shadowColor: Colors.transparent,
-          child: InkWell(
-            onTap: enabled ? _tap : null,
-            borderRadius: br,
-            splashFactory: InkRipple.splashFactory,
-            splashColor: Colors.white.withValues(alpha: 0.38),
-            highlightColor: Colors.white.withValues(alpha: 0.14),
-            child: Container(
-              decoration: outerShadow,
-              child: ClipRRect(
-                borderRadius: br,
-                child: Ink(
-                  height: 56,
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    borderRadius: br,
-                    gradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        Color(0xFF00F0B0),
-                        premiumDialCallGreen,
-                        Color(0xFF00C078),
-                        Color(0xFF009A5C),
-                      ],
-                      stops: [0.0, 0.32, 0.62, 1.0],
+    return Center(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: widget.horizontalMargin),
+        child: ScaleTransition(
+          scale: _scale,
+          child: Material(
+            color: Colors.transparent,
+            elevation: 0,
+            shadowColor: Colors.transparent,
+            child: InkWell(
+              onTap: enabled ? _tap : null,
+              customBorder: const CircleBorder(),
+              splashColor: Colors.white.withValues(alpha: 0.28),
+              highlightColor: Colors.white.withValues(alpha: 0.12),
+              child: Container(
+                width: diameter,
+                height: diameter,
+                decoration: outerShadow,
+                child: ClipOval(
+                  child: Ink(
+                    width: diameter,
+                    height: diameter,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color(0xFF34D399),
+                          premiumDialCallGreen,
+                          Color(0xFF059669),
+                        ],
+                        stops: [0.0, 0.45, 1.0],
+                      ),
                     ),
-                  ),
-                  child: Center(
-                    child: widget.busy
-                        ? const SizedBox(
-                            width: 26,
-                            height: 26,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2.5,
-                              color: Colors.white,
+                    child: Center(
+                      child: widget.busy
+                          ? const SizedBox(
+                              width: 28,
+                              height: 28,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
+                                color: Colors.white,
+                              ),
+                            )
+                          : Icon(
+                              Icons.call_rounded,
+                              color: Colors.white.withValues(alpha: 0.98),
+                              size: 34,
                             ),
-                          )
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                Icons.call_rounded,
-                                color: Colors.white.withValues(alpha: 0.98),
-                                size: 24,
-                              ),
-                              const SizedBox(width: 10),
-                              Text(
-                                'Call',
-                                style: GoogleFonts.inter(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: 0.3,
-                                  color: Colors.white.withValues(alpha: 0.98),
-                                ),
-                              ),
-                            ],
-                          ),
+                    ),
                   ),
                 ),
               ),

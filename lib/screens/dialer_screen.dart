@@ -13,27 +13,17 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../config/credits_policy.dart';
 import '../config/voice_backend_config.dart';
+import '../theme/app_colors.dart';
 import '../services/call_service.dart';
 import '../services/firestore_user_service.dart';
 import '../utils/voip_runtime_permissions.dart';
 import '../widgets/premium_ios_dial_pad.dart';
 import 'calling_screen.dart';
 
-/// Approximate per-minute rate hint by destination; swap for live pricing when available.
-String _dialerRateHint(Country country) {
-  switch (country.countryCode) {
-    case 'US':
-    case 'CA':
-      return r'Rate: $0.01/min';
-    case 'GB':
-    case 'IN':
-      return r'Rate: $0.02/min';
-    case 'AE':
-    case 'AU':
-      return r'Rate: $0.03/min';
-    default:
-      return r'Rate: $0.02/min';
-  }
+/// Per-minute credit rate for UI (aligned with [CreditsPolicy.creditsPerMinute]).
+String _dialerRateHint(Country _) {
+  final cpm = CreditsPolicy.creditsPerMinute;
+  return 'Rate: $cpm ⚡/min';
 }
 
 class DialerScreen extends StatefulWidget {
@@ -98,12 +88,14 @@ class _DialerScreenState extends State<DialerScreen>
   }
 
   void _append(String ch) {
+    HapticFeedback.lightImpact();
     _digitFadeIn.reset();
     setState(() => _digits.write(ch));
     _digitFadeIn.forward();
   }
 
   void _backspace() {
+    HapticFeedback.selectionClick();
     final s = _display;
     if (s.isEmpty) return;
     _digitFadeIn.reset();
@@ -708,7 +700,7 @@ class _GlassCreditsCard extends StatelessWidget {
                 ),
                 child: Icon(
                   Icons.bolt_rounded,
-                  color: premiumDialCallGreen.withValues(alpha: 0.95),
+                  color: AppColors.accentAmber.withValues(alpha: 0.98),
                   size: 22,
                 ),
               ),
@@ -743,11 +735,11 @@ class _GlassCreditsCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    'Elite',
+                    'Wallet',
                     style: GoogleFonts.inter(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
-                      color: premiumDialCallGreen.withValues(alpha: 0.88),
+                      color: AppColors.accentAmber.withValues(alpha: 0.9),
                     ),
                   ),
                   const SizedBox(height: 2),
@@ -841,10 +833,10 @@ class _CountryPickerTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.inter(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: 0.15,
-                        color: Colors.white.withValues(alpha: 0.38),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.2,
+                        color: premiumDialCallGreen.withValues(alpha: 0.95),
                       ),
                     ),
                   ],

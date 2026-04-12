@@ -11,7 +11,9 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 ///
 /// **Call `POST /grant-reward` only after `true`** — the UI starts a
 /// client cooldown when an ad completes with reward; the server also enforces
-/// the same gap via `last_ad_timestamp`.
+/// the same gap via `last_ad_timestamp`. After `/grant-reward` succeeds,
+/// [GrantRewardService] fetches the latest balance and calls
+/// [BillingService.syncCreditsToCloud] so Firestore listeners update immediately.
 class AdService {
   AdService._();
   static final AdService instance = AdService._();

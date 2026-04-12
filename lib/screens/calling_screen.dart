@@ -12,6 +12,7 @@ import '../config/credits_policy.dart';
 import '../config/voice_backend_config.dart';
 import '../services/call_service.dart';
 import '../widgets/voip_gate_dialog.dart';
+import '../services/billing_service.dart';
 import '../services/firestore_user_service.dart';
 import '../services/call_live_billing_service.dart';
 import '../services/twilio_voip_facade.dart';
@@ -264,6 +265,9 @@ class _CallingScreenState extends State<CallingScreen>
       final settled = await _fetchUsableCreditsAfterCallSettles();
       synced = settled.balance;
       serverBillingPending = settled.serverBillingPending;
+      if (synced != null) {
+        await BillingService.instance.syncCreditsToCloud(synced);
+      }
     } catch (_) {
     } finally {
       if (mounted) {

@@ -9,6 +9,9 @@
 abstract final class CreditsPolicy {
   CreditsPolicy._();
 
+  /// Default usable balance for a **new** Firestore `users/{uid}` document (strict zero — earn via ads / purchase).
+  static const int initialCreditsForNewUser = 0;
+
   /// Watch this many rewarded ads to earn [creditsPerMinuteGrant] credits (1 min of talk).
   static const int adsRequiredForMinuteGrant = 4;
 
@@ -41,6 +44,12 @@ abstract final class CreditsPolicy {
   static const Duration freeRewardCreditTtl = Duration(hours: 24);
 
   static const int minCreditsToStartCall = callCreditsPerBilledMinute;
+
+  /// Must match server `ASSIGN_NUMBER_MIN_CREDITS` (POST `/assign-number`).
+  static const int assignNumberMinCredits = 100;
+
+  /// Must match server `ASSIGN_NUMBER_MIN_ADS_WATCHED` (lifetime `ads_watched_count`).
+  static const int assignNumberMinAdsWatched = 50;
 
   /// Kept for copy: 4 ads → 10 credits (server grant).
   static int get adsPerMinute => adsRequiredForMinuteGrant;

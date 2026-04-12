@@ -8,15 +8,16 @@ abstract final class AppTheme {
   AppTheme._();
 
   static const double radiusMd = 16;
+  static const double radiusLg = 20;
 
   /// Dark theme — primary green, slate surfaces, Poppins headings + Inter body.
   static ThemeData dark() {
     const colorScheme = ColorScheme.dark(
       primary: AppColors.primary,
       onPrimary: AppColors.onPrimary,
-      secondary: TalkFreeColors.cardBg,
-      onSecondary: TalkFreeColors.offWhite,
-      surface: TalkFreeColors.backgroundMid,
+      secondary: AppColors.accentAmber,
+      onSecondary: Color(0xFF0F172A),
+      surface: AppColors.darkBackground,
       onSurface: TalkFreeColors.offWhite,
       onSurfaceVariant: TalkFreeColors.mutedWhite,
       outline: AppColors.primary,
@@ -84,14 +85,14 @@ abstract final class AppTheme {
       useMaterial3: true,
       brightness: Brightness.dark,
       colorScheme: colorScheme,
-      scaffoldBackgroundColor: TalkFreeColors.backgroundTop,
+      scaffoldBackgroundColor: AppColors.darkBackground,
       textTheme: textTheme,
       primaryColor: AppColors.primary,
       dividerColor: const Color(0xFF334155),
       appBarTheme: AppBarTheme(
         elevation: 0,
         scrolledUnderElevation: 0,
-        backgroundColor: TalkFreeColors.deepBlack,
+        backgroundColor: AppColors.darkBackground,
         foregroundColor: TalkFreeColors.offWhite,
         iconTheme: const IconThemeData(color: TalkFreeColors.offWhite),
         titleTextStyle: GoogleFonts.poppins(
@@ -101,13 +102,13 @@ abstract final class AppTheme {
         ),
       ),
       cardTheme: CardThemeData(
-        color: TalkFreeColors.cardBg,
+        color: TalkFreeColors.cardBg.withValues(alpha: 0.92),
         elevation: 0,
-        shadowColor: Colors.black.withValues(alpha: 0.35),
+        shadowColor: Colors.black.withValues(alpha: 0.45),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(radiusMd),
+          borderRadius: BorderRadius.circular(radiusLg),
           side: BorderSide(
-            color: AppColors.primary.withValues(alpha: 0.35),
+            color: Colors.white.withValues(alpha: 0.06),
             width: 1,
           ),
         ),
@@ -120,7 +121,7 @@ abstract final class AppTheme {
           disabledForegroundColor: AppColors.onPrimary.withValues(alpha: 0.5),
           padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(radiusMd),
+            borderRadius: BorderRadius.circular(radiusLg),
           ),
           minimumSize: const Size.fromHeight(52),
         ),
@@ -131,23 +132,27 @@ abstract final class AppTheme {
           side: const BorderSide(color: AppColors.primary, width: 1.5),
           padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(radiusMd),
+            borderRadius: BorderRadius.circular(radiusLg),
           ),
           minimumSize: const Size.fromHeight(52),
         ),
       ),
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
-        backgroundColor: TalkFreeColors.deepBlack,
+        backgroundColor: AppColors.darkBackground,
         selectedItemColor: AppColors.primary,
-        unselectedItemColor: TalkFreeColors.mutedWhite,
+        unselectedItemColor: TalkFreeColors.mutedWhite.withValues(alpha: 0.55),
         type: BottomNavigationBarType.fixed,
         elevation: 0,
         showUnselectedLabels: true,
         selectedLabelStyle: GoogleFonts.inter(
           fontSize: 12,
-          fontWeight: FontWeight.w600,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.2,
         ),
-        unselectedLabelStyle: GoogleFonts.inter(fontSize: 12),
+        unselectedLabelStyle: GoogleFonts.inter(
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+        ),
       ),
       snackBarTheme: SnackBarThemeData(
         backgroundColor: TalkFreeColors.cardBg,
@@ -157,7 +162,7 @@ abstract final class AppTheme {
         ),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(radiusMd),
+          borderRadius: BorderRadius.circular(radiusLg),
         ),
       ),
       progressIndicatorTheme: const ProgressIndicatorThemeData(
@@ -168,19 +173,19 @@ abstract final class AppTheme {
         filled: true,
         fillColor: TalkFreeColors.cardBg,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(radiusMd),
+          borderRadius: BorderRadius.circular(radiusLg),
           borderSide: BorderSide(
             color: AppColors.primary.withValues(alpha: 0.35),
           ),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(radiusMd),
+          borderRadius: BorderRadius.circular(radiusLg),
           borderSide: BorderSide(
             color: AppColors.primary.withValues(alpha: 0.35),
           ),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(radiusMd),
+          borderRadius: BorderRadius.circular(radiusLg),
           borderSide: const BorderSide(
             color: AppColors.primary,
             width: 1.4,

@@ -4,7 +4,12 @@ import 'package:flutter/material.dart';
 abstract final class AppColors {
   AppColors._();
 
-  static const Color primary = Color(0xFF00D084);
+  /// Emerald — primary accent (calls, earn, positive actions).
+  static const Color primary = Color(0xFF10B981);
+
+  /// Soft amber — wallet / credits highlights (secondary accent).
+  static const Color accentAmber = Color(0xFFF59E0B);
+
   static const Color darkBackground = Color(0xFF0F172A);
   static const Color darkBackgroundDeep = Color(0xFF020617);
   static const Color surfaceDark = Color(0xFF1E293B);

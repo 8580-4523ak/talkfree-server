@@ -17,7 +17,18 @@ class AuthService {
     _googleSignInReady = true;
   }
 
+  /// Guest sign-in via Firebase **Anonymous** auth.
+  ///
+  /// Enable **Anonymous** under Firebase Console → Authentication → Sign-in method.
+  Future<UserCredential> signInAnonymously() async {
+    return _auth.signInAnonymously();
+  }
+
   /// Returns [UserCredential] on success, `null` if the user dismissed the flow.
+  ///
+  /// If the current user is **anonymous**, links this Google account to the same
+  /// Firebase user ([User.uid] unchanged) so Firestore credits and profile stay intact.
+  /// Otherwise performs a normal Google sign-in.
   Future<UserCredential?> signInWithGoogle() async {
     await _ensureGoogleSignIn();
     try {
@@ -31,6 +42,10 @@ class AuthService {
       final OAuthCredential credential = GoogleAuthProvider.credential(
         idToken: idToken,
       );
+      final current = _auth.currentUser;
+      if (current != null && current.isAnonymous) {
+        return current.linkWithCredential(credential);
+      }
       return _auth.signInWithCredential(credential);
     } on GoogleSignInException catch (e) {
       if (e.code == GoogleSignInExceptionCode.canceled) {

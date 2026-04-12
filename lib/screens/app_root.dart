@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/firestore_user_service.dart';
 import 'dashboard_screen.dart';
 import 'intro_screen.dart';
 import 'login_screen.dart';
@@ -24,6 +25,11 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
   bool _prefsReady = false;
   bool _firstIntroCompleted = false;
   StreamSubscription<User?>? _authSub;
+
+  /// One Firestore sync per signed-in [User.uid] + guest flag (re-sync when anonymous → Google link).
+  String? _syncedUid;
+  bool? _syncedIsGuest;
+  Future<int>? _loginSyncFuture;
 
   @override
   void initState() {
@@ -67,12 +73,43 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
     final user = FirebaseAuth.instance.currentUser;
 
     if (user != null) {
-      return DashboardScreen(
-        key: ValueKey<String>('dash_${user.uid}'),
-        user: user,
-        initialNavIndex: 1,
+      if (_syncedUid != user.uid || _syncedIsGuest != user.isAnonymous) {
+        _syncedUid = user.uid;
+        _syncedIsGuest = user.isAnonymous;
+        _loginSyncFuture = FirestoreUserService.syncUserWithFirestoreOnLogin(user);
+      }
+      return FutureBuilder<int>(
+        future: _loginSyncFuture,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const _RootSplash();
+          }
+          if (snap.hasError) {
+            return Scaffold(
+              backgroundColor: const Color(0xFF040608),
+              body: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(
+                    'Could not sync your account.\n${snap.error}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                ),
+              ),
+            );
+          }
+          return DashboardScreen(
+            key: ValueKey<String>('dash_${user.uid}'),
+            user: user,
+            initialNavIndex: 1,
+          );
+        },
       );
     }
+    _syncedUid = null;
+    _syncedIsGuest = null;
+    _loginSyncFuture = null;
 
     if (!_prefsReady) {
       return const _RootSplash();

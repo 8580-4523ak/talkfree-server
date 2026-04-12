@@ -8,8 +8,11 @@ abstract final class TalkFreeColors {
 
   static const Color primary = AppColors.primary;
 
-  /// Legacy: was beige; now primary green.
+  /// Legacy name — maps to primary emerald (CTAs, highlights).
   static const Color beigeGold = AppColors.primary;
+
+  /// Credits / wallet emphasis (soft amber).
+  static const Color walletAmber = AppColors.accentAmber;
 
   static const Color cardBg = AppColors.cardDark;
   static const Color deepBlack = AppColors.darkBackgroundDeep;

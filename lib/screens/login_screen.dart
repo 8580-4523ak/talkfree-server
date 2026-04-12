@@ -66,6 +66,14 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     setState(() => _busy = true);
     try {
       await AuthService().signInWithGoogle();
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      final msg = e.code == 'credential-already-in-use'
+          ? 'This Google account is already registered. Sign out, then use Sign in with Google, or pick another Google account.'
+          : 'Sign-in failed: ${e.message ?? e.code}';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg)),
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -80,7 +88,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   Future<void> _continueWithoutSignIn() async {
     setState(() => _busy = true);
     try {
-      await FirebaseAuth.instance.signInAnonymously();
+      await AuthService().signInAnonymously();
     } on FirebaseAuthException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

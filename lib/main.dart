@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
+import 'app_scaffold_messenger.dart';
 import 'config/twilio_env.dart';
 import 'theme/app_theme.dart';
 import 'screens/app_root.dart';
 import 'screens/number_selection_screen.dart';
+import 'screens/virtual_number_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -42,6 +44,7 @@ class TalkFreeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      scaffoldMessengerKey: appScaffoldMessengerKey,
       debugShowCheckedModeBanner: false,
       title: 'TalkFree',
       theme: AppTheme.light(),
@@ -51,6 +54,9 @@ class TalkFreeApp extends StatelessWidget {
       onGenerateRoute: (RouteSettings settings) {
         if (settings.name == NumberSelectionScreen.routeName) {
           return NumberSelectionScreen.createRoute(settings);
+        }
+        if (settings.name == VirtualNumberScreen.routeName) {
+          return VirtualNumberScreen.createRoute(settings);
         }
         return null;
       },

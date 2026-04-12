@@ -81,15 +81,80 @@ try {
       });
     }
     firebaseAdmin = admin;
-    console.log("Firebase Admin: /grant-reward enabled");
+    console.log("Firebase Admin: /grant-reward, /assign-number, /send-sms enabled");
   } else {
-    console.warn("FIREBASE_SERVICE_ACCOUNT_JSON unset — /grant-reward returns 503");
+    console.warn("FIREBASE_SERVICE_ACCOUNT_JSON unset — /grant-reward, /assign-number, /send-sms return 503");
   }
 } catch (e) {
   console.warn("Firebase Admin init failed — /grant-reward disabled:", e.message);
 }
 
-const publicBase = String(PUBLIC_BASE_URL).replace(/\/$/, "");
+/** Twilio webhooks use `${publicBase}/…` — must NOT end with `/` or you get `…//sms-webhook`. */
+function normalizePublicBase(raw) {
+  return String(raw ?? "").trim().replace(/\/+$/, "");
+}
+
+const publicBase = normalizePublicBase(PUBLIC_BASE_URL);
+if (publicBase && !/^https:\/\//i.test(publicBase)) {
+  console.warn("PUBLIC_BASE_URL should normally start with https:// for Twilio webhooks.");
+}
+
+/** Re-read at request time so Render env sync issues surface in logs (not only at boot). */
+function getTwilioCallerIdOrThrow(stepLabel) {
+  const raw = process.env.TWILIO_CALLER_ID;
+  const v = raw != null ? String(raw).trim() : "";
+  if (!v) {
+    const msg = `${stepLabel}: TWILIO_CALLER_ID is missing or empty in process.env — set it in Render → Environment (E.164, e.g. +15551234567) and redeploy.`;
+    console.error("[send-sms]", msg, {
+      envKeyDefined: raw !== undefined,
+      rawLength: raw == null ? null : String(raw).length,
+    });
+    const err = new Error(msg);
+    err.http = 500;
+    err.code = "MISSING_TWILIO_CALLER_ID";
+    throw err;
+  }
+  return v;
+}
+
+/**
+ * Normalize phone strings toward E.164: strip non-digits, prepend +.
+ * US 10-digit national → +1…
+ */
+function toE164(input) {
+  const s = String(input ?? "").trim();
+  if (!s) return "";
+  const digits = s.replace(/\D/g, "");
+  if (digits.length < 10) return "";
+  if (digits.length === 10) return `+1${digits}`;
+  return `+${digits}`;
+}
+
+function readAssignedNumberFromUserDoc(d) {
+  if (!d || typeof d !== "object") return "";
+  const keys = ["assigned_number", "virtual_number", "allocatedNumber", "number"];
+  for (const k of keys) {
+    const v = d[k];
+    if (v == null) continue;
+    const t = String(v).trim();
+    if (t !== "" && t.toLowerCase() !== "none") return t;
+  }
+  return "";
+}
+
+/**
+ * Prefer Firestore `assigned_number` (user's Twilio line); else `TWILIO_CALLER_ID`.
+ */
+function resolveOutgoingSmsFrom(userDoc, fallbackCallerRaw) {
+  const assignedRaw = readAssignedNumberFromUserDoc(userDoc);
+  const assignedE164 = toE164(assignedRaw);
+  if (assignedE164 && /^\+[1-9]\d{8,14}$/.test(assignedE164)) {
+    return { from: assignedE164, source: "firestore:assigned_number" };
+  }
+  const fb = String(fallbackCallerRaw ?? "").trim();
+  const fbE164 = toE164(fb) || (fb.startsWith("+") ? fb : toE164("+" + fb.replace(/\D/g, "")));
+  return { from: fbE164 || fb, source: "env:TWILIO_CALLER_ID" };
+}
 
 /**
  * TwiML for PSTN outbound: dial `to` with caller ID. Used by:
@@ -412,6 +477,292 @@ app.post("/grant-reward", async (req, res) => {
     return res.status(500).json({ error: String(e.message || e) });
   }
   return res.status(200).json(out);
+});
+
+/** Usable balance from Firestore `users/{uid}` (aligned with POST /grant-reward). */
+function usableCreditsFromUserDoc(d) {
+  let paid = Number(d.paidCredits ?? 0);
+  let reward = Number(d.rewardCredits ?? 0);
+  if (d.paidCredits === undefined && d.credits != null) {
+    paid = Number(d.credits);
+    reward = 0;
+  }
+  const now = new Date();
+  const expTs = d.rewardCreditsExpiresAt;
+  if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < now) {
+    paid += reward;
+    reward = 0;
+  }
+  return paid + reward;
+}
+
+/** Lifetime rewarded-ad views (`ads_watched_count` from the Flutter client). */
+function readLifetimeAdsWatched(d) {
+  const n = d.ads_watched_count;
+  if (n === undefined || n === null || n === "") return 0;
+  const x = Number(n);
+  return Number.isFinite(x) ? x : 0;
+}
+
+const ASSIGN_NUMBER_MIN_CREDITS = Number(process.env.ASSIGN_NUMBER_MIN_CREDITS || 100);
+const ASSIGN_NUMBER_MIN_ADS_WATCHED = Number(process.env.ASSIGN_NUMBER_MIN_ADS_WATCHED || 50);
+const ASSIGN_NUMBER_AREA_CODE = process.env.ASSIGN_NUMBER_AREA_CODE
+  ? Number.parseInt(String(process.env.ASSIGN_NUMBER_AREA_CODE).trim(), 10)
+  : null;
+
+/**
+ * Search for a US local number and purchase it (Twilio billed to your account).
+ * If ASSIGN_NUMBER_AREA_CODE is set, search is restricted to that NPA; otherwise any US local match.
+ * Voice URL → /voice-inbound-number; SMS → /sms-webhook. US A2P/10DLC registration may be required
+ * in Twilio Console before inbound SMS actually delivers.
+ */
+async function searchAndBuySmsCapableUsLocal(uid) {
+  const params = { limit: 5 };
+  if (Number.isFinite(ASSIGN_NUMBER_AREA_CODE)) {
+    params.areaCode = ASSIGN_NUMBER_AREA_CODE;
+  }
+
+  const candidates = await twilioClient.availablePhoneNumbers("US").local.list(params);
+  if (!candidates.length) {
+    const err = new Error(
+      "No SMS-capable US local numbers available (try another area code or try again later)",
+    );
+    err.http = 503;
+    throw err;
+  }
+  const picked = candidates[0];
+  const incoming = await twilioClient.incomingPhoneNumbers.create({
+    phoneNumber: picked.phoneNumber,
+    friendlyName: `TalkFree ${String(uid).slice(0, 12)}`,
+    smsUrl: `${publicBase}/sms-webhook`,
+    smsMethod: "POST",
+    voiceUrl: `${publicBase}/voice-inbound-number`,
+    voiceMethod: "POST",
+  });
+  return incoming;
+}
+
+/** Inbound PSTN call to a purchased TalkFree number — simple placeholder TwiML. */
+app.all("/voice-inbound-number", (req, res) => {
+  const vr = new twilio.twiml.VoiceResponse();
+  vr.say(
+    { voice: "alice" },
+    "Thanks for calling. This TalkFree number does not accept voice mail. Please reach the user in the TalkFree app.",
+  );
+  vr.hangup();
+  res.type("text/xml");
+  res.send(vr.toString());
+});
+
+/**
+ * Pick which `users/{uid}` owns this Twilio number if multiple docs match (recycle edge case).
+ * Prefer latest `twilioNumberAssignedAt`, then `created_at` / `createdAt`, then uid lexicographic.
+ */
+function pickUidForAssignedNumber(docs) {
+  if (!docs.length) return null;
+  if (docs.length === 1) return docs[0].id;
+
+  function docTimeMs(doc) {
+    const d = doc.data() || {};
+    const a = d.twilioNumberAssignedAt;
+    if (a && typeof a.toMillis === "function") return a.toMillis();
+    const c = d.created_at || d.createdAt;
+    if (c && typeof c.toMillis === "function") return c.toMillis();
+    return 0;
+  }
+
+  const ranked = docs
+    .map((doc) => ({ id: doc.id, ms: docTimeMs(doc) }))
+    .sort((x, y) => {
+      if (y.ms !== x.ms) return y.ms - x.ms;
+      return x.id.localeCompare(y.id);
+    });
+
+  if (ranked[0].ms === 0) {
+    console.warn(
+      `sms-webhook: ${docs.length} users share assigned_number; tie-break by uid (set twilioNumberAssignedAt on provision)`,
+    );
+  }
+  return ranked[0].id;
+}
+
+/**
+ * Twilio inbound SMS — POST to a provisioned number → `users/{uid}/messages/{autoId}`.
+ * `createdAt` uses server timestamps for correct inbox ordering. Always respond 200 with empty TwiML.
+ */
+app.post("/sms-webhook", async (req, res) => {
+  const To = String(req.body.To || "").trim();
+  const From = String(req.body.From || "").trim();
+  const Body = String(req.body.Body || "");
+  const mr = new twilio.twiml.MessagingResponse();
+
+  if (!firebaseAdmin) {
+    console.warn("sms-webhook: Firebase Admin not configured — message not stored");
+    res.type("text/xml");
+    return res.status(200).send(mr.toString());
+  }
+
+  try {
+    const db = firebaseAdmin.firestore();
+    const { FieldValue } = firebaseAdmin.firestore;
+    const q = await db.collection("users").where("assigned_number", "==", To).get();
+    if (q.empty) {
+      console.warn("sms-webhook: no user with assigned_number=", To);
+    } else {
+      const uid = pickUidForAssignedNumber(q.docs);
+      if (uid) {
+        await db
+          .collection("users")
+          .doc(uid)
+          .collection("messages")
+          .add({
+            from: From,
+            to: To,
+            body: Body,
+            direction: "inbound",
+            createdAt: FieldValue.serverTimestamp(),
+          });
+        console.log(
+          `sms-webhook: users/${uid}/messages (new doc) inbound from=${From} matches=${q.docs.length}`,
+        );
+      }
+    }
+  } catch (e) {
+    console.error("sms-webhook:", e);
+  }
+  res.type("text/xml");
+  return res.status(200).send(mr.toString());
+});
+
+app.get("/assign-number", (_req, res) => {
+  res.set("Allow", "POST");
+  return res.status(405).json({
+    error: "Method not allowed",
+    message: "Use POST /assign-number with header Authorization: Bearer <Firebase ID token>",
+  });
+});
+
+/**
+ * POST /assign-number — provision a real US local Twilio number (secured).
+ * - Verifies Firebase ID token → uid (optional JSON body `uid` must match).
+ * - Eligible if usable credits ≥ ASSIGN_NUMBER_MIN_CREDITS (default 100) OR
+ *   lifetime `ads_watched_count` ≥ ASSIGN_NUMBER_MIN_ADS_WATCHED (default 50).
+ * - Searches & purchases via Twilio API, then writes `assigned_number`, `twilioIncomingPhoneSid`, etc.
+ */
+app.post("/assign-number", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({
+      error: "Assign number not configured (set FIREBASE_SERVICE_ACCOUNT_JSON on the server)",
+    });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    const dec = await firebaseAdmin.auth().verifyIdToken(m[1]);
+    uid = dec.uid;
+  } catch (e) {
+    console.error("verifyIdToken (assign-number):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  const bodyUid =
+    req.body && req.body.uid != null ? String(req.body.uid).trim() : "";
+  if (bodyUid && bodyUid !== uid) {
+    return res.status(403).json({ error: "uid does not match authenticated user" });
+  }
+
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+
+  let snap;
+  try {
+    snap = await ref.get();
+  } catch (e) {
+    console.error("assign-number get:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+
+  if (!snap.exists) {
+    return res.status(404).json({ error: "User document not found" });
+  }
+
+  const d = snap.data() || {};
+  const existingAssigned = String(d.assigned_number ?? "").trim();
+  if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
+    return res.status(200).json({
+      ok: true,
+      alreadyAssigned: true,
+      assigned_number: existingAssigned,
+      twilioIncomingPhoneSid: d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid || null,
+    });
+  }
+
+  const usable = usableCreditsFromUserDoc(d);
+  const adsLifetime = readLifetimeAdsWatched(d);
+  const enoughCredits = usable >= ASSIGN_NUMBER_MIN_CREDITS;
+  const enoughAds = adsLifetime >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
+
+  if (!enoughCredits && !enoughAds) {
+    return res.status(403).json({
+      error: "Not eligible to assign a number",
+      usableCredits: usable,
+      adsWatchedLifetime: adsLifetime,
+      minCredits: ASSIGN_NUMBER_MIN_CREDITS,
+      minAdsWatched: ASSIGN_NUMBER_MIN_ADS_WATCHED,
+    });
+  }
+
+  let incoming;
+  try {
+    incoming = await searchAndBuySmsCapableUsLocal(uid);
+  } catch (e) {
+    const code = e.http || 502;
+    console.error("assign-number Twilio:", e);
+    return res.status(code >= 400 && code < 600 ? code : 502).json({
+      error: String(e.message || e),
+    });
+  }
+
+  const e164 = String(incoming.phoneNumber || "").trim();
+  if (!e164) {
+    return res.status(500).json({ error: "Twilio returned empty phone number" });
+  }
+
+  try {
+    const { FieldValue } = firebaseAdmin.firestore;
+    await ref.update({
+      assigned_number: e164,
+      virtual_number: e164,
+      allocatedNumber: e164,
+      number: e164,
+      twilioIncomingPhoneSid: incoming.sid,
+      twilioPhoneNumberSid: incoming.sid,
+      twilioNumberAssignedAt: FieldValue.serverTimestamp(),
+    });
+  } catch (e) {
+    console.error("assign-number Firestore update:", e);
+    return res.status(500).json({
+      error: String(e.message || e),
+      warning:
+        "Twilio number was purchased but profile update failed — check Twilio Console and Firestore manually.",
+      twilioIncomingPhoneSid: incoming.sid,
+      phoneNumber: e164,
+    });
+  }
+
+  return res.status(200).json({
+    ok: true,
+    assigned_number: e164,
+    twilioIncomingPhoneSid: incoming.sid,
+    usableCredits: usable,
+    adsWatchedLifetime: adsLifetime,
+    viaCredits: enoughCredits,
+    viaAds: enoughAds,
+  });
 });
 
 const CALL_CREDITS_PER_MINUTE = Number(process.env.CALL_CREDITS_PER_MINUTE || 10);
@@ -781,7 +1132,7 @@ app.post("/sync-call-billing", async (req, res) => {
  * `https://<PUBLIC_BASE_URL>/call-status`
  */
 app.post("/call-status", async (req, res) => {
-  const canonicalUrl = `${String(PUBLIC_BASE_URL).replace(/\/$/, "")}/call-status`;
+  const canonicalUrl = `${publicBase}/call-status`;
   const sig = req.get("X-Twilio-Signature") || "";
   if (process.env.SKIP_TWILIO_SIGNATURE !== "1" && TWILIO_AUTH_TOKEN) {
     const ok = twilio.validateRequest(TWILIO_AUTH_TOKEN, sig, canonicalUrl, req.body);
@@ -898,11 +1249,152 @@ app.post("/terminate-call", async (req, res) => {
   return res.status(200).json({ ok: true });
 });
 
+app.get("/send-sms", (_req, res) => {
+  res.set("Allow", "POST");
+  return res.status(405).json({
+    error: "Method not allowed",
+    message: "Use POST /send-sms with Authorization: Bearer <Firebase ID token> and JSON { \"to\", \"body\" }",
+  });
+});
+
+/**
+ * POST /send-sms — Firebase Bearer token; JSON `{ "to": "+...", "body": "..." }`.
+ * - `From`: user's `assigned_number` in Firestore if valid E.164, else `TWILIO_CALLER_ID`.
+ * - Logs each step for Render logs (URL, From, To, payload size).
+ * - Twilio errors: logs exact code + message (e.g. 21608 unverified trial destination).
+ */
+app.post("/send-sms", async (req, res) => {
+  const routeUrl = `${publicBase}/send-sms`;
+  console.log("[send-sms] step 1: request URL (PUBLIC_BASE_URL)", routeUrl);
+
+  if (!firebaseAdmin) {
+    console.error("[send-sms] Firebase Admin not configured — cannot verify caller");
+    return res.status(503).json({
+      error: "SMS API not configured (set FIREBASE_SERVICE_ACCOUNT_JSON on the server)",
+    });
+  }
+
+  let fallbackCaller;
+  try {
+    fallbackCaller = getTwilioCallerIdOrThrow("POST /send-sms");
+  } catch (e) {
+    return res.status(500).json({
+      error: String(e.message || e),
+      code: e.code || "MISSING_TWILIO_CALLER_ID",
+    });
+  }
+  console.log("[send-sms] step 2: TWILIO_CALLER_ID from env (fallback) present, length=", String(fallbackCaller).length);
+
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    console.warn("[send-sms] missing Authorization Bearer");
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+
+  let uid;
+  try {
+    const dec = await firebaseAdmin.auth().verifyIdToken(m[1]);
+    uid = dec.uid;
+  } catch (e) {
+    console.error("[send-sms] verifyIdToken:", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  console.log("[send-sms] step 3: Firebase uid", uid);
+
+  const toRaw = req.body && (req.body.to ?? req.body.To);
+  const bodyText = req.body && (req.body.body ?? req.body.Body ?? req.body.message ?? "");
+  const payloadPreview = {
+    toRaw: toRaw != null ? String(toRaw).slice(0, 32) : null,
+    bodyLength: String(bodyText).length,
+  };
+  console.log("[send-sms] step 4: payload (preview)", payloadPreview);
+
+  const to = toE164(toRaw);
+  const body = String(bodyText).trim();
+
+  if (!to || !/^\+[1-9]\d{8,14}$/.test(to)) {
+    console.error("[send-sms] invalid To after E.164 normalize:", { toRaw, to });
+    return res.status(400).json({
+      error: "Invalid or missing `to` — use E.164 (e.g. +15551234567)",
+      toNormalized: to || null,
+    });
+  }
+  if (!body) {
+    console.error("[send-sms] empty body");
+    return res.status(400).json({ error: "Missing `body` (message text)" });
+  }
+
+  const db = firebaseAdmin.firestore();
+  let userData = {};
+  try {
+    const snap = await db.collection("users").doc(uid).get();
+    userData = snap.exists ? snap.data() : {};
+  } catch (e) {
+    console.error("[send-sms] Firestore read users/" + uid + ":", e.message);
+    return res.status(500).json({ error: "Could not load user profile" });
+  }
+
+  const resolved = resolveOutgoingSmsFrom(userData, fallbackCaller);
+  const from = resolved.from;
+  console.log("[send-sms] step 5: From number (E.164)", from, "| source:", resolved.source);
+  console.log("[send-sms] step 6: To number (E.164)", to);
+  console.log("[send-sms] step 7: Body chars", body.length);
+
+  if (!from || !/^\+[1-9]\d{8,14}$/.test(from)) {
+    console.error("[send-sms] invalid From after resolve:", { from, resolved });
+    return res.status(500).json({
+      error: "Could not resolve a valid From number — check assigned_number or TWILIO_CALLER_ID",
+    });
+  }
+
+  try {
+    const msg = await twilioClient.messages.create({
+      from,
+      to,
+      body,
+    });
+    console.log("[send-sms] step 8: Twilio OK sid=", msg.sid, "status=", msg.status);
+    return res.status(200).json({
+      ok: true,
+      sid: msg.sid,
+      status: msg.status,
+      from,
+      to,
+      fromSource: resolved.source,
+    });
+  } catch (err) {
+    const code = err.code;
+    const message = err.message;
+    const status = err.status;
+    const moreInfo = err.moreInfo;
+    console.error("[send-sms] Twilio messages.create FAILED:", {
+      code,
+      message,
+      status,
+      moreInfo,
+      from,
+      to,
+    });
+    return res.status(502).json({
+      error: message || String(err),
+      twilioCode: code != null ? String(code) : undefined,
+      twilioStatus: status,
+      moreInfo: moreInfo || undefined,
+      from,
+      to,
+    });
+  }
+});
+
 // After API routes — avoids any edge case where static assets shadow POST handlers on some hosts.
 app.use(express.static(path.join(__dirname, "public")));
 
 const server = app.listen(Number(PORT), () => {
   console.log(`TalkFree voice server listening on port ${PORT}`);
+  console.log(`PUBLIC_BASE_URL (normalized): ${publicBase}`);
+  console.log(`Outbound SMS (app → Twilio): POST ${publicBase}/send-sms`);
+  console.log(`Inbound SMS webhook (Twilio): ${publicBase}/sms-webhook`);
 });
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {

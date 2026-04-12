@@ -1,0 +1,42 @@
+rules_version = '2';
+// TalkFree — paths must match FirestoreUserService / server (NOT top-level `calls`).
+//
+// COMMON MISTAKE (Firebase Console): Do NOT use top-level
+//   match /call_history/{callId} { ... request.auth.uid == uid }
+// Here `uid` is NOT a path variable — only `callId` exists, so rules break / deny.
+// The app uses NESTED collections under each user:
+//   users/{userId}/call_history/{callSid}
+//   users/{userId}/messages/{messageId}
+//
+// Client reads:
+//   - users/{uid}
+//   - users/{uid}/call_history
+//   - users/{uid}/messages
+// Call history rows are written by the Node server (Admin SDK) from Twilio webhooks.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      // Own profile + optional lookup by email (see syncUserWithFirestoreOnLogin).
+      // Email branch supports the rare `where('email', isEqualTo: …)` lookup on sign-in.
+      allow read: if request.auth != null && (
+        request.auth.uid == userId ||
+        (request.auth.token.email != null &&
+          resource.data.email == request.auth.token.email)
+      );
+      allow create: if request.auth != null && request.auth.uid == userId;
+      allow update: if request.auth != null && request.auth.uid == userId;
+      allow delete: if request.auth != null && request.auth.uid == userId;
+
+      match /call_history/{callSid} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+
+      match /messages/{messageId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+    }
+  }
+}

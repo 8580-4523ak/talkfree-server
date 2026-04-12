@@ -19,10 +19,14 @@ class CallHistoryScreen extends StatelessWidget {
     return '${m.toString().padLeft(2, '0')}:${r.toString().padLeft(2, '0')}';
   }
 
+  /// `Today`, `Yesterday`, or `12 Apr` (adds year if not current year).
   static String _formatSettledDate(Timestamp? ts) {
     if (ts == null) return '—';
     final d = ts.toDate().toLocal();
-    const w = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final cal = DateTime(d.year, d.month, d.day);
     const mo = [
       'Jan',
       'Feb',
@@ -37,11 +41,12 @@ class CallHistoryScreen extends StatelessWidget {
       'Nov',
       'Dec',
     ];
-    final day = w[d.weekday - 1];
-    final month = mo[d.month - 1];
-    final h = d.hour.toString().padLeft(2, '0');
-    final min = d.minute.toString().padLeft(2, '0');
-    return '$day, $month ${d.day}, ${d.year} · $h:$min';
+    if (cal == today) return 'Today';
+    if (cal == yesterday) return 'Yesterday';
+    if (d.year == now.year) {
+      return '${d.day} ${mo[d.month - 1]}';
+    }
+    return '${d.day} ${mo[d.month - 1]} ${d.year}';
   }
 
   static int _creditsDeducted(Map<String, dynamic> data) {
@@ -52,22 +57,82 @@ class CallHistoryScreen extends StatelessWidget {
     return 0;
   }
 
-  static String _displayNumber(Map<String, dynamic> data) {
-    final to = data['to'];
-    if (to is String && to.trim().isNotEmpty) return to.trim();
-    final from = data['from'];
-    if (from is String && from.trim().isNotEmpty) return from.trim();
-    return 'Unknown';
+  /// First human phone on either leg (skips `client:…` Voice SDK identities).
+  static String? _firstPstnNumber(Map<String, dynamic> data) {
+    for (final leg in <Object?>[data['from'], data['to']]) {
+      final s = (leg ?? '').toString().trim();
+      if (s.isEmpty) continue;
+      if (s.toLowerCase().startsWith('client:')) continue;
+      return s;
+    }
+    return null;
+  }
+
+  /// Prefer the **other party** number: outbound (`From`=client) → `To`; inbound (`To`=client) → `From`.
+  static String _peerPhoneNumber(Map<String, dynamic> data) {
+    final from = (data['from'] ?? '').toString().trim();
+    final to = (data['to'] ?? '').toString().trim();
+    final fl = from.toLowerCase();
+    final tl = to.toLowerCase();
+    if (fl.startsWith('client:')) return to;
+    if (tl.startsWith('client:')) return from;
+    if (to.isNotEmpty) return to;
+    if (from.isNotEmpty) return from;
+    return '';
+  }
+
+  /// Voice SDK outbound: `From` is `client:<firebaseUid>`. Inbound to app: `To` is `client:…`.
+  static bool _isOutgoingCall(Map<String, dynamic> data) {
+    final from = (data['from'] ?? '').toString().toLowerCase();
+    return from.startsWith('client:');
+  }
+
+  /// Prefer explicit `direction` from Firestore (`outgoing` / `incoming`), else infer from `from`/`to`.
+  static bool _isOutgoingFromDocument(Map<String, dynamic> data) {
+    final raw = data['direction'];
+    if (raw is String) {
+      final t = raw.toLowerCase().trim();
+      if (t == 'outgoing') return true;
+      if (t == 'incoming') return false;
+    }
+    return _isOutgoingCall(data);
+  }
+
+  /// Mask `client:…` legs; real PSTN (+1…, +91…) shown as-is.
+  static String _maskClientIdForTitle(String value, bool outgoing) {
+    final t = value.trim();
+    if (t.isEmpty) return value;
+    if (t.toLowerCase().startsWith('client:')) {
+      return outgoing ? 'Private Line' : 'TalkFree User';
+    }
+    return value;
+  }
+
+  /// Primary line: PSTN as-is; `client:` → Private Line (out) / TalkFree User (in).
+  static ({String primary, String? subtitle}) _callHistoryLabels(
+    Map<String, dynamic> data,
+    bool outgoing,
+  ) {
+    final pstn = _firstPstnNumber(data);
+    if (pstn != null) {
+      return (primary: pstn, subtitle: null);
+    }
+    final peer = _peerPhoneNumber(data);
+    if (peer.isEmpty) {
+      return (primary: 'Unknown', subtitle: null);
+    }
+    return (
+      primary: _maskClientIdForTitle(peer, outgoing),
+      subtitle: null,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final bg = Color.lerp(AppColors.darkBackgroundDeep, AppColors.darkBackground, 0.55)!;
-
     return Scaffold(
-      backgroundColor: bg,
+      backgroundColor: AppColors.darkBackground,
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
+        backgroundColor: AppColors.darkBackground,
         elevation: 0,
         scrolledUnderElevation: 0,
         title: Text(
@@ -115,7 +180,7 @@ class CallHistoryScreen extends StatelessWidget {
           return ListView.separated(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
             itemCount: docs.length,
-            separatorBuilder: (_, _) => const SizedBox(height: 12),
+            separatorBuilder: (_, _) => const SizedBox(height: 10),
             itemBuilder: (context, i) {
               final data = docs[i].data();
               final durationSec = data['durationSeconds'];
@@ -124,10 +189,13 @@ class CallHistoryScreen extends StatelessWidget {
                   ? data['settledAt'] as Timestamp
                   : null;
               final credits = _creditsDeducted(data);
-              final number = _displayNumber(data);
+              final outgoing = _isOutgoingFromDocument(data);
+              final labels = _callHistoryLabels(data, outgoing);
 
               return _CallHistoryCard(
-                phoneNumber: number,
+                phoneNumber: labels.primary,
+                numberSubtitle: labels.subtitle,
+                isOutgoing: outgoing,
                 dateLine: _formatSettledDate(settled),
                 durationLine: _formatDurationMmSs(sec),
                 creditsDeducted: credits,
@@ -183,181 +251,114 @@ class _EmptyHistoryState extends StatelessWidget {
 class _CallHistoryCard extends StatelessWidget {
   const _CallHistoryCard({
     required this.phoneNumber,
+    this.numberSubtitle,
+    required this.isOutgoing,
     required this.dateLine,
     required this.durationLine,
     required this.creditsDeducted,
   });
 
   final String phoneNumber;
+  final String? numberSubtitle;
+  final bool isOutgoing;
   final String dateLine;
   final String durationLine;
   final int creditsDeducted;
 
+  static const double _r = 20;
+
   @override
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            AppColors.surfaceDark.withValues(alpha: 0.94),
-            const Color(0xFF0F172A).withValues(alpha: 0.98),
-          ],
-        ),
+        borderRadius: BorderRadius.circular(_r),
+        color: AppColors.cardDark.withValues(alpha: 0.88),
         border: Border.all(
-          color: const Color(0xFF334155).withValues(alpha: 0.85),
-          width: 1,
+          color: Colors.white.withValues(alpha: 0.06),
         ),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.35),
-            blurRadius: 20,
-            offset: const Offset(0, 10),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: const Icon(
-                    Icons.call_rounded,
-                    color: AppColors.primary,
-                    size: 22,
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        phoneNumber,
-                        style: GoogleFonts.poppins(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.textOnDark,
-                          letterSpacing: 0.2,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.calendar_today_outlined,
-                            size: 14,
-                            color: AppColors.textMutedOnDark.withValues(alpha: 0.9),
-                          ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              dateLine,
-                              style: GoogleFonts.inter(
-                                fontSize: 13,
-                                color: AppColors.textMutedOnDark,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Row(
-              children: [
-                Expanded(
-                  child: _MetaChip(
-                    icon: Icons.schedule_rounded,
-                    label: durationLine,
-                    caption: 'Duration',
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _MetaChip(
-                    icon: Icons.account_balance_wallet_outlined,
-                    label: '-$creditsDeducted Credits',
-                    caption: 'Deducted',
-                    emphasize: true,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MetaChip extends StatelessWidget {
-  const _MetaChip({
-    required this.icon,
-    required this.label,
-    required this.caption,
-    this.emphasize = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final String caption;
-  final bool emphasize;
-
-  @override
-  Widget build(BuildContext context) {
-    final labelColor = emphasize ? const Color(0xFFFF6B6B) : AppColors.primary;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.22),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: emphasize
-              ? const Color(0xFFFF6B6B).withValues(alpha: 0.35)
-              : AppColors.primary.withValues(alpha: 0.2),
-        ),
-      ),
-      child: Column(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(icon, size: 15, color: labelColor.withValues(alpha: 0.95)),
-              const SizedBox(width: 6),
-              Text(
-                caption,
-                style: GoogleFonts.inter(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.4,
-                  color: AppColors.textMutedOnDark,
-                ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              isOutgoing ? '↗️' : '↙️',
+              style: GoogleFonts.inter(
+                fontSize: 20,
+                height: 1,
               ),
-            ],
+            ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            label,
-            style: GoogleFonts.jetBrainsMono(
-              fontSize: emphasize ? 15 : 16,
-              fontWeight: FontWeight.w600,
-              color: labelColor,
-              letterSpacing: 0.3,
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  phoneNumber,
+                  style: GoogleFonts.inter(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textOnDark,
+                    letterSpacing: 0.1,
+                  ),
+                ),
+                if (numberSubtitle != null && numberSubtitle!.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    numberSubtitle!,
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      color: AppColors.textMutedOnDark,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 6),
+                Text(
+                  durationLine,
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.textMutedOnDark.withValues(alpha: 0.85),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  dateLine,
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    color: AppColors.textMutedOnDark.withValues(alpha: 0.65),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: AppColors.danger.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: AppColors.danger.withValues(alpha: 0.35),
+              ),
+            ),
+            child: Text(
+              '-$creditsDeducted',
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: AppColors.danger.withValues(alpha: 0.95),
+              ),
             ),
           ),
         ],

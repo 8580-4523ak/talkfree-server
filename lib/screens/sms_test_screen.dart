@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../services/twilio_sms_service.dart';
+import '../services/twilio_sms_service.dart' show TwilioSmsException, sendTwilioSMS;
 import '../theme/talkfree_colors.dart';
 
 /// Simple screen to exercise [sendTwilioSMS] (Twilio trial: To-number often must be verified).
@@ -56,21 +56,34 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
       await sendTwilioSMS(to, body);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('SMS sent. Check console for status code.')),
+        const SnackBar(content: Text('SMS sent.')),
+      );
+    } on TwilioSmsException catch (e) {
+      if (!mounted) return;
+      final is502 = e.statusCode == 502;
+      final is401 = e.statusCode == 401;
+      final text = is401
+          ? 'Sign-in expired or invalid. Sign out and back in, then try again.'
+          : e.message;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: SelectableText(
+            text,
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              height: 1.35,
+              color: Colors.white,
+            ),
+          ),
+          duration: Duration(seconds: is502 ? 14 : is401 ? 8 : 10),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
     } catch (e) {
       if (!mounted) return;
-      final msg = e.toString();
-      final is401 = msg.contains('401') || msg.contains('20003');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            is401
-                ? '401: Twilio rejected login. Fix .env — copy Account SID + '
-                    'Auth Token from console.twilio.com (exact match, no spaces). '
-                    'Then full restart the app.'
-                : 'Failed: $e',
-          ),
+          content: Text('Failed: $e'),
           duration: const Duration(seconds: 8),
         ),
       );

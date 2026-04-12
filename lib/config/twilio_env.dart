@@ -8,7 +8,8 @@ abstract final class TwilioEnv {
   static String? get accountSid => _norm(dotenv.env['TWILIO_ACCOUNT_SID']);
   static String? get authToken => _norm(dotenv.env['TWILIO_AUTH_TOKEN']);
 
-  /// Your Twilio SMS / voice number (E.164). Same as server `TWILIO_CALLER_ID`.
+  /// Voice / legacy: Twilio-owned number (E.164). Server `TWILIO_CALLER_ID`.
+  /// Outbound SMS from the app uses `POST /send-sms` on the backend — not direct REST from Flutter.
   static String? get phoneNumber => _norm(dotenv.env['TWILIO_CALLER_ID']);
 
   /// TwiML Bin (or webhook) URL for outbound [Calls] — returns Voice TwiML when the call connects.

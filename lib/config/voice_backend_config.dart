@@ -27,6 +27,12 @@ abstract final class VoiceBackendConfig {
   /// `POST /grant-reward` — Firebase ID token in `Authorization` (server adds credits).
   static Uri grantRewardUri() => Uri.https(_host, '/grant-reward');
 
+  /// `POST /assign-number` — Firebase ID token; provisions a real US Twilio number when eligible.
+  static Uri assignNumberUri() => Uri.https(_host, '/assign-number');
+
+  /// `POST /send-sms` — Firebase ID token; JSON `{ "to", "body" }` (server uses Twilio + assigned_number fallback).
+  static Uri sendSmsUri() => Uri.https(_host, '/send-sms');
+
   /// `POST /terminate-call` — JSON `{ "callSid": "CA..." }` when balance cannot cover talk time.
   static Uri terminateCallUri() => Uri.https(_host, '/terminate-call');
 

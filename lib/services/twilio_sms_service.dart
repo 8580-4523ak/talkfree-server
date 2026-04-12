@@ -1,99 +1,148 @@
 import 'dart:convert';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
-import '../config/twilio_env.dart';
+import '../config/voice_backend_config.dart';
 
-/// Twilio Account SID: `AC` + 32 hex chars (34 total).
-final RegExp _twilioAccountSid = RegExp(r'^AC[a-fA-F0-9]{32}$');
-
-/// Sends SMS via Twilio REST API (`/Messages.json`).
+/// Sends SMS via Render **`POST /send-sms`** only (no direct Twilio REST from the app).
 ///
-/// Credentials and [from] number are read from `.env` — not hardcoded in source.
+/// Endpoint: [VoiceBackendConfig.productionOrigin]`/send-sms` (e.g.
+/// `https://talkfree-server.onrender.com/send-sms`).
 Future<void> sendTwilioSMS(String recipientNumber, String messageBody) async {
-  final sid = TwilioEnv.accountSid;
-  final token = TwilioEnv.authToken;
-  final from = TwilioEnv.phoneNumber;
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) {
+    throw StateError('Not signed in');
+  }
 
-  if (sid == null || token == null) {
-    throw StateError('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing in .env');
+  final token = await user.getIdToken();
+  if (token == null || token.isEmpty) {
+    throw StateError('Could not get Firebase ID token — sign in again.');
   }
-  if (from == null || from.isEmpty) {
-    throw StateError('TWILIO_CALLER_ID missing in .env');
-  }
-  if (!_twilioAccountSid.hasMatch(sid)) {
-    throw StateError(
-      'TWILIO_ACCOUNT_SID must be 34 chars: AC + 32 hex digits. '
-      'Copy it again from Twilio Console → Account → API keys & tokens.',
-    );
-  }
+
+  final uri = VoiceBackendConfig.sendSmsUri();
+  final origin = VoiceBackendConfig.baseUrl;
 
   if (kDebugMode) {
     debugPrint(
-      'Twilio auth check: SID len=${sid.length} (expect 34), '
-      'token len=${token.length} (usually 32)',
+      'SMS: POST $uri (Authorization: Bearer <idToken>, base=$origin)',
     );
   }
 
-  final uri = Uri.parse(
-    'https://api.twilio.com/2010-04-01/Accounts/$sid/Messages.json',
-  );
-
-  final basic = base64Encode(utf8.encode('$sid:$token'));
-
-  final body = [
-    'From=${Uri.encodeQueryComponent(from)}',
-    'To=${Uri.encodeQueryComponent(recipientNumber)}',
-    'Body=${Uri.encodeQueryComponent(messageBody)}',
-  ].join('&');
+  final payload = <String, String>{
+    'to': recipientNumber,
+    'body': messageBody,
+  };
 
   try {
     final response = await http
         .post(
           uri,
-          headers: {
-            'Authorization': 'Basic $basic',
-            'Content-Type': 'application/x-www-form-urlencoded',
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json; charset=utf-8',
           },
-          body: body,
+          body: jsonEncode(payload),
         )
         .timeout(
-          const Duration(seconds: 30),
+          const Duration(seconds: 45),
           onTimeout: () => throw TwilioSmsException(
-            'Request timed out after 30s — check network and try again.',
-            0,
+            'SMS request timed out — check network and Render status.',
+            statusCode: 0,
           ),
         );
 
-    // ignore: avoid_print
-    print('Twilio SMS response status: ${response.statusCode}');
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final hint = response.statusCode == 401
-          ? ' Wrong Account SID or Auth Token — open Twilio Console, copy '
-              'Account SID + Auth Token from the main dashboard (not API Key SK…). '
-              'Update project root `.env`, then stop app and `flutter run` again.'
-          : '';
-      throw TwilioSmsException(
-        'Twilio error ${response.statusCode}: ${response.body}$hint',
-        response.statusCode,
-      );
+    if (kDebugMode) {
+      debugPrint('SMS: HTTP ${response.statusCode}');
     }
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return;
+    }
+
+    throw _exceptionFromHttpResponse(response);
+  } on TwilioSmsException {
+    rethrow;
   } catch (e, st) {
-    if (e is TwilioSmsException) rethrow;
-    // ignore: avoid_print
-    print('Twilio SMS request failed: $e');
-    // ignore: avoid_print
-    print('$st');
+    if (kDebugMode) {
+      debugPrint('SMS request error: $e\n$st');
+    }
     rethrow;
   }
 }
 
+/// Maps JSON error bodies from `POST /send-sms` (especially HTTP **502** Twilio failures).
+TwilioSmsException _exceptionFromHttpResponse(http.Response response) {
+  final status = response.statusCode;
+  Map<String, dynamic>? map;
+  try {
+    final j = jsonDecode(response.body);
+    if (j is Map<String, dynamic>) {
+      map = j;
+    } else if (j is Map) {
+      map = Map<String, dynamic>.from(j);
+    }
+  } catch (_) {}
+
+  if (map != null) {
+    final err = map['error']?.toString().trim() ?? '';
+    final tw = map['twilioCode']?.toString();
+    final more = map['moreInfo']?.toString();
+
+    // Exact Twilio REST message is in `error` for 502; keep it front and center.
+    final buffer = StringBuffer();
+    if (tw != null && tw.isNotEmpty) {
+      buffer.write('[$tw] ');
+    }
+    if (err.isNotEmpty) {
+      buffer.write(err);
+    } else {
+      buffer.write('Request failed (HTTP $status)');
+    }
+
+    return TwilioSmsException(
+      buffer.toString().trim(),
+      statusCode: status,
+      twilioCode: tw,
+      moreInfo: more,
+    );
+  }
+
+  final body = response.body;
+  // Express default when the route is missing — production often lags repo deploy.
+  if (status == 404 &&
+      (body.contains('Cannot POST /send-sms') || body.contains('Cannot POST'))) {
+    return TwilioSmsException(
+      'SMS API not deployed (HTTP 404). Redeploy your Render service with the '
+      'latest server that defines POST /send-sms, then retry. '
+      'Endpoint: ${VoiceBackendConfig.sendSmsUri()}',
+      statusCode: status,
+    );
+  }
+
+  final clipped = body.length > 280 ? '${body.substring(0, 280)}…' : body;
+  return TwilioSmsException(
+    'SMS failed (HTTP $status): $clipped',
+    statusCode: status,
+  );
+}
+
+/// Thrown when `/send-sms` returns a non-2xx body (e.g. Twilio error on **502**).
 class TwilioSmsException implements Exception {
-  TwilioSmsException(this.message, [this.statusCode]);
+  TwilioSmsException(
+    this.message, {
+    this.statusCode,
+    this.twilioCode,
+    this.moreInfo,
+  });
+
+  /// User-facing text (includes Twilio’s message when the backend forwards it).
   final String message;
   final int? statusCode;
+  final String? twilioCode;
+  final String? moreInfo;
+
   @override
   String toString() => message;
 }
