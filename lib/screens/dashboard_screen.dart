@@ -1,5 +1,5 @@
-import 'dart:async';
-import 'dart:math' show max, pi;
+import 'dart:async' show StreamSubscription, Timer, unawaited;
+import 'dart:math' show max, min, pi;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -20,6 +20,7 @@ import 'call_history_screen.dart';
 import 'dialer_screen.dart';
 import 'inbox_screen.dart';
 import 'sms_test_screen.dart';
+import 'subscription_screen.dart';
 
 /// Immutable rewarded-ad row for ValueNotifier (equality avoids redundant notifies).
 @immutable
@@ -148,6 +149,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final ValueNotifier<int> _credits = ValueNotifier<int>(0);
   final ValueNotifier<String?> _assignedNumber = ValueNotifier<String?>(null);
   final ValueNotifier<int> _lifetimeAdsWatched = ValueNotifier<int>(0);
+  /// `'free'` | `'pro'` from Firestore ([FirestoreUserService.subscriptionTierFromUserData]).
+  final ValueNotifier<String> _subscriptionTier = ValueNotifier<String>('free');
   final ValueNotifier<_AdRewardView> _adView = ValueNotifier<_AdRewardView>(
     const _AdRewardView(
       adsToday: 0,
@@ -189,6 +192,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (_lifetimeAdsWatched.value != lw) {
       _lifetimeAdsWatched.value = lw;
     }
+    final tier = FirestoreUserService.subscriptionTierFromUserData(d);
+    if (_subscriptionTier.value != tier) {
+      _subscriptionTier.value = tier;
+    }
+    unawaited(
+      FirestoreUserService.claimPremiumWelcomeBonusIfEligible(widget.user.uid),
+    );
   }
 
   void _applyOptimisticAdWatched() {
@@ -250,6 +260,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _credits.dispose();
     _assignedNumber.dispose();
     _lifetimeAdsWatched.dispose();
+    _subscriptionTier.dispose();
     _adView.dispose();
     super.dispose();
   }
@@ -405,6 +416,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     credits: credits,
                     assignedNumber: _assignedNumber,
                     lifetimeAdsWatched: _lifetimeAdsWatched,
+                    subscriptionTier: _subscriptionTier,
                     onDebugAddCredits:
                         kDebugMode ? _debugAddCredits : null,
                     onWatchRewardedAd: () => _onWatchRewardedAd(
@@ -414,17 +426,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     onGoToDialer: () => setState(() => _navIndex = 1),
                   )
                 : _navIndex == 1
-                    ? DialerScreen(
-                        key: const ValueKey<Object>('talkfree_dialer'),
-                        user: widget.user,
-                        onEarnMinutes: () => _onWatchRewardedAd(
-                          cooldownRemaining,
-                          dailyLimitReached,
-                        ),
-                        rewardedAdBusy: _rewardedAdBusy,
-                        cooldownRemaining: cooldownRemaining,
-                        rewardCycleProgress: cycleProgress,
-                        rewardDailyLimitReached: dailyLimitReached,
+                    ? ValueListenableBuilder<String>(
+                        valueListenable: _subscriptionTier,
+                        builder: (context, tier, _) {
+                          final isPro = tier == 'pro';
+                          return DialerScreen(
+                            key: const ValueKey<Object>('talkfree_dialer'),
+                            user: widget.user,
+                            isPremium: isPro,
+                            onEarnMinutes: isPro
+                                ? null
+                                : () => _onWatchRewardedAd(
+                                      cooldownRemaining,
+                                      dailyLimitReached,
+                                    ),
+                            rewardedAdBusy: _rewardedAdBusy,
+                            cooldownRemaining: cooldownRemaining,
+                            rewardCycleProgress: cycleProgress,
+                            rewardDailyLimitReached: dailyLimitReached,
+                          );
+                        },
                       )
                     : InboxScreen(
                         key: const ValueKey<String>('talkfree_inbox'),
@@ -442,6 +463,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           : 'Inbox',
                 ),
                 actions: [
+                  if (_navIndex == 0)
+                    IconButton(
+                      tooltip: 'Subscription plans',
+                      icon: const Icon(Icons.workspace_premium_outlined),
+                      onPressed: () {
+                        Navigator.of(context).push<void>(
+                          SubscriptionScreen.createRoute(),
+                        );
+                      },
+                    ),
                   IconButton(
                     tooltip: 'Call history',
                     icon: const Icon(Icons.history_rounded),
@@ -531,6 +562,7 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.credits,
     required this.assignedNumber,
     required this.lifetimeAdsWatched,
+    required this.subscriptionTier,
     this.onDebugAddCredits,
     required this.onWatchRewardedAd,
     required this.onGoToDialer,
@@ -548,6 +580,7 @@ class _DashboardHomeTab extends StatefulWidget {
   final int credits;
   final ValueNotifier<String?> assignedNumber;
   final ValueNotifier<int> lifetimeAdsWatched;
+  final ValueNotifier<String> subscriptionTier;
   final Future<void> Function()? onDebugAddCredits;
   final Future<void> Function() onWatchRewardedAd;
   final VoidCallback onGoToDialer;
@@ -569,8 +602,15 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
 
   Future<void> _onUnlockUsNumber() async {
     if (_assignNumberBusy) return;
-    final ads = widget.lifetimeAdsWatched.value;
-    if (ads < CreditsPolicy.assignNumberMinAdsWatched) return;
+    final isPro = widget.subscriptionTier.value == 'pro';
+    if (!isPro) {
+      final ads = widget.lifetimeAdsWatched.value;
+      final cr = widget.credits;
+      if (ads < CreditsPolicy.assignNumberMinAdsWatched &&
+          cr < CreditsPolicy.assignNumberMinCredits) {
+        return;
+      }
+    }
     setState(() => _assignNumberBusy = true);
     try {
       await AssignNumberService.instance.requestAssignNumber();
@@ -727,16 +767,124 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                 ),
               ],
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 14),
+            ValueListenableBuilder<String>(
+              valueListenable: widget.subscriptionTier,
+              builder: (context, tier, _) {
+                final isPro = tier.toLowerCase() == 'pro';
+                return Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 7,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        gradient: isPro
+                            ? const LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  Color(0xFFE8C547),
+                                  Color(0xFF9333EA),
+                                  Color(0xFF581C87),
+                                ],
+                                stops: [0.0, 0.55, 1.0],
+                              )
+                            : null,
+                        color: isPro ? null : TalkFreeColors.cardBg,
+                        border: Border.all(
+                          color: isPro
+                              ? Colors.transparent
+                              : TalkFreeColors.mutedWhite.withValues(alpha: 0.2),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            isPro
+                                ? Icons.verified_rounded
+                                : Icons.lock_open_rounded,
+                            size: 16,
+                            color: isPro
+                                ? Colors.white.withValues(alpha: 0.95)
+                                : TalkFreeColors.mutedWhite,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Current plan: ${isPro ? 'Pro' : 'Free'}',
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: isPro
+                                  ? Colors.white
+                                  : TalkFreeColors.offWhite,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: () {
+                        Navigator.of(context).push<void>(
+                          SubscriptionScreen.createRoute(),
+                        );
+                      },
+                      child: Text(
+                        'View plans',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                          color: AppColors.primary,
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+            ValueListenableBuilder<String>(
+              valueListenable: widget.subscriptionTier,
+              builder: (context, tier, _) {
+                final isPro = tier == 'pro';
+                if (isPro) return const SizedBox.shrink();
+                return Column(
+                  children: [
+                    const SizedBox(height: 12),
+                    _GetPremiumHeroButton(
+                      onPressed: () {
+                        Navigator.of(context).push<void>(
+                          SubscriptionScreen.createRoute(),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 12),
             RepaintBoundary(
-              child: _AdsPowerCard(
-                rewardedAdBusy: widget.rewardedAdBusy,
-                cooldownRemaining: widget.cooldownRemaining,
-                cycleProgress: widget.cycleProgress,
-                dailyLimitReached: widget.dailyLimitReached,
-                adsToday: widget.adsToday,
-                credits: widget.credits,
-                onEarn: widget.onWatchRewardedAd,
+              child: ValueListenableBuilder<String>(
+                valueListenable: widget.subscriptionTier,
+                builder: (context, tier, _) {
+                  final isPro = tier == 'pro';
+                  if (isPro) {
+                    return const _ProBenefitsCard();
+                  }
+                  return _AdsPowerCard(
+                    rewardedAdBusy: widget.rewardedAdBusy,
+                    cooldownRemaining: widget.cooldownRemaining,
+                    cycleProgress: widget.cycleProgress,
+                    dailyLimitReached: widget.dailyLimitReached,
+                    adsToday: widget.adsToday,
+                    credits: widget.credits,
+                    onEarn: widget.onWatchRewardedAd,
+                  );
+                },
               ),
             ),
             const SizedBox(height: 20),
@@ -747,11 +895,23 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                   return ValueListenableBuilder<int>(
                     valueListenable: widget.lifetimeAdsWatched,
                     builder: (context, adsWatched, _) {
-                      return _VirtualNumberCard(
-                        assignedNumber: assigned,
-                        adsWatchedCount: adsWatched,
-                        assigning: _assignNumberBusy,
-                        onUnlock: _onUnlockUsNumber,
+                      return ValueListenableBuilder<String>(
+                        valueListenable: widget.subscriptionTier,
+                        builder: (context, tier, _) {
+                          return _VirtualNumberCard(
+                            assignedNumber: assigned,
+                            adsWatchedCount: adsWatched,
+                            credits: widget.credits,
+                            isPremium: tier == 'pro',
+                            assigning: _assignNumberBusy,
+                            onUnlock: _onUnlockUsNumber,
+                            onGetPremium: () {
+                              Navigator.of(context).push<void>(
+                                SubscriptionScreen.createRoute(),
+                              );
+                            },
+                          );
+                        },
                       );
                     },
                   );
@@ -759,29 +919,35 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
               ),
             ),
             const SizedBox(height: 22),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: _DashboardStatCard(
-                    icon: Icons.call_made_rounded,
-                    label: 'Calls made',
-                    value: '0',
-                    caption: 'All time',
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _DashboardStatCard(
-                    icon: Icons.timer_outlined,
-                    label: 'Minutes',
-                    value: (widget.credits / CreditsPolicy.creditsPerMinute)
-                        .toStringAsFixed(1),
-                    caption: 'Est. from balance',
-                    animatedValue: true,
-                  ),
-                ),
-              ],
+            ValueListenableBuilder<String>(
+              valueListenable: widget.subscriptionTier,
+              builder: (context, tier, _) {
+                final isPro = tier == 'pro';
+                final cpm = CreditsPolicy.creditsPerMinuteForUser(isPro);
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: _DashboardStatCard(
+                        icon: Icons.call_made_rounded,
+                        label: 'Calls made',
+                        value: '0',
+                        caption: 'All time',
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: _DashboardStatCard(
+                        icon: Icons.timer_outlined,
+                        label: 'Minutes',
+                        value: (widget.credits / cpm).toStringAsFixed(1),
+                        caption: 'Est. @ $cpm⚡/min',
+                        animatedValue: true,
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 22),
             _RecentActivitySection(
@@ -1334,6 +1500,170 @@ class _AdsPowerCard extends StatelessWidget {
   }
 }
 
+/// Full-width CTA — opens [SubscriptionScreen].
+class _GetPremiumHeroButton extends StatelessWidget {
+  const _GetPremiumHeroButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(18),
+        child: Ink(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color(0xFFE8C547),
+                Color(0xFF9333EA),
+                Color(0xFF581C87),
+              ],
+              stops: [0.0, 0.5, 1.0],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF9333EA).withValues(alpha: 0.35),
+                blurRadius: 20,
+                offset: const Offset(0, 10),
+              ),
+            ],
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.workspace_premium_rounded,
+                  color: Colors.white.withValues(alpha: 0.95),
+                  size: 26,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Get Premium',
+                        style: GoogleFonts.inter(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                          letterSpacing: -0.3,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Instant US number · No ads · Bonus credits',
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.white.withValues(alpha: 0.88),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  color: Colors.white.withValues(alpha: 0.9),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Replaces the “Earn credits” power card for Pro users.
+class _ProBenefitsCard extends StatelessWidget {
+  const _ProBenefitsCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            const Color(0xFF581C87).withValues(alpha: 0.45),
+            AppColors.cardDark.withValues(alpha: 0.92),
+          ],
+        ),
+        border: Border.all(
+          color: const Color(0xFFE8C547).withValues(alpha: 0.35),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.verified_rounded,
+                color: const Color(0xFFE8C547).withValues(alpha: 0.95),
+                size: 22,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'You’re on TalkFree Pro',
+                style: GoogleFonts.inter(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: TalkFreeColors.offWhite,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _proLine('Ad-free experience'),
+          _proLine('Bonus credits & lower call rates'),
+          _proLine('Priority line quality'),
+        ],
+      ),
+    );
+  }
+
+  static Widget _proLine(String t) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.check_circle_rounded,
+            size: 18,
+            color: AppColors.primary.withValues(alpha: 0.95),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              t,
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                height: 1.35,
+                color: TalkFreeColors.offWhite.withValues(alpha: 0.92),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Pretty-print E.164 US numbers for the virtual line card (fallback: raw string).
 String _formatUsPhoneForDisplay(String e164) {
   final buf = StringBuffer();
@@ -1359,21 +1689,30 @@ class _VirtualNumberCard extends StatelessWidget {
   const _VirtualNumberCard({
     required this.assignedNumber,
     required this.adsWatchedCount,
+    required this.credits,
+    required this.isPremium,
     required this.assigning,
     required this.onUnlock,
+    required this.onGetPremium,
   });
 
   final String? assignedNumber;
   final int adsWatchedCount;
+  final int credits;
+  final bool isPremium;
   final bool assigning;
   final Future<void> Function() onUnlock;
+  final VoidCallback onGetPremium;
 
   @override
   Widget build(BuildContext context) {
     final numberRaw = assignedNumber?.trim();
     final hasNumber = numberRaw != null && numberRaw.isNotEmpty;
     final minAds = CreditsPolicy.assignNumberMinAdsWatched;
-    final canUnlock = adsWatchedCount >= minAds;
+    final minCr = CreditsPolicy.assignNumberMinCredits;
+    final canUnlock = isPremium ||
+        adsWatchedCount >= minAds ||
+        credits >= minCr;
 
     final br = BorderRadius.circular(AppTheme.radiusLg);
     return AnimatedContainer(
@@ -1516,9 +1855,11 @@ class _VirtualNumberCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  canUnlock
-                      ? 'Claim your Twilio US line — it appears in Inbox instantly.'
-                      : 'Reach $minAds lifetime ad views to unlock.',
+                  isPremium
+                      ? 'Your subscription includes an instant US line — claim it below.'
+                      : canUnlock
+                          ? 'Claim your Twilio US line — it appears in Inbox instantly.'
+                          : 'Watch $minAds ads (or reach $minCr credits) to unlock — your progress:',
                   style: GoogleFonts.inter(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
@@ -1526,14 +1867,45 @@ class _VirtualNumberCard extends StatelessWidget {
                     color: TalkFreeColors.mutedWhite,
                   ),
                 ),
-                if (!canUnlock) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    '${adsWatchedCount.clamp(0, minAds)} / $minAds ads',
-                    style: GoogleFonts.jetBrainsMono(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.accentAmber.withValues(alpha: 0.95),
+                if (!isPremium && !canUnlock) ...[
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: min(1, adsWatchedCount / minAds),
+                      minHeight: 8,
+                      backgroundColor: Colors.white.withValues(alpha: 0.08),
+                      color: AppColors.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${adsWatchedCount.clamp(0, minAds)} / $minAds ads',
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.accentAmber.withValues(alpha: 0.95),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      onPressed: onGetPremium,
+                      child: Text(
+                        'Don’t want to wait? Get Premium to unlock instantly!',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                          color: const Color(0xFFE8C547),
+                        ),
+                      ),
                     ),
                   ),
                 ],

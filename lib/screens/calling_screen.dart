@@ -445,9 +445,10 @@ class _CallingScreenState extends State<CallingScreen>
     }
 
     final c = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
+    final premium = await FirestoreUserService.fetchIsPremium(widget.user.uid);
     if (!mounted) return;
     _creditsAtSessionStart = c;
-    if (c < CreditsPolicy.minCreditsToStartCall) {
+    if (c < CreditsPolicy.minCreditsToStartCallFor(premium)) {
       _cancelConnectedTimers();
       Navigator.of(context).pop(
         const CallingScreenResult(insufficientCredits: true),

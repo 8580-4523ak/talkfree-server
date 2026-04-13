@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
-/// AdMob **Rewarded** ads — load/show only.
+/// AdMob **Rewarded** + optional **Interstitial** (e.g. post-call for free users).
 ///
 /// [loadAndShowRewardedAd] completes with **`true` only if** the user earned the
 /// reward ([RewardedAd] `onUserEarnedReward`). If they close the ad early or
@@ -21,6 +21,18 @@ class AdService {
   /// Holds the in-flight [RewardedAd] after load until [dispose] runs on fullscreen exit.
   /// `null` means no ad instance is retained — the next [loadAndShowRewardedAd] always loads fresh.
   RewardedAd? _activeRewardedAd;
+
+  InterstitialAd? _activeInterstitialAd;
+
+  void _disposeInterstitialAd(InterstitialAd ad) {
+    try {
+      ad.dispose();
+    } finally {
+      if (identical(_activeInterstitialAd, ad)) {
+        _activeInterstitialAd = null;
+      }
+    }
+  }
 
   void _disposeRewardedAd(RewardedAd ad) {
     try {
@@ -46,6 +58,23 @@ class AdService {
         return rewardedTestUnitIdIos;
       default:
         return rewardedTestUnitIdAndroid;
+    }
+  }
+
+  /// Google sample interstitial — Android.
+  static const String interstitialTestUnitIdAndroid =
+      'ca-app-pub-3940256099942544/1033173712';
+
+  /// Google sample interstitial — iOS.
+  static const String interstitialTestUnitIdIos =
+      'ca-app-pub-3940256099942544/4411468910';
+
+  static String get _interstitialUnitId {
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.iOS:
+        return interstitialTestUnitIdIos;
+      default:
+        return interstitialTestUnitIdAndroid;
     }
   }
 
@@ -116,5 +145,59 @@ class AdService {
     }
 
     return completer.future;
+  }
+
+  /// Full-screen interstitial (e.g. after a call for non‑premium users). Ignores failures silently.
+  Future<void> loadAndShowInterstitialAd() async {
+    final stale = _activeInterstitialAd;
+    if (stale != null) {
+      _disposeInterstitialAd(stale);
+    }
+    try {
+      await MobileAds.instance.initialize();
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('MobileAds.initialize (interstitial): $e\n$st');
+      }
+    }
+
+    final completer = Completer<void>();
+    try {
+      InterstitialAd.load(
+        adUnitId: _interstitialUnitId,
+        request: const AdRequest(),
+        adLoadCallback: InterstitialAdLoadCallback(
+          onAdLoaded: (InterstitialAd ad) {
+            _activeInterstitialAd = ad;
+            ad.fullScreenContentCallback = FullScreenContentCallback(
+              onAdDismissedFullScreenContent: (InterstitialAd a) {
+                _disposeInterstitialAd(a);
+                if (!completer.isCompleted) {
+                  completer.complete();
+                }
+              },
+              onAdFailedToShowFullScreenContent: (InterstitialAd a, AdError error) {
+                _disposeInterstitialAd(a);
+                if (!completer.isCompleted) {
+                  completer.complete();
+                }
+              },
+            );
+            ad.show();
+          },
+          onAdFailedToLoad: (LoadAdError error) {
+            if (!completer.isCompleted) {
+              completer.complete();
+            }
+          },
+        ),
+      );
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('InterstitialAd.load error: $e\n$st');
+      }
+      return;
+    }
+    return completer.future.timeout(const Duration(seconds: 45));
   }
 }

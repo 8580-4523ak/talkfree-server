@@ -124,6 +124,61 @@ class FirestoreUserService {
     return 0;
   }
 
+  /// `true` when `isPremium` is set or legacy tier fields say Pro.
+  ///
+  /// **Security:** Firestore rules currently allow clients to edit their own doc — in production,
+  /// restrict `isPremium` (and credit buckets) to Admin / payment webhooks only.
+  static bool isPremiumFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return false;
+    final p = data['isPremium'];
+    if (p is bool && p) return true;
+    if (p is String && p.toLowerCase().trim() == 'true') return true;
+    final raw =
+        data['subscription_tier'] ?? data['subscriptionTier'] ?? data['plan'];
+    if (raw == null) return false;
+    final s = raw.toString().toLowerCase().trim();
+    return s == 'pro' || s == 'premium';
+  }
+
+  /// `'free'` | `'pro'` — derived from [isPremiumFromUserData].
+  static String subscriptionTierFromUserData(Map<String, dynamic>? data) {
+    return isPremiumFromUserData(data) ? 'pro' : 'free';
+  }
+
+  static Future<bool> fetchIsPremium(String uid) async {
+    final s = await _userRef(uid).get();
+    return isPremiumFromUserData(s.data());
+  }
+
+  /// One-time [CreditsPolicy.premiumWelcomeBonusCredits] when `isPremium` is true and not yet granted.
+  static Future<void> claimPremiumWelcomeBonusIfEligible(String uid) async {
+    try {
+      await _db.runTransaction((tx) async {
+        final ref = _userRef(uid);
+        final snap = await tx.get(ref);
+        if (!snap.exists) return;
+        final d = snap.data()!;
+        if (!isPremiumFromUserData(d)) return;
+        if (d['premiumWelcomeBonusGranted'] == true) return;
+        final m = Map<String, dynamic>.from(d);
+        _migrateLegacyInPlace(m);
+        var paid = _int(m['paidCredits']);
+        final reward = _int(m['rewardCredits']);
+        final bonus = CreditsPolicy.premiumWelcomeBonusCredits;
+        paid += bonus;
+        tx.update(ref, <String, Object?>{
+          'paidCredits': paid,
+          'credits': paid + reward,
+          'premiumWelcomeBonusGranted': true,
+        });
+      });
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('claimPremiumWelcomeBonusIfEligible: $e\n$st');
+      }
+    }
+  }
+
   static Future<void> expireRewardCreditsIfNeeded(String uid) async {
     await _db.runTransaction((tx) async {
       final ref = _userRef(uid);
@@ -227,6 +282,8 @@ class FirestoreUserService {
       'adRewardsCount': 0,
       'adRewardsDayKey': '',
       'adRewardCycleCount': 0,
+      'isPremium': false,
+      'premiumWelcomeBonusGranted': false,
       'created_at': FieldValue.serverTimestamp(),
       'createdAt': FieldValue.serverTimestamp(),
     };
@@ -332,6 +389,8 @@ class FirestoreUserService {
         'adRewardsCount': 0,
         'adRewardsDayKey': '',
         'adRewardCycleCount': 0,
+        'isPremium': false,
+        'premiumWelcomeBonusGranted': false,
         'created_at': FieldValue.serverTimestamp(),
         'createdAt': FieldValue.serverTimestamp(),
       });

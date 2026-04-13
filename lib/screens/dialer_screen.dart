@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:io' show Platform;
 
 import 'package:twilio_voice/twilio_voice.dart';
@@ -12,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../config/credits_policy.dart';
+import '../services/ad_service.dart';
 import '../config/voice_backend_config.dart';
 import '../theme/app_colors.dart';
 import '../services/call_service.dart';
@@ -20,16 +22,11 @@ import '../utils/voip_runtime_permissions.dart';
 import '../widgets/premium_ios_dial_pad.dart';
 import 'calling_screen.dart';
 
-/// Per-minute credit rate for UI (aligned with [CreditsPolicy.creditsPerMinute]).
-String _dialerRateHint(Country _) {
-  final cpm = CreditsPolicy.creditsPerMinute;
-  return 'Rate: $cpm ⚡/min';
-}
-
 class DialerScreen extends StatefulWidget {
   const DialerScreen({
     super.key,
     required this.user,
+    this.isPremium = false,
     this.onEarnMinutes,
     this.rewardedAdBusy = false,
     this.cooldownRemaining = 0,
@@ -38,6 +35,8 @@ class DialerScreen extends StatefulWidget {
   });
 
   final User user;
+  /// Pro subscribers get a lower per-minute rate (see [CreditsPolicy.creditsPerMinutePremium]).
+  final bool isPremium;
   final Future<void> Function()? onEarnMinutes;
   final bool rewardedAdBusy;
   final int cooldownRemaining;
@@ -212,7 +211,7 @@ class _DialerScreenState extends State<DialerScreen>
 
     final usable = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
     if (!mounted) return;
-    if (usable < CreditsPolicy.minCreditsToStartCall) {
+    if (usable < CreditsPolicy.minCreditsToStartCallFor(widget.isPremium)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Not enough credits')),
       );
@@ -267,6 +266,9 @@ class _DialerScreenState extends State<DialerScreen>
       if (!mounted) return;
       final r = result;
       if (r == null) return;
+      if (!r.insufficientCredits && !widget.isPremium) {
+        unawaited(AdService.instance.loadAndShowInterstitialAd());
+      }
       if (r.insufficientCredits) {
         final b = r.syncedBalance;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -438,7 +440,9 @@ class _DialerScreenState extends State<DialerScreen>
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       child: _CountryPickerTile(
                         country: _country,
-                        rateLine: _dialerRateHint(_country),
+                        rateLine:
+                            'Rate: ${CreditsPolicy.creditsPerMinuteForUser(widget.isPremium)} ⚡/min'
+                            '${widget.isPremium ? ' (Pro)' : ''}',
                         onOpen: _openCountryPicker,
                       ),
                     ),
@@ -500,7 +504,7 @@ class _DialerScreenState extends State<DialerScreen>
                 ),
               ),
             ),
-            if (widget.onEarnMinutes != null)
+            if (widget.onEarnMinutes != null && !widget.isPremium)
               Positioned(
                 right: 16,
                 bottom: fabBottom,

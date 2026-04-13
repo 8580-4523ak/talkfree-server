@@ -705,14 +705,16 @@ app.post("/assign-number", async (req, res) => {
   const adsLifetime = readLifetimeAdsWatched(d);
   const enoughCredits = usable >= ASSIGN_NUMBER_MIN_CREDITS;
   const enoughAds = adsLifetime >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
+  const premium = readIsPremium(d);
 
-  if (!enoughCredits && !enoughAds) {
+  if (!enoughCredits && !enoughAds && !premium) {
     return res.status(403).json({
       error: "Not eligible to assign a number",
       usableCredits: usable,
       adsWatchedLifetime: adsLifetime,
       minCredits: ASSIGN_NUMBER_MIN_CREDITS,
       minAdsWatched: ASSIGN_NUMBER_MIN_ADS_WATCHED,
+      isPremium: false,
     });
   }
 
@@ -762,10 +764,20 @@ app.post("/assign-number", async (req, res) => {
     adsWatchedLifetime: adsLifetime,
     viaCredits: enoughCredits,
     viaAds: enoughAds,
+    viaPremium: premium,
   });
 });
 
 const CALL_CREDITS_PER_MINUTE = Number(process.env.CALL_CREDITS_PER_MINUTE || 10);
+const CALL_CREDITS_PER_MINUTE_PREMIUM = Number(process.env.CALL_CREDITS_PER_MINUTE_PREMIUM || 7);
+
+/** Matches Flutter [FirestoreUserService.isPremiumFromUserData]. */
+function readIsPremium(d) {
+  if (!d) return false;
+  if (d.isPremium === true) return true;
+  const t = String(d.subscription_tier ?? d.subscriptionTier ?? d.plan ?? "").toLowerCase();
+  return t === "pro" || t === "premium";
+}
 
 /** Non-empty Firebase Auth uid — all billing writes use `users/{uid}`. */
 function requireFirebaseUid(uid) {
@@ -829,7 +841,6 @@ async function settleOutboundCallBill({
   const { FieldValue } = firebaseAdmin.firestore;
 
   const ds = Number(durationSec) || 0;
-  const finalCharge = Math.ceil(ds / 6);
 
   await db.runTransaction(async (t) => {
     const userRef = db.collection("users").doc(uid);
@@ -850,6 +861,11 @@ async function settleOutboundCallBill({
     const prepaid = Number(liveSnap.exists ? liveSnap.data()?.liveDeductedCredits || 0 : 0);
 
     const d = userSnap.data();
+    const tickUnits = Math.ceil(ds / 6);
+    const premium = readIsPremium(d);
+    const billCredits = premium
+      ? Math.max(0, Math.ceil((tickUnits * CALL_CREDITS_PER_MINUTE_PREMIUM) / CALL_CREDITS_PER_MINUTE))
+      : tickUnits;
     let paid = Number(d.paidCredits ?? 0);
     let reward = Number(d.rewardCredits ?? 0);
     const now = new Date();
@@ -863,7 +879,7 @@ async function settleOutboundCallBill({
       reward = 0;
     }
 
-    let remainder = finalCharge - prepaid;
+    let remainder = billCredits - prepaid;
 
     /** Credits returned to **paidCredits** only (audit: rewards vs purchased). */
     let refundToPaidCredits = 0;
@@ -895,7 +911,7 @@ async function settleOutboundCallBill({
     const totalCreditsOut = paid + reward;
     console.log(
       `[billing] settle user=${uid} callSid=${callSid} source=${source} durationSec=${ds} ` +
-        `finalCharge=${finalCharge} prepaid=${prepaid} refundToPaidCredits=${refundToPaidCredits} ` +
+        `premium=${premium} tickUnits=${tickUnits} billCredits=${billCredits} prepaid=${prepaid} refundToPaidCredits=${refundToPaidCredits} ` +
         `remainderCharge=${charge} creditsAppliedThisSettle=${creditsChargedThisSettle} balanceAfter=${totalCreditsOut}`,
     );
 
@@ -913,9 +929,10 @@ async function settleOutboundCallBill({
         callSid,
         twilioCallStatus: String(twilioCallStatus || "completed"),
         durationSeconds: ds,
-        billedSixSecondTicks: finalCharge,
-        creditsPerMinute: CALL_CREDITS_PER_MINUTE,
-        finalCharge,
+        billedSixSecondTicks: tickUnits,
+        creditsPerMinute: premium ? CALL_CREDITS_PER_MINUTE_PREMIUM : CALL_CREDITS_PER_MINUTE,
+        finalCharge: billCredits,
+        isPremium: premium,
         prepaidAppliedFromLiveTicks: prepaid,
         refundToPaidCredits,
         creditsCharged: creditsChargedThisSettle,
@@ -989,6 +1006,10 @@ app.post("/call-live-tick", async (req, res) => {
       }
 
       const d = userSnap.data();
+      const premium = readIsPremium(d);
+      const debit = premium
+        ? Math.max(0, Math.ceil((amount * CALL_CREDITS_PER_MINUTE_PREMIUM) / CALL_CREDITS_PER_MINUTE))
+        : amount;
       let paid = Number(d.paidCredits ?? 0);
       let reward = Number(d.rewardCredits ?? 0);
       const now = new Date();
@@ -1003,11 +1024,11 @@ app.post("/call-live-tick", async (req, res) => {
       }
 
       let usable = paid + reward;
-      if (usable < amount) {
+      if (usable < debit) {
         throw Object.assign(new Error("Insufficient credits"), { http: 402 });
       }
 
-      let left = amount;
+      let left = debit;
       const takeReward = left < reward ? left : reward;
       reward -= takeReward;
       left -= takeReward;
@@ -1021,7 +1042,7 @@ app.post("/call-live-tick", async (req, res) => {
 
       const bal = paid + reward;
       console.log(
-        `[billing] call-live-tick user=${uid} callSid=${callSid} amount=${amount} balanceAfter=${bal}`,
+        `[billing] call-live-tick user=${uid} callSid=${callSid} amount=${amount} debit=${debit} premium=${premium} balanceAfter=${bal}`,
       );
       t.update(userRef, {
         paidCredits: paid,
@@ -1033,7 +1054,7 @@ app.post("/call-live-tick", async (req, res) => {
         liveRef,
         {
           firebaseUid: uid,
-          liveDeductedCredits: FieldValue.increment(amount),
+          liveDeductedCredits: FieldValue.increment(debit),
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true },

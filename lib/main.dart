@@ -10,6 +10,7 @@ import 'config/twilio_env.dart';
 import 'theme/app_theme.dart';
 import 'screens/app_root.dart';
 import 'screens/number_selection_screen.dart';
+import 'screens/subscription_screen.dart';
 import 'screens/virtual_number_screen.dart';
 
 Future<void> main() async {
@@ -57,6 +58,9 @@ class TalkFreeApp extends StatelessWidget {
         }
         if (settings.name == VirtualNumberScreen.routeName) {
           return VirtualNumberScreen.createRoute(settings);
+        }
+        if (settings.name == SubscriptionScreen.routeName) {
+          return SubscriptionScreen.createRoute();
         }
         return null;
       },

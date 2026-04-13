@@ -81,8 +81,10 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
     BuildContext context,
     int adsWatched,
     int usableCredits,
+    bool isPremium,
   ) async {
-    final eligible = adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
+    final eligible = isPremium ||
+        adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
         usableCredits >= CreditsPolicy.assignNumberMinCredits;
     if (!eligible || _claiming) return;
     setState(() => _claiming = true);
@@ -149,7 +151,9 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
           final assigned = VirtualNumberScreen._readAssigned(data);
           final adsWatched = VirtualNumberScreen._readAdsWatched(data);
           final usable = FirestoreUserService.computeUsableCredits(data);
-          final canClaim = adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
+          final isPremium = FirestoreUserService.isPremiumFromUserData(data);
+          final canClaim = isPremium ||
+              adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
               usable >= CreditsPolicy.assignNumberMinCredits;
 
           if (snap.hasError) {
@@ -204,7 +208,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                   FilledButton.icon(
                     onPressed: (!canClaim || _claiming)
                         ? null
-                        : () => _claimUsNumber(context, adsWatched, usable),
+                        : () => _claimUsNumber(context, adsWatched, usable, isPremium),
                     icon: _claiming
                         ? const SizedBox(
                             width: 22,

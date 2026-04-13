@@ -18,8 +18,20 @@ abstract final class CreditsPolicy {
   /// Credits granted by the server after every [adsRequiredForMinuteGrant] ads (secured).
   static const int creditsPerMinuteGrant = 10;
 
-  /// Credits charged per **full minute** of billed talk (matches server; used for UI “~minutes” hints).
+  /// Credits charged per **full minute** of billed talk — **free** users (matches server default).
   static const int creditsPerMinute = 10;
+
+  /// Per-minute rate for **premium** subscribers (matches server `CALL_CREDITS_PER_MINUTE_PREMIUM`).
+  static const int creditsPerMinutePremium = 7;
+
+  /// One-time credits when `isPremium` becomes true (client transaction; payment backend should set `isPremium`).
+  static const int premiumWelcomeBonusCredits = 1000;
+
+  /// Optional monthly bundle copy / server cron (not auto-applied in app yet).
+  static const int premiumMonthlyBundleCredits = 2000;
+
+  static int creditsPerMinuteForUser(bool isPremium) =>
+      isPremium ? creditsPerMinutePremium : creditsPerMinute;
 
   /// First server pulse when the call becomes **Connected** (minimum charge bucket).
   static const int creditsPerCallTick = 10;
@@ -44,6 +56,10 @@ abstract final class CreditsPolicy {
   static const Duration freeRewardCreditTtl = Duration(hours: 24);
 
   static const int minCreditsToStartCall = callCreditsPerBilledMinute;
+
+  /// Minimum balance to start a call — lower for premium ([creditsPerMinutePremium] connect pulse).
+  static int minCreditsToStartCallFor(bool isPremium) =>
+      isPremium ? creditsPerMinutePremium : minCreditsToStartCall;
 
   /// Must match server `ASSIGN_NUMBER_MIN_CREDITS` (POST `/assign-number`).
   static const int assignNumberMinCredits = 100;
