@@ -852,8 +852,8 @@ app.get("/assign-number", (_req, res) => {
 /**
  * POST /assign-number — provision a real US local Twilio number (secured).
  * - Body: `{ "planType": "…", "phoneNumber": "+1…" }` — `phoneNumber` from GET /available-numbers.
- * - Eligible if usable credits ≥ ASSIGN_NUMBER_MIN_CREDITS (default 100) OR
- *   lifetime `ads_watched_count` ≥ ASSIGN_NUMBER_MIN_ADS_WATCHED (default 50) OR `isPremium`.
+ * - Eligible if `isPremium` OR (free tier) lifetime `ads_watched_count` ≥
+ *   ASSIGN_NUMBER_MIN_ADS_WATCHED (default 50). Credits alone do not unlock a line.
  * - Deducts plan credits (0 for premium) and sets `number_expiry_date`, `number_plan_type`.
  * - Purchases the chosen E.164 via Twilio, then updates Firestore.
  */
@@ -927,12 +927,13 @@ app.post("/assign-number", async (req, res) => {
   const enoughAds = adsLifetime >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
   const premium = readIsPremium(d);
 
-  if (!enoughCredits && !enoughAds && !premium) {
+  if (!premium && !enoughAds) {
     return res.status(403).json({
       error: "Not eligible to assign a number",
+      detail:
+        "Free tier requires 50 lifetime rewarded ads, or upgrade to Premium for instant assignment.",
       usableCredits: usable,
       adsWatchedLifetime: adsLifetime,
-      minCredits: ASSIGN_NUMBER_MIN_CREDITS,
       minAdsWatched: ASSIGN_NUMBER_MIN_ADS_WATCHED,
       isPremium: false,
     });

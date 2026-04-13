@@ -4,10 +4,13 @@ import '../services/assign_number_service.dart';
 import '../services/available_numbers_service.dart';
 import 'pick_available_number_sheet.dart';
 
-/// Loads inventory, shows picker, then POST `/assign-number` with the chosen E.164.
+/// Loads inventory, optionally auto-picks the first number (premium), else shows picker,
+/// then POST `/assign-number` with the chosen E.164.
 Future<void> runAssignUsNumberFlow(
   BuildContext context, {
   String planType = 'monthly',
+  /// Premium: skip the sheet and assign the first inventory number immediately.
+  bool autoPickFirstNumber = false,
   required void Function(AssignNumberResult r) onSuccess,
   required void Function(String message) onError,
 }) async {
@@ -18,10 +21,12 @@ Future<void> runAssignUsNumberFlow(
       onError('No numbers available right now. Try again later.');
       return;
     }
-    final phone = await showPickAvailableNumberSheet(
-      context,
-      candidates: list,
-    );
+    final String? phone = autoPickFirstNumber
+        ? list.first.phoneNumber
+        : await showPickAvailableNumberSheet(
+            context,
+            candidates: list,
+          );
     if (!context.mounted || phone == null) return;
     final r = await AssignNumberService.instance.requestAssignNumber(
       phoneNumber: phone,

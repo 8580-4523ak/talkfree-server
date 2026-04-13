@@ -106,17 +106,16 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
   Future<void> _claimUsNumber(
     BuildContext context,
     int adsWatched,
-    int usableCredits,
     bool isPremium,
   ) async {
     final eligible = isPremium ||
-        adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
-        usableCredits >= CreditsPolicy.assignNumberMinCredits;
+        adsWatched >= CreditsPolicy.assignNumberMinAdsWatched;
     if (!eligible || _claiming) return;
     setState(() => _claiming = true);
     try {
       await runAssignUsNumberFlow(
         context,
+        autoPickFirstNumber: isPremium,
         onSuccess: (r) {
           if (!context.mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
@@ -170,13 +169,11 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
           final data = snap.data?.data();
           final assigned = VirtualNumberScreen._readAssigned(data);
           final adsWatched = VirtualNumberScreen._readAdsWatched(data);
-          final usable = FirestoreUserService.computeUsableCredits(data);
           final isPremium = FirestoreUserService.isPremiumFromUserData(data);
           final leaseExp = FirestoreUserService.numberLeaseExpiryFromUserData(data);
           final planType = FirestoreUserService.numberPlanTypeFromUserData(data);
           final canClaim = isPremium ||
-              adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
-              usable >= CreditsPolicy.assignNumberMinCredits;
+              adsWatched >= CreditsPolicy.assignNumberMinAdsWatched;
 
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!context.mounted) return;
@@ -255,7 +252,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                   FilledButton.icon(
                     onPressed: (!canClaim || _claiming)
                         ? null
-                        : () => _claimUsNumber(context, adsWatched, usable, isPremium),
+                        : () => _claimUsNumber(context, adsWatched, isPremium),
                     icon: _claiming
                         ? const SizedBox(
                             width: 22,
@@ -290,8 +287,8 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                     Padding(
                       padding: const EdgeInsets.only(top: 10),
                       child: Text(
-                        'Watch ${CreditsPolicy.assignNumberMinAdsWatched} ads '
-                        'or reach ${CreditsPolicy.assignNumberMinCredits} credits to unlock.',
+                        'Watch ${CreditsPolicy.assignNumberMinAdsWatched} rewarded '
+                        'ads (lifetime) to unlock your free US number.',
                         textAlign: TextAlign.center,
                         style: GoogleFonts.inter(
                           fontSize: 12,

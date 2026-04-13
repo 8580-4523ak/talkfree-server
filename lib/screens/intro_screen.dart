@@ -65,15 +65,21 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
     );
   }
 
-  Widget _lottieHero(String asset, String semanticLabel) {
+  Widget _lottieHero(
+    BuildContext context,
+    String asset,
+    String semanticLabel, {
+    required double height,
+  }) {
+    final compact = MediaQuery.sizeOf(context).shortestSide < 360;
     return Center(
       child: ClipRRect(
         borderRadius: BorderRadius.circular(28),
         child: GlassPanel(
           borderRadius: 28,
-          padding: const EdgeInsets.fromLTRB(12, 16, 12, 20),
+          padding: EdgeInsets.fromLTRB(12, 12, 12, compact ? 12 : 20),
           child: SizedBox(
-            height: 220,
+            height: height,
             width: double.infinity,
             child: Semantics(
               label: semanticLabel,
@@ -98,6 +104,9 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
   @override
   Widget build(BuildContext context) {
     final deco = _pageDecoration();
+    final shortest = MediaQuery.sizeOf(context).shortestSide;
+    final screenH = MediaQuery.sizeOf(context).height;
+    final lottieHeight = screenH < 620 ? 160.0 : (screenH < 700 ? 190.0 : 220.0);
 
     return Container(
       width: double.infinity,
@@ -110,6 +119,8 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
         ),
       ),
       child: IntroductionScreen(
+        /// Inset scaffold so footer clears status bar, notches, and home indicator.
+        safeAreaList: const [true, true, true, true],
         globalBackgroundColor: Colors.transparent,
         onChange: (i) => setState(() => _pageIndex = i),
         showSkipButton: true,
@@ -141,7 +152,7 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
         ),
         onDone: _finish,
         overrideDone: Padding(
-          padding: const EdgeInsets.only(left: 8),
+          padding: const EdgeInsets.only(left: 4),
           child: SizedBox(
             width: double.infinity,
             child: Material(
@@ -151,7 +162,9 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
                 borderRadius: BorderRadius.circular(28),
                 child: GlassPanel(
                   borderRadius: 28,
-                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  padding: EdgeInsets.symmetric(
+                    vertical: shortest < 360 ? 14 : 16,
+                  ),
                   child: Center(
                     child: _finishing
                         ? SizedBox(
@@ -190,37 +203,35 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
           ),
           spacing: const EdgeInsets.symmetric(horizontal: 4),
         ),
-        /// Wider primary action: intro_screen keeps a hidden Skip slot on the last page.
-        skipOrBackFlex: 1,
-        dotsFlex: 1,
-        nextFlex: 8,
-        controlsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
-        globalHeader: SafeArea(
-          bottom: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'TalkFree',
-                  style: GoogleFonts.inter(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.5,
-                    color: Colors.white.withValues(alpha: 0.95),
-                  ),
+        /// Balanced flex: middle column must stay wide enough for [DotsIndicator]
+        /// (1:1:8 squeezed dots on narrow phones and caused horizontal overflow).
+        skipOrBackFlex: 2,
+        dotsFlex: 3,
+        nextFlex: 5,
+        controlsPadding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+        globalHeader: Padding(
+          padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'TalkFree',
+                style: GoogleFonts.inter(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
+                  color: Colors.white.withValues(alpha: 0.95),
                 ),
-                Text(
-                  '${_pageIndex + 1}/3',
-                  style: GoogleFonts.inter(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.primary.withValues(alpha: 0.9),
-                  ),
+              ),
+              Text(
+                '${_pageIndex + 1}/3',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.primary.withValues(alpha: 0.9),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
         pages: [
@@ -228,21 +239,36 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
             title: 'Private US Lines',
             body:
                 'Get a dedicated US number for SMS & Calls.',
-            image: _lottieHero(_lottieMap, 'Map and US connectivity'),
+            image: _lottieHero(
+              context,
+              _lottieMap,
+              'Map and US connectivity',
+              height: lottieHeight,
+            ),
             decoration: deco,
           ),
           PageViewModel(
             title: 'Crystal Clear Audio',
             body:
                 'Experience high-quality VoIP calling worldwide.',
-            image: _lottieHero(_lottieCalling, 'High-quality calling'),
+            image: _lottieHero(
+              context,
+              _lottieCalling,
+              'High-quality calling',
+              height: lottieHeight,
+            ),
             decoration: deco,
           ),
           PageViewModel(
             title: 'Zero Ads with Pro',
             body:
                 'Upgrade to Pro for an ad-free premium experience.',
-            image: _lottieHero(_lottieWallet, 'Premium Pro'),
+            image: _lottieHero(
+              context,
+              _lottieWallet,
+              'Premium Pro',
+              height: lottieHeight,
+            ),
             decoration: deco,
           ),
         ],

@@ -628,11 +628,10 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
   Future<void> _onUnlockUsNumber() async {
     if (_assignNumberBusy) return;
     final isPro = widget.subscriptionTier.value == 'pro';
+    // Free tier: only lifetime ads gate (50). Premium: no ad requirement.
     if (!isPro) {
-      final ads = widget.lifetimeAdsWatched.value;
-      final cr = widget.credits;
-      if (ads < CreditsPolicy.assignNumberMinAdsWatched &&
-          cr < CreditsPolicy.assignNumberMinCredits) {
+      if (widget.lifetimeAdsWatched.value <
+          CreditsPolicy.assignNumberMinAdsWatched) {
         return;
       }
     }
@@ -640,6 +639,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
     try {
       await runAssignUsNumberFlow(
         context,
+        autoPickFirstNumber: isPro,
         onSuccess: (r) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
@@ -1891,10 +1891,8 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
     final numberRaw = widget.assignedNumber?.trim();
     final hasNumber = numberRaw != null && numberRaw.isNotEmpty;
     final minAds = CreditsPolicy.assignNumberMinAdsWatched;
-    final minCr = CreditsPolicy.assignNumberMinCredits;
-    final canUnlock = widget.isPremium ||
-        widget.adsWatchedCount >= minAds ||
-        widget.credits >= minCr;
+    final canUnlock =
+        widget.isPremium || widget.adsWatchedCount >= minAds;
 
     final br = BorderRadius.circular(AppTheme.radiusLg);
     final now = DateTime.now();
@@ -2155,7 +2153,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                       ? 'Your subscription includes an instant US line — claim it below.'
                       : canUnlock
                           ? 'Claim your Twilio US line — it appears in Inbox instantly.'
-                          : 'Watch $minAds ads (or reach $minCr credits) to unlock — your progress:',
+                          : 'Watch $minAds ads to unlock — your progress:',
                   style: GoogleFonts.inter(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
