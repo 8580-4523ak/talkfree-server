@@ -6,6 +6,10 @@ import 'package:http/http.dart' as http;
 
 import '../config/voice_backend_config.dart';
 
+/// Shown when POST `/assign-number` returns 409 (number taken between list and purchase).
+const String kAssignNumberTakenMessage =
+    'Oops! This number was just taken. Please pick another one.';
+
 /// Result of POST `/assign-number` (Twilio purchase + Firestore).
 class AssignNumberResult {
   const AssignNumberResult({
@@ -55,13 +59,36 @@ String _parseError(int statusCode, String body) {
   return 'Assign number failed (HTTP $statusCode).';
 }
 
+String _userFacingAssignNumberError(int statusCode, String body) {
+  if (statusCode == 409) {
+    return kAssignNumberTakenMessage;
+  }
+  try {
+    final j = jsonDecode(body);
+    if (j is Map) {
+      final err = j['error'];
+      final code = j['code'];
+      if (err == 'NUMBER_UNAVAILABLE' || code == 'NUMBER_UNAVAILABLE') {
+        return kAssignNumberTakenMessage;
+      }
+      final m = j['message'];
+      if (m != null && m.toString().isNotEmpty) {
+        return m.toString();
+      }
+    }
+  } catch (_) {}
+  return _parseError(statusCode, body);
+}
+
 /// Secured: POST [VoiceBackendConfig.assignNumberUri] with Firebase ID token.
 class AssignNumberService {
   AssignNumberService._();
   static final AssignNumberService instance = AssignNumberService._();
 
   /// [planType] must match server: `daily`, `weekly`, `monthly`, `yearly`.
+  /// [phoneNumber] is E.164 from GET `/available-numbers` (user's choice).
   Future<AssignNumberResult> requestAssignNumber({
+    required String phoneNumber,
     String planType = 'monthly',
   }) async {
     final user = FirebaseAuth.instance.currentUser;
@@ -81,7 +108,10 @@ class AssignNumberService {
             'Authorization': 'Bearer $token',
             'Content-Type': 'application/json; charset=utf-8',
           },
-          body: jsonEncode(<String, String>{'planType': planType}),
+          body: jsonEncode(<String, String>{
+            'phoneNumber': phoneNumber.trim(),
+            'planType': planType,
+          }),
         )
         .timeout(const Duration(seconds: 90));
 
@@ -91,7 +121,7 @@ class AssignNumberService {
       }
       throw AssignNumberException(
         response.statusCode,
-        _parseError(response.statusCode, response.body),
+        _userFacingAssignNumberError(response.statusCode, response.body),
       );
     }
 

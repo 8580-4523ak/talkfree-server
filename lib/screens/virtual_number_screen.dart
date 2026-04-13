@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../config/credits_policy.dart';
-import '../services/assign_number_service.dart';
+import '../widgets/assign_us_number_flow.dart';
 import '../services/firestore_user_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/talkfree_colors.dart';
@@ -89,37 +89,33 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
     if (!eligible || _claiming) return;
     setState(() => _claiming = true);
     try {
-      final r = await AssignNumberService.instance.requestAssignNumber();
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            r.alreadyAssigned
-                ? 'Your line: ${r.assignedNumber}'
-                : 'Your new US number: ${r.assignedNumber}',
-            style: GoogleFonts.inter(),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
+      await runAssignUsNumberFlow(
+        context,
+        onSuccess: (r) {
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                r.alreadyAssigned
+                    ? 'Your line: ${r.assignedNumber}'
+                    : 'Your new US number: ${r.assignedNumber}',
+                style: GoogleFonts.inter(),
+              ),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        },
+        onError: (msg) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(msg, style: GoogleFonts.inter()),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+        },
       );
-    } on AssignNumberException catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(e.message, style: GoogleFonts.inter()),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not provision number: $e', style: GoogleFonts.inter()),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
     } finally {
       if (mounted) setState(() => _claiming = false);
     }

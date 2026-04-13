@@ -13,7 +13,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../theme/talkfree_colors.dart';
 import '../services/ad_service.dart';
-import '../services/assign_number_service.dart';
+import '../widgets/assign_us_number_flow.dart';
 import '../services/firestore_user_service.dart';
 import '../services/grant_reward_service.dart';
 import 'call_history_screen.dart';
@@ -613,32 +613,31 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
     }
     setState(() => _assignNumberBusy = true);
     try {
-      await AssignNumberService.instance.requestAssignNumber();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Your US number is ready.',
-            style: GoogleFonts.montserrat(fontWeight: FontWeight.w600),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } on AssignNumberException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message, style: GoogleFonts.montserrat()),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Could not unlock number: $e'),
-          behavior: SnackBarBehavior.floating,
-        ),
+      await runAssignUsNumberFlow(
+        context,
+        onSuccess: (r) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                r.alreadyAssigned
+                    ? 'Your line: ${r.assignedNumber}'
+                    : 'Your US number: ${r.assignedNumber}',
+                style: GoogleFonts.montserrat(fontWeight: FontWeight.w600),
+              ),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        },
+        onError: (msg) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(msg, style: GoogleFonts.montserrat()),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        },
       );
     } finally {
       if (mounted) setState(() => _assignNumberBusy = false);

@@ -9,6 +9,7 @@ require("dotenv").config({ path: envPath });
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
+const cron = require("node-cron");
 const twilio = require("twilio");
 
 const {
@@ -638,29 +639,42 @@ function normalizePlanType(raw) {
   return null;
 }
 
-/**
- * Search for a US local number and purchase it (Twilio billed to your account).
- * If ASSIGN_NUMBER_AREA_CODE is set, search is restricted to that NPA; otherwise any US local match.
- * Voice URL → /voice-inbound-number; SMS → /sms-webhook. US A2P/10DLC registration may be required
- * in Twilio Console before inbound SMS actually delivers.
- */
-async function searchAndBuySmsCapableUsLocal(uid) {
-  const params = { limit: 5 };
-  if (Number.isFinite(ASSIGN_NUMBER_AREA_CODE)) {
-    params.areaCode = ASSIGN_NUMBER_AREA_CODE;
-  }
-
-  const candidates = await twilioClient.availablePhoneNumbers("US").local.list(params);
-  if (!candidates.length) {
-    const err = new Error(
-      "No SMS-capable US local numbers available (try another area code or try again later)",
-    );
-    err.http = 503;
+/** US E.164 (+1 + 10 digits, NPA 2–9). */
+function normalizeUsE164OrThrow(phone) {
+  const s = String(phone ?? "")
+    .trim()
+    .replace(/\s/g, "");
+  if (!/^\+1[2-9]\d{9}$/.test(s)) {
+    const err = new Error("phoneNumber must be US E.164 (e.g. +15551234567)");
+    err.http = 400;
     throw err;
   }
-  const picked = candidates[0];
+  return s;
+}
+
+/**
+ * Twilio `incomingPhoneNumbers.create` can fail if the number was just bought by someone else.
+ * RestException uses numeric `code` (e.g. 21422); message often contains "not available".
+ */
+function isTwilioNumberUnavailableError(e) {
+  if (!e || typeof e !== "object") return false;
+  const n = Number(e.code);
+  // 21422: requested phone number is not available (inventory / race).
+  if (n === 21422) return true;
+  const msg = String(e.message || e).toLowerCase();
+  return /not available|no longer available|already been purchased|already provisioned|another account|inventory/.test(
+    msg,
+  );
+}
+
+/**
+ * Purchase a specific US local number from Twilio (must still be available — use GET /available-numbers).
+ * Voice URL → /voice-inbound-number; SMS → /sms-webhook.
+ */
+async function purchaseIncomingUsLocal(uid, phoneNumberE164) {
+  const normalized = normalizeUsE164OrThrow(phoneNumberE164);
   const incoming = await twilioClient.incomingPhoneNumbers.create({
-    phoneNumber: picked.phoneNumber,
+    phoneNumber: normalized,
     friendlyName: `TalkFree ${String(uid).slice(0, 12)}`,
     smsUrl: `${publicBase}/sms-webhook`,
     smsMethod: "POST",
@@ -668,6 +682,28 @@ async function searchAndBuySmsCapableUsLocal(uid) {
     voiceMethod: "POST",
   });
   return incoming;
+}
+
+/**
+ * Search US local inventory. Used by GET /available-numbers.
+ * `smsEnabled` + `mmsEnabled` → SMS/OTP-capable; `voiceEnabled` → call verification.
+ * (WhatsApp Business registration is separate, but these flags keep numbers usable for SMS/voice OTP.)
+ * @param {{ areaCode?: string }} opts
+ */
+async function searchAvailableUsLocalVoiceSmsMms(opts = {}) {
+  const params = {
+    limit: 10,
+    voiceEnabled: true,
+    smsEnabled: true,
+    mmsEnabled: true,
+  };
+  const ac = opts.areaCode != null ? String(opts.areaCode).trim() : "";
+  if (/^\d{3}$/.test(ac)) {
+    params.areaCode = ac;
+  } else if (Number.isFinite(ASSIGN_NUMBER_AREA_CODE)) {
+    params.areaCode = ASSIGN_NUMBER_AREA_CODE;
+  }
+  return twilioClient.availablePhoneNumbers("US").local.list(params);
 }
 
 /** Inbound PSTN call to a purchased TalkFree number — simple placeholder TwiML. */
@@ -762,6 +798,49 @@ app.post("/sms-webhook", async (req, res) => {
   return res.status(200).send(mr.toString());
 });
 
+/**
+ * GET /available-numbers — up to 10 US local candidates (Voice + SMS + MMS).
+ * Authorization: Bearer &lt;Firebase ID token&gt;. Optional: ?areaCode=415
+ */
+app.get("/available-numbers", async (req, res) => {
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured" });
+  }
+  try {
+    await firebaseAdmin.auth().verifyIdToken(m[1]);
+  } catch (e) {
+    console.error("verifyIdToken (available-numbers):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  try {
+    const areaCode = req.query.areaCode != null ? String(req.query.areaCode).trim() : "";
+    const list = await searchAvailableUsLocalVoiceSmsMms(
+      /^\d{3}$/.test(areaCode) ? { areaCode } : {},
+    );
+    const numbers = list.map((n) => ({
+      phoneNumber: n.phoneNumber,
+      friendlyName: n.friendlyName || null,
+      locality: n.locality || null,
+      region: n.region || null,
+      postalCode: n.postalCode || null,
+      capabilities: n.capabilities || {},
+    }));
+    return res.status(200).json({
+      ok: true,
+      count: numbers.length,
+      numbers,
+    });
+  } catch (e) {
+    console.error("GET /available-numbers:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get("/assign-number", (_req, res) => {
   res.set("Allow", "POST");
   return res.status(405).json({
@@ -772,11 +851,11 @@ app.get("/assign-number", (_req, res) => {
 
 /**
  * POST /assign-number — provision a real US local Twilio number (secured).
- * - Body: `{ "planType": "daily"|"weekly"|"monthly"|"yearly" }` (required for new assignments).
+ * - Body: `{ "planType": "…", "phoneNumber": "+1…" }` — `phoneNumber` from GET /available-numbers.
  * - Eligible if usable credits ≥ ASSIGN_NUMBER_MIN_CREDITS (default 100) OR
  *   lifetime `ads_watched_count` ≥ ASSIGN_NUMBER_MIN_ADS_WATCHED (default 50) OR `isPremium`.
  * - Deducts plan credits (0 for premium) and sets `number_expiry_date`, `number_plan_type`.
- * - Searches & purchases via Twilio API, then updates Firestore.
+ * - Purchases the chosen E.164 via Twilio, then updates Firestore.
  */
 app.post("/assign-number", async (req, res) => {
   if (!firebaseAdmin) {
@@ -877,13 +956,37 @@ app.post("/assign-number", async (req, res) => {
     return res.status(500).json({ error: "Plan duration configuration invalid" });
   }
 
+  const phonePick =
+    req.body && req.body.phoneNumber != null
+      ? String(req.body.phoneNumber).trim().replace(/\s/g, "")
+      : "";
+  if (!phonePick) {
+    return res.status(400).json({
+      error: "Missing phoneNumber",
+      hint: "GET /available-numbers, then POST the chosen E.164 in phoneNumber",
+    });
+  }
+
   let incoming;
   try {
-    incoming = await searchAndBuySmsCapableUsLocal(uid);
+    incoming = await purchaseIncomingUsLocal(uid, phonePick);
   } catch (e) {
-    const code = e.http || 502;
     console.error("assign-number Twilio:", e);
-    return res.status(code >= 400 && code < 600 ? code : 502).json({
+    if (isTwilioNumberUnavailableError(e)) {
+      return res.status(409).json({
+        error: "NUMBER_UNAVAILABLE",
+        code: "NUMBER_UNAVAILABLE",
+        message: "Oops! This number was just taken. Please pick another one.",
+      });
+    }
+    const status = Number(e.status);
+    const http =
+      e.http != null
+        ? Number(e.http)
+        : Number.isFinite(status) && status >= 400 && status < 600
+          ? status
+          : 502;
+    return res.status(http).json({
       error: String(e.message || e),
     });
   }
@@ -1011,6 +1114,92 @@ function assertAssignedNumberSubscriptionActive(d) {
     err.code = "NUMBER_EXPIRED";
     throw err;
   }
+}
+
+/**
+ * Nightly job: Twilio bills monthly per IncomingPhoneNumber — release expired leases so numbers are not left provisioned.
+ * Query: number_expiry_date &lt; now (Firestore must store a Timestamp). Clears number fields on the user doc.
+ */
+async function runNumberLeaseJanitor() {
+  if (!firebaseAdmin) {
+    console.warn("[number-janitor] skipped — Firebase Admin not configured");
+    return { candidates: 0, twilioReleased: 0, twilioErrors: 0, firestoreCleared: 0, firestoreErrors: 0 };
+  }
+  const db = firebaseAdmin.firestore();
+  const now = firebaseAdmin.firestore.Timestamp.now();
+  let snapshot;
+  try {
+    snapshot = await db.collection("users").where("number_expiry_date", "<", now).get();
+  } catch (e) {
+    console.error("[number-janitor] Firestore query failed:", e.message || e);
+    throw e;
+  }
+
+  let twilioReleased = 0;
+  let twilioErrors = 0;
+  let firestoreCleared = 0;
+  let firestoreErrors = 0;
+
+  for (const doc of snapshot.docs) {
+    const d = doc.data() || {};
+    const assigned = String(d.assigned_number ?? "").trim();
+    if (!assigned || assigned.toLowerCase() === "none") {
+      try {
+        await doc.ref.update({
+          number_expiry_date: null,
+          number_plan_type: null,
+        });
+      } catch (e) {
+        console.error(`[number-janitor] orphan expiry cleanup failed uid=${doc.id}:`, e.message || e);
+      }
+      continue;
+    }
+
+    const sid = String(d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid || "").trim();
+    if (sid) {
+      try {
+        await twilioClient.incomingPhoneNumbers(sid).remove();
+        twilioReleased += 1;
+      } catch (e) {
+        twilioErrors += 1;
+        console.error(
+          `[number-janitor] Twilio incomingPhoneNumbers.remove failed uid=${doc.id} sid=${sid}:`,
+          e.message || e,
+        );
+      }
+    } else {
+      console.warn(`[number-janitor] expired lease but no Twilio SID on user ${doc.id} — clearing Firestore only`);
+    }
+
+    try {
+      await doc.ref.update({
+        assigned_number: null,
+        virtual_number: null,
+        allocatedNumber: null,
+        number: null,
+        twilioIncomingPhoneSid: null,
+        twilioPhoneNumberSid: null,
+        twilioNumberAssignedAt: null,
+        number_expiry_date: null,
+        number_plan_type: null,
+      });
+      firestoreCleared += 1;
+    } catch (e) {
+      firestoreErrors += 1;
+      console.error(`[number-janitor] Firestore clear failed uid=${doc.id}:`, e.message || e);
+    }
+  }
+
+  console.log(
+    `[number-janitor] lease_query_hits=${snapshot.size} twilio_released=${twilioReleased} twilio_errors=${twilioErrors} firestore_cleared=${firestoreCleared} firestore_errors=${firestoreErrors}`,
+  );
+  return {
+    candidates: snapshot.size,
+    twilioReleased,
+    twilioErrors,
+    firestoreCleared,
+    firestoreErrors,
+  };
 }
 
 /** Non-empty Firebase Auth uid — all billing writes use `users/{uid}`. */
@@ -1667,6 +1856,24 @@ const server = app.listen(Number(PORT), () => {
   console.log(`PUBLIC_BASE_URL (normalized): ${publicBase}`);
   console.log(`Outbound SMS (app → Twilio): POST ${publicBase}/send-sms`);
   console.log(`Inbound SMS webhook (Twilio): ${publicBase}/sms-webhook`);
+
+  if (process.env.DISABLE_NUMBER_JANITOR === "1") {
+    console.log("[number-janitor] disabled (DISABLE_NUMBER_JANITOR=1)");
+  } else if (!firebaseAdmin) {
+    console.warn("[number-janitor] not scheduled — Firebase Admin not configured");
+  } else {
+    const schedule = String(process.env.NUMBER_JANITOR_CRON || "0 4 * * *").trim();
+    cron.schedule(
+      schedule,
+      () => {
+        runNumberLeaseJanitor().catch((e) =>
+          console.error("[number-janitor] unhandled:", e.message || e),
+        );
+      },
+      { timezone: "UTC" },
+    );
+    console.log(`[number-janitor] scheduled (cron="${schedule}" UTC) — releases expired Twilio numbers nightly`);
+  }
 });
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {

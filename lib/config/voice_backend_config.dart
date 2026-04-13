@@ -27,6 +27,16 @@ abstract final class VoiceBackendConfig {
   /// `POST /grant-reward` — Firebase ID token in `Authorization` (server adds credits).
   static Uri grantRewardUri() => Uri.https(_host, '/grant-reward');
 
+  /// `GET /available-numbers` — Firebase ID token; optional `areaCode` query (3 digits).
+  static Uri availableNumbersUri({String? areaCode}) {
+    final q = <String, String>{};
+    final ac = areaCode?.trim();
+    if (ac != null && ac.isNotEmpty) {
+      q['areaCode'] = ac;
+    }
+    return Uri.https(_host, '/available-numbers', q);
+  }
+
   /// `POST /assign-number` — Firebase ID token; provisions a real US Twilio number when eligible.
   static Uri assignNumberUri() => Uri.https(_host, '/assign-number');
 
