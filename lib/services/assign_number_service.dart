@@ -12,11 +12,19 @@ class AssignNumberResult {
     required this.assignedNumber,
     this.twilioIncomingPhoneSid,
     this.alreadyAssigned = false,
+    this.planType,
+    this.numberExpiryIso,
+    this.creditsDeducted,
+    this.newBalance,
   });
 
   final String assignedNumber;
   final String? twilioIncomingPhoneSid;
   final bool alreadyAssigned;
+  final String? planType;
+  final String? numberExpiryIso;
+  final int? creditsDeducted;
+  final int? newBalance;
 }
 
 class AssignNumberException implements Exception {
@@ -52,7 +60,10 @@ class AssignNumberService {
   AssignNumberService._();
   static final AssignNumberService instance = AssignNumberService._();
 
-  Future<AssignNumberResult> requestAssignNumber() async {
+  /// [planType] must match server: `daily`, `weekly`, `monthly`, `yearly`.
+  Future<AssignNumberResult> requestAssignNumber({
+    String planType = 'monthly',
+  }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       throw StateError('Not signed in');
@@ -70,6 +81,7 @@ class AssignNumberService {
             'Authorization': 'Bearer $token',
             'Content-Type': 'application/json; charset=utf-8',
           },
+          body: jsonEncode(<String, String>{'planType': planType}),
         )
         .timeout(const Duration(seconds: 90));
 
@@ -90,10 +102,18 @@ class AssignNumberService {
     if (assigned.isEmpty) {
       throw AssignNumberException(500, 'Invalid assign-number response');
     }
+    final pt = j?['planType'] as String?;
+    final ne = j?['number_expiry_date'] as String?;
+    final cd = (j?['creditsDeducted'] as num?)?.toInt();
+    final nb = (j?['newBalance'] as num?)?.toInt();
     return AssignNumberResult(
       assignedNumber: assigned,
       twilioIncomingPhoneSid: sid,
       alreadyAssigned: already,
+      planType: pt,
+      numberExpiryIso: ne,
+      creditsDeducted: cd,
+      newBalance: nb,
     );
   }
 }

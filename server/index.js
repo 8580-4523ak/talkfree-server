@@ -610,6 +610,34 @@ const ASSIGN_NUMBER_AREA_CODE = process.env.ASSIGN_NUMBER_AREA_CODE
   ? Number.parseInt(String(process.env.ASSIGN_NUMBER_AREA_CODE).trim(), 10)
   : null;
 
+/** Credits charged for leasing a Twilio number by plan (premium users: cost 0). */
+const PLAN_ASSIGN_CREDITS = {
+  daily: Number(process.env.PLAN_DAILY_CREDITS || 50),
+  weekly: Number(process.env.PLAN_WEEKLY_CREDITS || 200),
+  monthly: Number(process.env.PLAN_MONTHLY_CREDITS || 700),
+  yearly: Number(process.env.PLAN_YEARLY_CREDITS || 5000),
+};
+
+/** Lease duration from assignment time (ms). */
+const PLAN_ASSIGN_MS = {
+  daily: Number(process.env.PLAN_DAILY_MS || 86400000),
+  weekly: Number(process.env.PLAN_WEEKLY_MS || 604800000),
+  monthly: Number(process.env.PLAN_MONTHLY_MS || 2592000000),
+  yearly: Number(process.env.PLAN_YEARLY_MS || 31536000000),
+};
+
+/**
+ * @param {string} raw
+ * @returns {"daily"|"weekly"|"monthly"|"yearly"|null}
+ */
+function normalizePlanType(raw) {
+  const s = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  if (["daily", "weekly", "monthly", "yearly"].includes(s)) return s;
+  return null;
+}
+
 /**
  * Search for a US local number and purchase it (Twilio billed to your account).
  * If ASSIGN_NUMBER_AREA_CODE is set, search is restricted to that NPA; otherwise any US local match.
@@ -744,10 +772,11 @@ app.get("/assign-number", (_req, res) => {
 
 /**
  * POST /assign-number — provision a real US local Twilio number (secured).
- * - Verifies Firebase ID token → uid (optional JSON body `uid` must match).
+ * - Body: `{ "planType": "daily"|"weekly"|"monthly"|"yearly" }` (required for new assignments).
  * - Eligible if usable credits ≥ ASSIGN_NUMBER_MIN_CREDITS (default 100) OR
- *   lifetime `ads_watched_count` ≥ ASSIGN_NUMBER_MIN_ADS_WATCHED (default 50).
- * - Searches & purchases via Twilio API, then writes `assigned_number`, `twilioIncomingPhoneSid`, etc.
+ *   lifetime `ads_watched_count` ≥ ASSIGN_NUMBER_MIN_ADS_WATCHED (default 50) OR `isPremium`.
+ * - Deducts plan credits (0 for premium) and sets `number_expiry_date`, `number_plan_type`.
+ * - Searches & purchases via Twilio API, then updates Firestore.
  */
 app.post("/assign-number", async (req, res) => {
   if (!firebaseAdmin) {
@@ -793,11 +822,23 @@ app.post("/assign-number", async (req, res) => {
   const d = snap.data() || {};
   const existingAssigned = String(d.assigned_number ?? "").trim();
   if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
+    const ne = d.number_expiry_date;
     return res.status(200).json({
       ok: true,
       alreadyAssigned: true,
       assigned_number: existingAssigned,
       twilioIncomingPhoneSid: d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid || null,
+      number_expiry_date:
+        ne && typeof ne.toDate === "function" ? ne.toDate().toISOString() : null,
+      number_plan_type: d.number_plan_type ?? null,
+    });
+  }
+
+  const planType = normalizePlanType(req.body && req.body.planType);
+  if (!planType) {
+    return res.status(400).json({
+      error: "Missing or invalid planType",
+      expected: ["daily", "weekly", "monthly", "yearly"],
     });
   }
 
@@ -818,6 +859,24 @@ app.post("/assign-number", async (req, res) => {
     });
   }
 
+  const planCredits = premium ? 0 : Number(PLAN_ASSIGN_CREDITS[planType] ?? NaN);
+  if (!premium && (!Number.isFinite(planCredits) || planCredits < 0)) {
+    return res.status(500).json({ error: "Plan credit configuration invalid" });
+  }
+  if (usable < planCredits) {
+    return res.status(402).json({
+      error: "Insufficient credits for this plan",
+      planType,
+      requiredCredits: planCredits,
+      usableCredits: usable,
+    });
+  }
+
+  const leaseMs = Number(PLAN_ASSIGN_MS[planType] ?? NaN);
+  if (!Number.isFinite(leaseMs) || leaseMs <= 0) {
+    return res.status(500).json({ error: "Plan duration configuration invalid" });
+  }
+
   let incoming;
   try {
     incoming = await searchAndBuySmsCapableUsLocal(uid);
@@ -834,8 +893,48 @@ app.post("/assign-number", async (req, res) => {
     return res.status(500).json({ error: "Twilio returned empty phone number" });
   }
 
+  const { FieldValue, Timestamp } = firebaseAdmin.firestore;
+  const now = new Date();
+  const expiryDate = new Date(now.getTime() + leaseMs);
+
+  let freshSnap;
   try {
-    const { FieldValue } = firebaseAdmin.firestore;
+    freshSnap = await ref.get();
+  } catch (e) {
+    console.error("assign-number re-get:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+  const d2 = freshSnap.exists ? freshSnap.data() || {} : {};
+  let paid = Number(d2.paidCredits ?? 0);
+  let reward = Number(d2.rewardCredits ?? 0);
+  const expTs = d2.rewardCreditsExpiresAt;
+  if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+    paid += reward;
+    reward = 0;
+  }
+  if (d2.paidCredits === undefined && d2.credits != null) {
+    paid = Number(d2.credits);
+    reward = 0;
+  }
+  let deduct = planCredits;
+  const usable2 = paid + reward;
+  if (usable2 < deduct) {
+    console.error("assign-number post-Twilio balance shortfall", uid, usable2, deduct);
+    deduct = usable2;
+  }
+  let left = deduct;
+  const takeReward = left < reward ? left : reward;
+  reward -= takeReward;
+  left -= takeReward;
+  paid -= left;
+  let rewardExpOut = null;
+  if (reward > 0) {
+    rewardExpOut =
+      expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+  }
+  const totalOut = paid + reward;
+
+  try {
     await ref.update({
       assigned_number: e164,
       virtual_number: e164,
@@ -844,6 +943,12 @@ app.post("/assign-number", async (req, res) => {
       twilioIncomingPhoneSid: incoming.sid,
       twilioPhoneNumberSid: incoming.sid,
       twilioNumberAssignedAt: FieldValue.serverTimestamp(),
+      number_expiry_date: Timestamp.fromDate(expiryDate),
+      number_plan_type: planType,
+      paidCredits: paid,
+      rewardCredits: reward,
+      rewardCreditsExpiresAt: rewardExpOut,
+      credits: totalOut,
     });
   } catch (e) {
     console.error("assign-number Firestore update:", e);
@@ -860,6 +965,10 @@ app.post("/assign-number", async (req, res) => {
     ok: true,
     assigned_number: e164,
     twilioIncomingPhoneSid: incoming.sid,
+    planType,
+    creditsDeducted: deduct,
+    number_expiry_date: expiryDate.toISOString(),
+    newBalance: totalOut,
     usableCredits: usable,
     adsWatchedLifetime: adsLifetime,
     viaCredits: enoughCredits,
@@ -877,6 +986,31 @@ function readIsPremium(d) {
   if (d.isPremium === true) return true;
   const t = String(d.subscription_tier ?? d.subscriptionTier ?? d.plan ?? "").toLowerCase();
   return t === "pro" || t === "premium";
+}
+
+/** Virtual-number lease expiry (`number_expiry_date`). Missing → legacy user (treated as active). */
+function readNumberExpiryDate(d) {
+  const x = d.number_expiry_date;
+  if (x && typeof x.toDate === "function") return x.toDate();
+  return null;
+}
+
+/**
+ * Outbound guard: if user has an assigned Twilio line and a stored expiry in the past, block.
+ * No assigned line → allow (credit-only outbound).
+ */
+function assertAssignedNumberSubscriptionActive(d) {
+  if (!d) return;
+  const assigned = String(d.assigned_number ?? "").trim();
+  if (!assigned || assigned.toLowerCase() === "none") return;
+  const exp = readNumberExpiryDate(d);
+  if (exp == null) return;
+  if (exp.getTime() < Date.now()) {
+    const err = new Error("Assigned number lease expired — renew your plan in the app.");
+    err.http = 403;
+    err.code = "NUMBER_EXPIRED";
+    throw err;
+  }
 }
 
 /** Non-empty Firebase Auth uid — all billing writes use `users/{uid}`. */
@@ -1069,6 +1203,23 @@ app.post("/call-live-tick", async (req, res) => {
     uid = requireFirebaseUid((await firebaseAdmin.auth().verifyIdToken(bm[1])).uid);
   } catch (e) {
     return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  /** Block outbound billing ticks if the user's leased US number has expired (see POST /assign-number). */
+  try {
+    const preSnap = await firebaseAdmin.firestore().collection("users").doc(uid).get();
+    if (preSnap.exists) {
+      assertAssignedNumberSubscriptionActive(preSnap.data());
+    }
+  } catch (e) {
+    if (e.http === 403) {
+      return res.status(403).json({
+        error: e.message,
+        code: e.code || "NUMBER_EXPIRED",
+      });
+    }
+    console.error("/call-live-tick subscription check:", e);
+    return res.status(500).json({ error: String(e.message || e) });
   }
 
   const callSid = String(req.body?.callSid || req.body?.CallSid || "").trim();
