@@ -25,7 +25,13 @@ service cloud.firestore {
           resource.data.email == request.auth.token.email)
       );
       allow create: if request.auth != null && request.auth.uid == userId;
-      allow update: if request.auth != null && request.auth.uid == userId;
+      // Client may update own profile, but cannot tamper with subscription flag or balance field.
+      // NOTE: The Flutter app currently updates `credits` / `isPremium` in some flows — those writes
+      // will DENY until you route credit changes through Cloud Functions / Admin SDK only, or relax
+      // this rule. Deploy the same text in Firebase Console → Firestore → Rules (not Storage).
+      allow update: if request.auth != null && request.auth.uid == userId
+        && request.resource.data.isPremium == resource.data.isPremium
+        && request.resource.data.credits == resource.data.credits;
       allow delete: if request.auth != null && request.auth.uid == userId;
 
       match /call_history/{callSid} {

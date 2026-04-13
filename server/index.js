@@ -6,6 +6,7 @@ const path = require("path");
 const envPath = path.join(__dirname, ".env");
 require("dotenv").config({ path: envPath });
 
+const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const twilio = require("twilio");
@@ -81,9 +82,9 @@ try {
       });
     }
     firebaseAdmin = admin;
-    console.log("Firebase Admin: /grant-reward, /assign-number, /send-sms enabled");
+    console.log("Firebase Admin: /grant-reward, /assign-number, /send-sms, /admin/upgrade-user enabled");
   } else {
-    console.warn("FIREBASE_SERVICE_ACCOUNT_JSON unset — /grant-reward, /assign-number, /send-sms return 503");
+    console.warn("FIREBASE_SERVICE_ACCOUNT_JSON unset — /grant-reward, /assign-number, /send-sms, /admin/upgrade-user return 503");
   }
 } catch (e) {
   console.warn("Firebase Admin init failed — /grant-reward disabled:", e.message);
@@ -477,6 +478,102 @@ app.post("/grant-reward", async (req, res) => {
     return res.status(500).json({ error: String(e.message || e) });
   }
   return res.status(200).json(out);
+});
+
+/** Constant-time compare for [ADMIN_SECRET_KEY] (mitigate timing leaks on guessable lengths). */
+function adminSecretMatches(provided, expected) {
+  const a = Buffer.from(String(provided ?? ""), "utf8");
+  const b = Buffer.from(String(expected ?? ""), "utf8");
+  if (a.length !== b.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
+
+const ADMIN_UPGRADE_BONUS_CREDITS = Number(process.env.ADMIN_UPGRADE_BONUS_CREDITS || 1000);
+
+/**
+ * POST /admin/upgrade-user — Admin-only: set `isPremium: true`, grant bonus credits, align tier fields.
+ * **Auth:** `X-Admin-Secret: <ADMIN_SECRET_KEY>` or `Authorization: Bearer <ADMIN_SECRET_KEY>`
+ * (or JSON body `secret` for quick curl — prefer headers in production).
+ * **Body:** `{ "targetUid": "<Firebase Auth uid>" }`
+ * Later: call from Razorpay/Stripe webhook with the same secret (or move to signed JWT).
+ */
+app.post("/admin/upgrade-user", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured (set FIREBASE_SERVICE_ACCOUNT_JSON)" });
+  }
+  const envSecret = process.env.ADMIN_SECRET_KEY;
+  if (!envSecret || String(envSecret).trim() === "") {
+    console.error("ADMIN_SECRET_KEY is empty — refusing POST /admin/upgrade-user");
+    return res.status(503).json({ error: "Admin upgrade not configured (set ADMIN_SECRET_KEY)" });
+  }
+  const headerSecret = req.headers["x-admin-secret"];
+  const bearer =
+    typeof req.headers.authorization === "string"
+      ? /^Bearer\s+(.+)$/i.exec(req.headers.authorization)
+      : null;
+  const provided =
+    (headerSecret != null && String(headerSecret)) ||
+    (bearer ? bearer[1].trim() : "") ||
+    (req.body && req.body.secret != null ? String(req.body.secret) : "");
+  if (!provided || !adminSecretMatches(provided, envSecret)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const targetUid = String(req.body?.targetUid ?? "").trim();
+  if (!targetUid) {
+    return res.status(400).json({ error: "Missing targetUid" });
+  }
+
+  const bonus = Number.isFinite(ADMIN_UPGRADE_BONUS_CREDITS) && ADMIN_UPGRADE_BONUS_CREDITS > 0
+    ? Math.floor(ADMIN_UPGRADE_BONUS_CREDITS)
+    : 1000;
+
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(targetUid);
+
+  try {
+    const out = await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) {
+        throw Object.assign(new Error("User document not found"), { http: 404 });
+      }
+      const d = snap.data();
+      let paid = Number(d.paidCredits ?? 0);
+      let reward = Number(d.rewardCredits ?? 0);
+      if (d.paidCredits === undefined && d.credits != null) {
+        paid = Number(d.credits);
+        reward = 0;
+      }
+      const now = new Date();
+      const expTs = d.rewardCreditsExpiresAt;
+      if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < now) {
+        paid += reward;
+        reward = 0;
+      }
+      paid += bonus;
+      const total = paid + reward;
+      t.update(ref, {
+        isPremium: true,
+        subscription_tier: "pro",
+        paidCredits: paid,
+        credits: total,
+        premiumWelcomeBonusGranted: true,
+      });
+      return { ok: true, targetUid, creditsAdded: bonus, newBalance: total, isPremium: true };
+    });
+    return res.status(200).json(out);
+  } catch (e) {
+    const code = e.http || 500;
+    if (code === 404) {
+      return res.status(404).json({ error: String(e.message || e) });
+    }
+    console.error("POST /admin/upgrade-user:", e);
+    return res.status(code >= 400 && code < 600 ? code : 500).json({
+      error: String(e.message || e),
+    });
+  }
 });
 
 /** Usable balance from Firestore `users/{uid}` (aligned with POST /grant-reward). */
