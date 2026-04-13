@@ -1,12 +1,18 @@
+import 'dart:async' show Timer;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../config/credits_policy.dart';
-import '../widgets/assign_us_number_flow.dart';
 import '../services/firestore_user_service.dart';
 import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 import '../theme/talkfree_colors.dart';
+import '../utils/us_phone_format.dart';
+import '../widgets/assign_us_number_flow.dart';
+import '../widgets/glass_panel.dart';
+import '../widgets/lease_ring_painter.dart';
 import 'number_selection_screen.dart';
 
 /// Ads required to unlock a free US number (progress task).
@@ -76,6 +82,26 @@ class VirtualNumberScreen extends StatefulWidget {
 
 class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
   bool _claiming = false;
+  Timer? _leaseTicker;
+
+  void _syncLeaseTicker(String? assigned, DateTime? leaseExp) {
+    final has = assigned != null && assigned.trim().isNotEmpty;
+    final need = has && leaseExp != null;
+    if (need) {
+      _leaseTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      _leaseTicker?.cancel();
+      _leaseTicker = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _leaseTicker?.cancel();
+    super.dispose();
+  }
 
   Future<void> _claimUsNumber(
     BuildContext context,
@@ -123,17 +149,15 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = Color.lerp(TalkFreeColors.deepBlack, TalkFreeColors.cardBg, 0.35)!;
-
     return Scaffold(
-      backgroundColor: bg,
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
         title: Text(
           'My Number',
-          style: GoogleFonts.poppins(
-            fontWeight: FontWeight.w700,
+          style: GoogleFonts.inter(
+            fontWeight: FontWeight.w800,
             fontSize: 20,
             color: TalkFreeColors.offWhite,
           ),
@@ -148,9 +172,16 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
           final adsWatched = VirtualNumberScreen._readAdsWatched(data);
           final usable = FirestoreUserService.computeUsableCredits(data);
           final isPremium = FirestoreUserService.isPremiumFromUserData(data);
+          final leaseExp = FirestoreUserService.numberLeaseExpiryFromUserData(data);
+          final planType = FirestoreUserService.numberPlanTypeFromUserData(data);
           final canClaim = isPremium ||
               adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
               usable >= CreditsPolicy.assignNumberMinCredits;
+
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!context.mounted) return;
+            _syncLeaseTicker(assigned, leaseExp);
+          });
 
           if (snap.hasError) {
             return Center(
@@ -162,13 +193,33 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
             );
           }
 
-          return SingleChildScrollView(
+          return Stack(
+            children: [
+              const Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Color(0xFF0A1628),
+                        Color(0xFF050A12),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 if (assigned != null) ...[
-                  _AssignedNumberCard(number: assigned),
+                  _AssignedLineGlassCard(
+                    number: assigned,
+                    leaseExpiry: leaseExp,
+                    planType: planType,
+                  ),
                   const SizedBox(height: 24),
                   OutlinedButton.icon(
                     onPressed: () {
@@ -183,7 +234,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                     icon: const Icon(Icons.search_rounded, color: AppColors.primary),
                     label: Text(
                       'Change / browse numbers',
-                      style: GoogleFonts.montserrat(
+                      style: GoogleFonts.inter(
                         fontWeight: FontWeight.w700,
                         color: AppColors.primary,
                       ),
@@ -219,7 +270,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                       _claiming
                           ? 'Provisioning…'
                           : 'Claim free US number',
-                      style: GoogleFonts.montserrat(
+                      style: GoogleFonts.inter(
                         fontWeight: FontWeight.w800,
                         fontSize: 15,
                       ),
@@ -281,7 +332,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                     ),
                     label: Text(
                       'Browse available numbers',
-                      style: GoogleFonts.montserrat(
+                      style: GoogleFonts.inter(
                         fontWeight: FontWeight.w600,
                         fontSize: 14,
                         color: TalkFreeColors.mutedWhite,
@@ -291,6 +342,8 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                 ],
               ],
             ),
+          ),
+            ],
           );
         },
       ),
@@ -298,61 +351,104 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
   }
 }
 
-class _AssignedNumberCard extends StatelessWidget {
-  const _AssignedNumberCard({required this.number});
+double _leaseFracVm(DateTime now, DateTime expiry, String? planType) {
+  final leaseMs = CreditsPolicy.leaseDurationMsForPlanType(planType);
+  final leftMs = expiry.difference(now).inMilliseconds;
+  if (leftMs <= 0) return 0;
+  return (leftMs / leaseMs).clamp(0.0, 1.0);
+}
+
+String _leaseCaptionVm(DateTime now, DateTime? expiry) {
+  if (expiry == null) return 'No expiry set';
+  final left = expiry.difference(now);
+  if (left.inSeconds <= 0) return 'Expired';
+  if (left.inDays >= 1) return '${left.inDays}d left';
+  if (left.inHours >= 1) return '${left.inHours}h left';
+  return '${left.inMinutes}m left';
+}
+
+class _AssignedLineGlassCard extends StatelessWidget {
+  const _AssignedLineGlassCard({
+    required this.number,
+    required this.leaseExpiry,
+    required this.planType,
+  });
 
   final String number;
+  final DateTime? leaseExpiry;
+  final String? planType;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            AppColors.primary.withValues(alpha: 0.35),
-            TalkFreeColors.cardBg,
-          ],
-        ),
-        border: Border.all(color: AppColors.primary.withValues(alpha: 0.35)),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.primary.withValues(alpha: 0.18),
-            blurRadius: 24,
-            offset: const Offset(0, 10),
-          ),
-        ],
-      ),
+    final now = DateTime.now();
+    final exp = leaseExpiry;
+    final frac = (exp != null) ? _leaseFracVm(now, exp, planType) : 1.0;
+    final arcColor = leaseRingForegroundColor(now, exp);
+
+    return GlassPanel(
+      borderRadius: AppTheme.radiusLg,
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.verified_rounded, color: AppColors.primary, size: 28),
+              Icon(Icons.verified_rounded, color: AppColors.primary, size: 26),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   'Your 2nd line',
-                  style: GoogleFonts.poppins(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 18,
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 17,
                     color: TalkFreeColors.offWhite,
                   ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 14),
-          SelectableText(
-            number,
-            style: GoogleFonts.jetBrainsMono(
-              fontSize: 22,
-              fontWeight: FontWeight.w600,
-              color: AppColors.primary,
-              letterSpacing: 0.5,
+          const SizedBox(height: 16),
+          Center(
+            child: SizedBox(
+              width: 200,
+              height: 200,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  CustomPaint(
+                    size: const Size(200, 200),
+                    painter: LeaseRingPainter(
+                      progress: frac,
+                      trackColor: Colors.white.withValues(alpha: 0.12),
+                      foregroundColor: arcColor,
+                    ),
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SelectableText(
+                        formatUsPhoneForDisplay(number),
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                          color: TalkFreeColors.offWhite,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        _leaseCaptionVm(now, exp),
+                        style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: arcColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -367,38 +463,9 @@ class _UnlockHeroCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
-      child: Container(
+      child: GlassPanel(
+        borderRadius: 22,
         padding: const EdgeInsets.fromLTRB(22, 26, 22, 26),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(22),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              const Color(0xFF0F172A),
-              const Color(0xFF1E293B),
-              AppColors.primary.withValues(alpha: 0.22),
-            ],
-            stops: const [0.0, 0.55, 1.0],
-          ),
-          border: Border.all(
-            color: AppColors.primary.withValues(alpha: 0.45),
-            width: 1.2,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: AppColors.primary.withValues(alpha: 0.25),
-              blurRadius: 28,
-              spreadRadius: 0,
-              offset: const Offset(0, 14),
-            ),
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.45),
-              blurRadius: 20,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -411,6 +478,7 @@ class _UnlockHeroCard extends StatelessWidget {
                     color: AppColors.primary.withValues(alpha: 0.15),
                     border: Border.all(
                       color: AppColors.primary.withValues(alpha: 0.4),
+                      width: 0.5,
                     ),
                   ),
                   child: Icon(
@@ -423,9 +491,9 @@ class _UnlockHeroCard extends StatelessWidget {
                 Expanded(
                   child: Text(
                     'Unlock Your Private 2nd Line',
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.inter(
                       fontWeight: FontWeight.w800,
-                      fontSize: 22,
+                      fontSize: 21,
                       height: 1.2,
                       color: TalkFreeColors.offWhite,
                       letterSpacing: -0.3,
@@ -459,22 +527,9 @@ class _ProgressTaskCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final progress = (adsWatched / kAdsRequiredForFreeUsNumber).clamp(0.0, 1.0);
 
-    return Container(
+    return GlassPanel(
+      borderRadius: 18,
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: TalkFreeColors.cardBg,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: AppColors.primary.withValues(alpha: 0.22),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.25),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -488,8 +543,8 @@ class _ProgressTaskCard extends StatelessWidget {
               const SizedBox(width: 8),
               Text(
                 'Progress task',
-                style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.w700,
+                style: GoogleFonts.inter(
+                  fontWeight: FontWeight.w800,
                   fontSize: 15,
                   color: TalkFreeColors.offWhite,
                 ),
@@ -518,9 +573,9 @@ class _ProgressTaskCard extends StatelessWidget {
           const SizedBox(height: 10),
           Text(
             '$adsWatched / $kAdsRequiredForFreeUsNumber ads watched',
-            style: GoogleFonts.jetBrainsMono(
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
+            style: GoogleFonts.poppins(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
               color: TalkFreeColors.beigeGold.withValues(alpha: 0.95),
             ),
           ),
@@ -542,8 +597,8 @@ class _SubscriptionSection extends StatelessWidget {
       children: [
         Text(
           'Subscription',
-          style: GoogleFonts.poppins(
-            fontWeight: FontWeight.w700,
+          style: GoogleFonts.inter(
+            fontWeight: FontWeight.w800,
             fontSize: 18,
             color: TalkFreeColors.offWhite,
           ),
@@ -600,19 +655,9 @@ class _PlanRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final border = highlight
-        ? Border.all(color: AppColors.primary.withValues(alpha: 0.55), width: 1.5)
-        : Border.all(color: Colors.white.withValues(alpha: 0.08));
-
-    return Container(
+    final panel = GlassPanel(
+      borderRadius: 16,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: BoxDecoration(
-        color: highlight
-            ? AppColors.primary.withValues(alpha: 0.08)
-            : TalkFreeColors.cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: border,
-      ),
       child: Row(
         children: [
           Expanded(
@@ -621,8 +666,8 @@ class _PlanRow extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: GoogleFonts.poppins(
-                    fontWeight: FontWeight.w700,
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w800,
                     fontSize: 16,
                     color: TalkFreeColors.offWhite,
                   ),
@@ -643,7 +688,7 @@ class _PlanRow extends StatelessWidget {
             children: [
               Text(
                 price,
-                style: GoogleFonts.jetBrainsMono(
+                style: GoogleFonts.poppins(
                   fontWeight: FontWeight.w700,
                   fontSize: 16,
                   color: AppColors.primary,
@@ -664,7 +709,7 @@ class _PlanRow extends StatelessWidget {
                 ),
                 child: Text(
                   'Buy Now',
-                  style: GoogleFonts.montserrat(
+                  style: GoogleFonts.inter(
                     fontWeight: FontWeight.w800,
                     fontSize: 12,
                   ),
@@ -675,5 +720,18 @@ class _PlanRow extends StatelessWidget {
         ],
       ),
     );
+    if (highlight) {
+      return Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(17),
+          border: Border.all(
+            color: AppColors.primary.withValues(alpha: 0.5),
+            width: 0.5,
+          ),
+        ),
+        child: panel,
+      );
+    }
+    return panel;
   }
 }

@@ -97,6 +97,25 @@ class FirestoreUserService {
   ) =>
       computeUsableCredits(doc.data());
 
+  /// Twilio line lease end from `number_expiry_date` (`Timestamp`), or `null`.
+  static DateTime? numberLeaseExpiryFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    final x = data['number_expiry_date'];
+    if (x is Timestamp) return x.toDate();
+    return null;
+  }
+
+  /// Plan key for lease length (`daily` | `weekly` | `monthly` | `yearly`).
+  static String? numberPlanTypeFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    final v = data['number_plan_type'];
+    if (v is String) {
+      final t = v.trim();
+      if (t.isNotEmpty) return t;
+    }
+    return null;
+  }
+
   /// E.164 or `null` — checks `assigned_number` and legacy number fields.
   static String? assignedNumberFromUserData(Map<String, dynamic>? data) {
     if (data == null) return null;

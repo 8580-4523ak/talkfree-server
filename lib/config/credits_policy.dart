@@ -69,4 +69,20 @@ abstract final class CreditsPolicy {
 
   /// Kept for copy: 4 ads → 10 credits (server grant).
   static int get adsPerMinute => adsRequiredForMinuteGrant;
+
+  /// Must match server `PLAN_*_MS` defaults in `server/index.js` (assign-number lease).
+  static int leaseDurationMsForPlanType(String? planType) {
+    switch (planType?.toLowerCase().trim()) {
+      case 'daily':
+        return const Duration(days: 1).inMilliseconds;
+      case 'weekly':
+        return const Duration(days: 7).inMilliseconds;
+      case 'monthly':
+        return 2592000000; // 30d — server PLAN_MONTHLY_MS default
+      case 'yearly':
+        return 31536000000; // 365d — server PLAN_YEARLY_MS default
+      default:
+        return 2592000000;
+    }
+  }
 }
