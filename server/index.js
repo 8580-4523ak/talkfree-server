@@ -336,6 +336,7 @@ app.get("/grant-reward", (_req, res) => {
  *   (`ad_progress` / `ad_sub_counter` cycle completes), adds REWARD_GRANT_CREDITS (default 10) and resets progress to 0.
  * - Mirrors legacy fields: `adRewardCycleCount`, `adRewardsCount`, etc.
  * - Daily cap: max 24 ads / UTC day (`ads_watched_today`).
+ * - Lifetime rewarded views: `ads_watched_count` += 1 each successful grant (Flutter unlock US number).
  * - Cooldown: must be ≥20s since `last_ad_timestamp` / `lastAdRewardAt` or returns **Wait** (429).
  */
 app.post("/grant-reward", async (req, res) => {
@@ -435,6 +436,8 @@ app.post("/grant-reward", async (req, res) => {
         adRewardCycleCount: sub,
         ads_watched_today: adsTodayNew,
         adRewardsCount: adsTodayNew,
+        /** Lifetime total — Flutter reads `ads_watched_count` for US number unlock (50 ads). */
+        ads_watched_count: FieldValue.increment(1),
         last_reset_date: storedDay,
         adRewardsDayKey: storedDay,
         last_ad_timestamp: FieldValue.serverTimestamp(),
@@ -593,7 +596,7 @@ function usableCreditsFromUserDoc(d) {
   return paid + reward;
 }
 
-/** Lifetime rewarded-ad views (`ads_watched_count` from the Flutter client). */
+/** Lifetime rewarded-ad views (`ads_watched_count`, incremented each POST /grant-reward). */
 function readLifetimeAdsWatched(d) {
   const n = d.ads_watched_count;
   if (n === undefined || n === null || n === "") return 0;

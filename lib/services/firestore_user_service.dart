@@ -465,7 +465,8 @@ class FirestoreUserService {
       tx.update(ref, {
         'ad_progress': cycle,
         'ads_watched_today': count + 1,
-        'ads_watched_count': count + 1,
+        // Lifetime total (not daily count) — matches server POST /grant-reward.
+        'ads_watched_count': _int(m['ads_watched_count']) + 1,
         'last_reset_date': storedDay,
         'last_ad_timestamp': FieldValue.serverTimestamp(),
         'adRewardCycleCount': cycle,
