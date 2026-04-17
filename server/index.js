@@ -565,75 +565,12 @@ app.post("/grant-reward", async (req, res) => {
   return res.status(200).json(out);
 });
 
-/** One-time login bonus (paid bucket); idempotent via `welcomeCallingCreditsGranted`. */
-const WELCOME_LOGIN_BONUS = Number(process.env.WELCOME_LOGIN_BONUS || 10);
-
-app.post("/claim-welcome-bonus", async (req, res) => {
-  if (!firebaseAdmin) {
-    return res.status(503).json({ error: "Firebase not configured" });
-  }
-  const auth = req.headers.authorization || "";
-  const m = /^Bearer\s+(.+)$/i.exec(auth);
-  if (!m) {
-    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
-  }
-  let uid;
-  try {
-    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
-  } catch (e) {
-    return res.status(401).json({ error: "Invalid or expired token" });
-  }
-
-  const { FieldValue } = firebaseAdmin.firestore;
-  const db = firebaseAdmin.firestore();
-
-  try {
-    let granted = false;
-    let balance = 0;
-    await db.runTransaction(async (t) => {
-      const ref = db.collection("users").doc(uid);
-      const doc = await t.get(ref);
-      if (!doc.exists) {
-        throw Object.assign(new Error("User missing"), { http: 404 });
-      }
-      const d = doc.data();
-      if (d.welcomeCallingCreditsGranted === true) {
-        balance = usableCreditsFromUserDoc(d);
-        return;
-      }
-      let paid = Number(d.paidCredits ?? 0);
-      let reward = Number(d.rewardCredits ?? 0);
-      if (d.paidCredits === undefined && d.credits != null) {
-        paid = Number(d.credits);
-        reward = 0;
-      }
-      const now = new Date();
-      const expTs = d.rewardCreditsExpiresAt;
-      if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
-        paid += reward;
-        reward = 0;
-      }
-      paid += WELCOME_LOGIN_BONUS;
-      granted = true;
-      balance = paid + reward;
-      t.update(ref, {
-        paidCredits: paid,
-        rewardCredits: reward,
-        rewardCreditsExpiresAt: reward > 0 ? expTs : null,
-        credits: balance,
-        welcomeCallingCreditsGranted: true,
-        welcome_bonus_granted_at: FieldValue.serverTimestamp(),
-      });
-    });
-    return res.status(200).json({ ok: true, granted, balance });
-  } catch (e) {
-    const code = e.http || 500;
-    if (code === 404) {
-      return res.status(404).json({ error: "User missing" });
-    }
-    console.error("/claim-welcome-bonus:", e);
-    return res.status(500).json({ error: String(e.message || e) });
-  }
+/**
+ * POST /claim-welcome-bonus — **disabled** (no free login credits).
+ * Legacy clients may still call; response is always no grant, no Firestore writes.
+ */
+app.post("/claim-welcome-bonus", (_req, res) => {
+  return res.status(200).json({ granted: false, reason: "disabled" });
 });
 
 /** Matches Flutter `_planCheckouts` amounts (INR paise / USD cents). */

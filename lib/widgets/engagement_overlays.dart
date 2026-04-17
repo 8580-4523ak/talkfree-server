@@ -10,7 +10,7 @@ import '../theme/app_theme.dart';
 abstract final class EngagementOverlays {
   EngagementOverlays._();
 
-  /// Top-right style float, e.g. welcome +10.
+  /// Top-right style float for credit deltas (optional reuse).
   static void showFloatingCreditDelta(
     BuildContext context, {
     required int delta,

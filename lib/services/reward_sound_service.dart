@@ -2,7 +2,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// Soft coin-style SFX for monetization moments (welcome bonus, ad reward).
+/// Soft coin-style SFX for monetization moments (e.g. ad reward).
 abstract final class RewardSoundService {
   RewardSoundService._();
 

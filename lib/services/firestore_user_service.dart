@@ -5,7 +5,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 import '../config/credits_policy.dart';
-import 'welcome_bonus_service.dart';
 
 class InsufficientCreditsException implements Exception {
   InsufficientCreditsException([this.message = 'Insufficient credits']);
@@ -26,17 +25,6 @@ class AdRewardDailyCapException implements Exception {
   final String message;
   @override
   String toString() => message;
-}
-
-/// Result of [FirestoreUserService.syncUserAndWelcomeBonus] (login bootstrap).
-class LoginBootstrapResult {
-  const LoginBootstrapResult({
-    required this.credits,
-    required this.showWelcomeSnack,
-  });
-
-  final int credits;
-  final bool showWelcomeSnack;
 }
 
 class FirestoreUserService {
@@ -220,19 +208,9 @@ class FirestoreUserService {
     });
   }
 
-  /// Login pipeline: [syncUserWithFirestoreOnLogin], then server [WelcomeBonusService.claimIfEligible],
-  /// then fresh balance. [LoginBootstrapResult.showWelcomeSnack] is true when +welcome credits were applied.
-  static Future<LoginBootstrapResult> syncUserAndWelcomeBonus(User user) async {
+  /// Login bootstrap: ensure Firestore `users/{uid}` exists / email is fresh — **no** welcome credits API.
+  static Future<void> syncUserAfterLogin(User user) async {
     await syncUserWithFirestoreOnLogin(user);
-    var showWelcome = false;
-    try {
-      showWelcome = await WelcomeBonusService.instance.claimIfEligible(user);
-    } catch (_) {}
-    final balance = await fetchUsableCredits(user.uid);
-    return LoginBootstrapResult(
-      credits: balance,
-      showWelcomeSnack: showWelcome,
-    );
   }
 
   /// Creates `users/{uid}` for new sign-ins or refreshes email; returns current usable credits.

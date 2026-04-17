@@ -120,7 +120,6 @@ class DashboardScreen extends StatefulWidget {
     super.key,
     required this.user,
     this.initialNavIndex = 0,
-    this.showWelcomeSnack = false,
   }) : assert(
           initialNavIndex >= 0 && initialNavIndex < 3,
           'initialNavIndex must be 0 (home), 1 (dialer), or 2 (inbox)',
@@ -130,9 +129,6 @@ class DashboardScreen extends StatefulWidget {
 
   /// `0` = home, `1` = dialer, `2` = inbox (OTP/SMS).
   final int initialNavIndex;
-
-  /// Shown once after login when server applied one-time welcome credits.
-  final bool showWelcomeSnack;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -155,10 +151,6 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   /// Avoid spamming SnackBars if the user document stream errors repeatedly.
   bool _userDocStreamErrorNotified = false;
-  bool _welcomeSnackShown = false;
-  /// One-shot balance count-up on home wallet (welcome bonus).
-  int? _welcomeBalanceAnimStart;
-  int _welcomeBalanceAnimGeneration = 0;
   late final AnimationController _walletGlowController;
   late final Animation<double> _walletGlowAnim;
 
@@ -298,53 +290,6 @@ class _DashboardScreenState extends State<DashboardScreen>
       if (!mounted) return;
       _refreshFromLatestSnapshot();
     });
-    if (widget.showWelcomeSnack) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        unawaited(_runWelcomeBonusEngagement());
-      });
-    }
-  }
-
-  Future<void> _runWelcomeBonusEngagement() async {
-    if (!mounted || _welcomeSnackShown) return;
-    _welcomeSnackShown = true;
-    for (var i = 0; i < 50; i++) {
-      if (!mounted) return;
-      if (_credits.value >= CreditsPolicy.welcomeLoginBonusCredits) {
-        break;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    if (!mounted) return;
-    final end = _credits.value;
-    final start =
-        (end - CreditsPolicy.welcomeLoginBonusCredits).clamp(0, end);
-    setState(() {
-      _welcomeBalanceAnimStart = start;
-      _welcomeBalanceAnimGeneration++;
-    });
-    unawaited(RewardSoundService.playCoin());
-    EngagementOverlays.showFloatingCreditDelta(
-      context,
-      delta: CreditsPolicy.welcomeLoginBonusCredits,
-    );
-    for (var i = 0; i < 3; i++) {
-      if (!mounted) return;
-      await _walletGlowController.forward();
-      await _walletGlowController.reverse();
-    }
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Welcome! You got free calling credits'),
-        behavior: SnackBarBehavior.floating,
-        duration: Duration(seconds: 4),
-      ),
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 900));
-    if (mounted) {
-      setState(() => _welcomeBalanceAnimStart = null);
-    }
   }
 
   @override
@@ -574,8 +519,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                       );
                     },
                     walletGlow: _walletGlowAnim,
-                    welcomeBalanceAnimStart: _welcomeBalanceAnimStart,
-                    welcomeBalanceAnimGeneration: _welcomeBalanceAnimGeneration,
                   )
                 : _navIndex == 1
                     ? ValueListenableBuilder<String>(
@@ -847,8 +790,6 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.onGoToDialer,
     required this.onOpenCallHistory,
     required this.walletGlow,
-    required this.welcomeBalanceAnimStart,
-    required this.welcomeBalanceAnimGeneration,
   });
 
   final User user;
@@ -874,8 +815,6 @@ class _DashboardHomeTab extends StatefulWidget {
   final VoidCallback onGoToDialer;
   final VoidCallback onOpenCallHistory;
   final Animation<double> walletGlow;
-  final int? welcomeBalanceAnimStart;
-  final int welcomeBalanceAnimGeneration;
 
   @override
   State<_DashboardHomeTab> createState() => _DashboardHomeTabState();
@@ -1093,11 +1032,6 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                       isPro: isPro,
                       onDebugLongPress: widget.onDebugAddCredits,
                       walletGlow: widget.walletGlow,
-                      welcomeBalanceAnimStart: isPro
-                          ? null
-                          : widget.welcomeBalanceAnimStart,
-                      welcomeBalanceAnimGeneration:
-                          widget.welcomeBalanceAnimGeneration,
                     );
                   },
                 ),
@@ -1752,16 +1686,12 @@ class _LightningWalletPill extends StatelessWidget {
     this.isPro = false,
     this.onDebugLongPress,
     required this.walletGlow,
-    this.welcomeBalanceAnimStart,
-    this.welcomeBalanceAnimGeneration = 0,
   });
 
   final int credits;
   final bool isPro;
   final Future<void> Function()? onDebugLongPress;
   final Animation<double> walletGlow;
-  final int? welcomeBalanceAnimStart;
-  final int welcomeBalanceAnimGeneration;
 
   @override
   Widget build(BuildContext context) {
@@ -1779,25 +1709,12 @@ class _LightningWalletPill extends StatelessWidget {
         ),
       ],
     );
-    Widget creditValue;
-    if (isPro) {
-      creditValue = Text('Unlimited', style: creditStyle);
-    } else if (welcomeBalanceAnimStart != null) {
-      creditValue = TweenAnimationBuilder<int>(
-        key: ValueKey<int>(welcomeBalanceAnimGeneration),
-        tween: IntTween(begin: welcomeBalanceAnimStart!, end: credits),
-        duration: const Duration(milliseconds: 820),
-        curve: Curves.easeOutCubic,
-        builder: (context, v, _) {
-          return Text('$v', style: creditStyle);
-        },
-      );
-    } else {
-      creditValue = _AnimatedIntText(
-        value: credits,
-        style: creditStyle,
-      );
-    }
+    final Widget creditValue = isPro
+        ? Text('Unlimited', style: creditStyle)
+        : _AnimatedIntText(
+            value: credits,
+            style: creditStyle,
+          );
     return AnimatedBuilder(
       animation: walletGlow,
       builder: (context, child) {

@@ -51,9 +51,6 @@ abstract final class VoiceBackendConfig {
   /// `POST /grant-reward` — Firebase ID token in `Authorization` (server adds credits).
   static Uri grantRewardUri() => Uri.https(_host, '/grant-reward');
 
-  /// `POST /claim-welcome-bonus` — one-time welcome credits (secured; idempotent).
-  static Uri claimWelcomeBonusUri() => Uri.https(_host, '/claim-welcome-bonus');
-
   /// `GET /available-numbers` — Firebase ID token; optional `areaCode` query (3 digits).
   static Uri availableNumbersUri({String? areaCode}) {
     final q = <String, String>{};

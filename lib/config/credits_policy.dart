@@ -12,9 +12,6 @@ abstract final class CreditsPolicy {
   /// Default usable balance for a **new** Firestore `users/{uid}` document (strict zero — earn via ads / purchase).
   static const int initialCreditsForNewUser = 0;
 
-  /// One-time welcome bonus applied by server `POST /claim-welcome-bonus` on first eligible login.
-  static const int welcomeLoginBonusCredits = 10;
-
   /// Credits added per rewarded ad (must match server `REWARD_GRANT_CREDITS`, default 2).
   static const int creditsPerRewardedAd = 2;
 

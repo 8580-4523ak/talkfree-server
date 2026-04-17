@@ -33,7 +33,7 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
   /// One Firestore sync per signed-in [User.uid] + guest flag (re-sync when anonymous → Google link).
   String? _syncedUid;
   bool? _syncedIsGuest;
-  Future<LoginBootstrapResult>? _loginSyncFuture;
+  Future<void>? _loginSyncFuture;
 
   @override
   void initState() {
@@ -86,9 +86,9 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
       if (_syncedUid != user.uid || _syncedIsGuest != user.isAnonymous) {
         _syncedUid = user.uid;
         _syncedIsGuest = user.isAnonymous;
-        _loginSyncFuture = FirestoreUserService.syncUserAndWelcomeBonus(user);
+        _loginSyncFuture = FirestoreUserService.syncUserAfterLogin(user);
       }
-      return FutureBuilder<LoginBootstrapResult>(
+      return FutureBuilder<void>(
         future: _loginSyncFuture,
         builder: (context, snap) {
           if (snap.hasError) {
@@ -137,7 +137,6 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
                 : DashboardScreen(
                     key: ValueKey<String>('dash_${user.uid}'),
                     user: user,
-                    showWelcomeSnack: snap.data?.showWelcomeSnack ?? false,
                   ),
           );
         },
