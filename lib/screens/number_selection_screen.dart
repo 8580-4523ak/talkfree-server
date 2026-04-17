@@ -286,7 +286,7 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
     return Scaffold(
       backgroundColor: AppTheme.darkBg,
       appBar: AppBar(
-        title: const Text('Choose your number'),
+        title: const Text('Choose Your Number'),
       ),
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         stream: FirestoreUserService.watchUserDocument(widget.userUid),

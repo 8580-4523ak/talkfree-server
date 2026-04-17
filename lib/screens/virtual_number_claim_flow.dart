@@ -46,7 +46,7 @@ abstract final class VirtualNumberClaimFlow {
     return ok == true;
   }
 
-  /// Premium: POST `/api/twilio/provision-number`, Lottie success, then [Navigator.popUntil] to root Home.
+  /// Premium: POST `/purchase-number`, Lottie success, then [Navigator.popUntil] to root Home.
   /// [DashboardScreen] already listens to `users/{uid}` via snapshots; `assigned_number` appears on Home without restart.
   static Future<void> executePremiumProvisionFromBrowse(
     BuildContext context,
@@ -148,7 +148,7 @@ abstract final class VirtualNumberClaimFlow {
             ),
             const SizedBox(height: 8),
             Text(
-              'Your private number is ready.',
+              'Your number is ready!',
               style: GoogleFonts.inter(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
                 height: 1.35,

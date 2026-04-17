@@ -15,6 +15,8 @@ import '../services/ad_service.dart';
 import '../utils/call_log_format.dart';
 import '../utils/reward_ad_feedback.dart';
 import '../utils/us_phone_format.dart';
+import '../services/assign_free_number_service.dart';
+import '../services/assign_number_service.dart';
 import '../widgets/assign_us_number_flow.dart';
 import '../widgets/engagement_overlays.dart';
 import '../widgets/glass_panel.dart';
@@ -27,6 +29,7 @@ import 'call_history_screen.dart';
 import 'dialer_screen.dart';
 import 'inbox_screen.dart';
 import 'settings_screen.dart';
+import 'number_selection_screen.dart';
 import 'subscription_screen.dart';
 import 'virtual_number_screen.dart';
 
@@ -834,18 +837,27 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
   Future<void> _onUnlockUsNumber() async {
     if (_assignNumberBusy) return;
     final isPro = widget.subscriptionTier.value == 'pro';
-    // Free tier: only lifetime ads gate (50). Premium: no ad requirement.
-    if (!isPro) {
-      if (widget.lifetimeAdsWatched.value <
-          CreditsPolicy.assignNumberMinAdsWatched) {
-        return;
-      }
+    if (isPro) {
+      await Navigator.of(context).pushNamed<void>(
+        NumberSelectionScreen.routeName,
+        arguments: NumberSelectionRouteArgs(
+          userUid: widget.user.uid,
+          userCredits: widget.credits,
+        ),
+      );
+      return;
+    }
+    final minAds = CreditsPolicy.assignNumberMinAdsWatched;
+    final minCr = CreditsPolicy.assignNumberMinCredits;
+    if (widget.lifetimeAdsWatched.value < minAds &&
+        widget.credits < minCr) {
+      return;
     }
     setState(() => _assignNumberBusy = true);
     try {
       await runAssignUsNumberFlow(
         context,
-        autoPickFirstNumber: isPro,
+        autoPickFirstNumber: false,
         onSuccess: (r) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
@@ -853,7 +865,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
               content: Text(
                 r.alreadyAssigned
                     ? 'Your line: ${r.assignedNumber}'
-                    : 'Your US number: ${r.assignedNumber}',
+                    : 'Your number is ready! ${r.assignedNumber}',
                 style: GoogleFonts.montserrat(fontWeight: FontWeight.w600),
               ),
               behavior: SnackBarBehavior.floating,
@@ -873,6 +885,90 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
     } finally {
       if (mounted) setState(() => _assignNumberBusy = false);
     }
+  }
+
+  Future<void> _onGetFreeNumber() async {
+    if (_assignNumberBusy) return;
+    if (widget.subscriptionTier.value == 'pro') return;
+    final minAds = CreditsPolicy.assignNumberMinAdsWatched;
+    final minCr = CreditsPolicy.assignNumberMinCredits;
+    if (widget.lifetimeAdsWatched.value < minAds && widget.credits < minCr) {
+      return;
+    }
+    setState(() => _assignNumberBusy = true);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+              const SizedBox(width: 20),
+              Expanded(
+                child: Text(
+                  'Assigning your number…',
+                  style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    try {
+      final r = await AssignFreeNumberService.instance.requestAssignFreeNumber();
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            r.alreadyAssigned
+                ? 'Your line: ${r.assignedNumber}'
+                : 'Your number is ready! ${r.assignedNumber}',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } on AssignNumberException catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message, style: GoogleFonts.inter()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$e', style: GoogleFonts.inter()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _assignNumberBusy = false);
+    }
+  }
+
+  void _onChangeNumberComingSoon() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Number changes are coming soon.',
+          style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   void _retry() {
@@ -1250,6 +1346,11 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                                     isPremium: tier == 'pro',
                                     assigning: _assignNumberBusy,
                                     onUnlock: _onUnlockUsNumber,
+                                    onGetFreeNumber:
+                                        tier == 'pro' ? null : _onGetFreeNumber,
+                                    onChangeNumber: tier == 'pro'
+                                        ? _onChangeNumberComingSoon
+                                        : null,
                                     onGetPremium: () {
                                       Navigator.of(context).push<void>(
                                         SubscriptionScreen.createRoute(),
@@ -2324,6 +2425,8 @@ class _VirtualNumberCard extends StatefulWidget {
     required this.isPremium,
     required this.assigning,
     required this.onUnlock,
+    this.onGetFreeNumber,
+    this.onChangeNumber,
     required this.onGetPremium,
   });
 
@@ -2335,6 +2438,10 @@ class _VirtualNumberCard extends StatefulWidget {
   final bool isPremium;
   final bool assigning;
   final Future<void> Function() onUnlock;
+  /// Free tier: auto-assign first US number (server POST `/assign-free-number`).
+  final Future<void> Function()? onGetFreeNumber;
+  /// Premium: optional “change number” (stub until server supports swap).
+  final VoidCallback? onChangeNumber;
   final VoidCallback onGetPremium;
 
   @override
@@ -2402,8 +2509,10 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
     final numberRaw = widget.assignedNumber?.trim();
     final hasNumber = numberRaw != null && numberRaw.isNotEmpty;
     final minAds = CreditsPolicy.assignNumberMinAdsWatched;
-    final canUnlock =
-        widget.isPremium || widget.adsWatchedCount >= minAds;
+    final minCredits = CreditsPolicy.assignNumberMinCredits;
+    final canUnlock = widget.isPremium ||
+        widget.adsWatchedCount >= minAds ||
+        widget.credits >= minCredits;
 
     final br = BorderRadius.circular(AppTheme.radiusLg);
     final now = DateTime.now();
@@ -2551,13 +2660,13 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Icon(
-                                      Icons.verified_rounded,
+                                      Icons.check_circle_rounded,
                                       size: 15,
                                       color: AppColors.primary,
                                     ),
                                     const SizedBox(width: 4),
                                     Text(
-                                      'Verified',
+                                      'Active',
                                       style: GoogleFonts.inter(
                                         fontSize: 11,
                                         fontWeight: FontWeight.w800,
@@ -2570,6 +2679,22 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                               ),
                             ],
                           ),
+                          if (widget.onChangeNumber != null) ...[
+                            const SizedBox(height: 10),
+                            Center(
+                              child: TextButton(
+                                onPressed: widget.onChangeNumber,
+                                child: Text(
+                                  'Change Number',
+                                  style: GoogleFonts.inter(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                    color: AppTheme.neonGreen,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                 ),
@@ -2658,10 +2783,10 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                 const SizedBox(height: 14),
                 Text(
                   widget.isPremium
-                      ? 'Tap Unlock US Number below to assign your included line.'
+                      ? 'Choose your number below — included with Pro.'
                       : canUnlock
-                          ? 'Claim your US line — it appears in Inbox instantly.'
-                          : 'Watch $minAds ads to unlock — your progress:',
+                          ? 'Get an auto-picked line free, choose one with credits, or go Pro.'
+                          : 'Watch $minAds ads or reach $minCredits credits — your progress:',
                   style: GoogleFonts.inter(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
@@ -2695,6 +2820,25 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                       ),
                     ],
                   ),
+                  const SizedBox(height: 10),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: min(1, widget.credits / minCredits),
+                      minHeight: 8,
+                      backgroundColor: Colors.white.withValues(alpha: 0.08),
+                      color: AppTheme.neonGreen.withValues(alpha: 0.55),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${widget.credits.clamp(0, minCredits)} / $minCredits credits',
+                    style: GoogleFonts.poppins(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.neonGreen.withValues(alpha: 0.85),
+                    ),
+                  ),
                   const SizedBox(height: 6),
                   Align(
                     alignment: Alignment.centerLeft,
@@ -2712,12 +2856,42 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                   ),
                 ],
                 const SizedBox(height: 16),
+                if (!widget.isPremium &&
+                    canUnlock &&
+                    widget.onGetFreeNumber != null) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton(
+                      onPressed: widget.assigning
+                          ? null
+                          : () => unawaited(widget.onGetFreeNumber!()),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.primary,
+                        side: BorderSide(
+                          color: AppColors.primary.withValues(alpha: 0.65),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                      child: Text(
+                        '🎁 Get Free Number',
+                        style: GoogleFonts.inter(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
                     onPressed: (!canUnlock || widget.assigning)
                         ? null
-                        : () => widget.onUnlock(),
+                        : () => unawaited(widget.onUnlock()),
                     style: FilledButton.styleFrom(
                       backgroundColor: AppColors.primary,
                       disabledBackgroundColor:
@@ -2747,7 +2921,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                               ),
                               const SizedBox(width: 12),
                               Text(
-                                'Claiming…',
+                                'Please wait…',
                                 style: GoogleFonts.inter(
                                   fontSize: 15,
                                   fontWeight: FontWeight.w800,
@@ -2756,7 +2930,9 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                             ],
                           )
                         : Text(
-                            'Unlock US Number',
+                            widget.isPremium
+                                ? 'Choose your number'
+                                : 'Choose number (credits)',
                             style: GoogleFonts.inter(
                               fontSize: 15,
                               fontWeight: FontWeight.w800,
@@ -2764,6 +2940,23 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                           ),
                   ),
                 ),
+                if (!widget.isPremium && canUnlock) ...[
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.center,
+                    child: TextButton(
+                      onPressed: widget.onGetPremium,
+                      child: Text(
+                        'Get Premium — instant number',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                          color: AppTheme.neonGreen,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ],
           ),

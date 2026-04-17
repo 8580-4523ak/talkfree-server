@@ -17,7 +17,7 @@ class ProvisionNumberException implements Exception {
   String toString() => 'ProvisionNumberException($statusCode): $message';
 }
 
-/// Premium-only: server purchases [phoneNumber] (E.164) and updates Firestore.
+/// Premium-only: POST `/purchase-number` — server purchases [phoneNumber] (E.164) and updates Firestore.
 class ProvisionNumberService {
   ProvisionNumberService._();
   static final ProvisionNumberService instance = ProvisionNumberService._();

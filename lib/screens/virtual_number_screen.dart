@@ -198,15 +198,28 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
     BuildContext context,
     int adsWatched,
     bool isPremium,
+    int credits,
   ) async {
-    final eligible = isPremium ||
-        adsWatched >= CreditsPolicy.assignNumberMinAdsWatched;
+    final minAds = CreditsPolicy.assignNumberMinAdsWatched;
+    final minCr = CreditsPolicy.assignNumberMinCredits;
+    final eligible =
+        isPremium || adsWatched >= minAds || credits >= minCr;
     if (!eligible || _claiming) return;
+    if (isPremium) {
+      await Navigator.of(context).pushNamed<void>(
+        NumberSelectionScreen.routeName,
+        arguments: NumberSelectionRouteArgs(
+          userUid: widget.userUid,
+          userCredits: credits,
+        ),
+      );
+      return;
+    }
     setState(() => _claiming = true);
     try {
       await runAssignUsNumberFlow(
         context,
-        autoPickFirstNumber: isPremium,
+        autoPickFirstNumber: false,
         onSuccess: (r) {
           if (!context.mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
@@ -214,7 +227,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
               content: Text(
                 r.alreadyAssigned
                     ? 'Your line: ${r.assignedNumber}'
-                    : 'Your new US number: ${r.assignedNumber}',
+                    : 'Your number is ready! ${r.assignedNumber}',
                 style: GoogleFonts.inter(),
               ),
               behavior: SnackBarBehavior.floating,
@@ -265,8 +278,12 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
           final isPremium = FirestoreUserService.isPremiumFromUserData(data);
           final leaseExp = FirestoreUserService.numberLeaseExpiryFromUserData(data);
           final planType = FirestoreUserService.numberPlanTypeFromUserData(data);
+          final credits = snap.hasData
+              ? FirestoreUserService.usableCreditsFromSnapshot(snap.data!)
+              : widget.userCredits;
           final canClaim = isPremium ||
-              adsWatched >= CreditsPolicy.assignNumberMinAdsWatched;
+              adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
+              credits >= CreditsPolicy.assignNumberMinCredits;
 
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!context.mounted) return;
@@ -350,7 +367,12 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                   FilledButton.icon(
                     onPressed: (!canClaim || _claiming)
                         ? null
-                        : () => _claimUsNumber(context, adsWatched, isPremium),
+                        : () => _claimUsNumber(
+                              context,
+                              adsWatched,
+                              isPremium,
+                              credits,
+                            ),
                     icon: _claiming
                         ? const SizedBox(
                             width: 22,
@@ -365,8 +387,8 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                       _claiming
                           ? 'Provisioning…'
                           : isPremium
-                              ? 'Claim your US number'
-                              : 'Claim free US number',
+                              ? 'Choose your number'
+                              : 'Choose number (credits)',
                       style: GoogleFonts.inter(
                         fontWeight: FontWeight.w800,
                         fontSize: 15,
@@ -389,7 +411,8 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                       padding: const EdgeInsets.only(top: 10),
                       child: Text(
                         'Watch ${CreditsPolicy.assignNumberMinAdsWatched} rewarded '
-                        'ads (lifetime) to unlock your free US number.',
+                        'ads (lifetime) or reach ${CreditsPolicy.assignNumberMinCredits} '
+                        'credits to unlock a US number.',
                         textAlign: TextAlign.center,
                         style: GoogleFonts.inter(
                           fontSize: 12,

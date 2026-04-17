@@ -64,8 +64,14 @@ abstract final class VoiceBackendConfig {
   /// `POST /assign-number` — Firebase ID token; provisions a real US Twilio number when eligible.
   static Uri assignNumberUri() => Uri.https(_host, '/assign-number');
 
-  /// `POST /api/twilio/provision-number` — Firebase ID token; premium-only purchase + Firestore.
-  static Uri provisionNumberUri() => Uri.https(_host, '/api/twilio/provision-number');
+  /// `POST /assign-free-number` — Firebase ID token; free tier auto-assigns first US local (eligible: ads or credits).
+  static Uri assignFreeNumberUri() => Uri.https(_host, '/assign-free-number');
+
+  /// `POST /purchase-number` — Firebase ID token; premium-only purchase of selected E.164 + Firestore.
+  static Uri provisionNumberUri() => Uri.https(_host, '/purchase-number');
+
+  /// `POST /purchase-browse-number` — Firebase ID token; deduct credits + buy number from browse inventory.
+  static Uri purchaseBrowseNumberUri() => Uri.https(_host, '/purchase-browse-number');
 
   /// `POST /send-sms` — Firebase ID token; JSON `{ "to", "body" }` (server uses Twilio + assigned_number fallback).
   static Uri sendSmsUri() => Uri.https(_host, '/send-sms');
@@ -86,7 +92,4 @@ abstract final class VoiceBackendConfig {
   /// `POST /verify-payment` — Razorpay `payment_id`, `order_id`, `signature`; grants Pro via Admin.
   static Uri verifyPaymentUri() => Uri.https(_host, '/verify-payment');
 
-  /// `POST /purchase-number` — deduct credits + buy Twilio number (secured).
-  /// Alias on server: `POST /purchase-browse-number`.
-  static Uri purchaseNumberUri() => Uri.https(_host, '/purchase-number');
 }

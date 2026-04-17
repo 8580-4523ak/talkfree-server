@@ -33,7 +33,7 @@ class BrowseNumberPurchaseService {
     if (token == null || token.isEmpty) {
       throw StateError('Could not get Firebase ID token');
     }
-    final uri = VoiceBackendConfig.purchaseNumberUri();
+    final uri = VoiceBackendConfig.purchaseBrowseNumberUri();
     final response = await http
         .post(
           uri,
