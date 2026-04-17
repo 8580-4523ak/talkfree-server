@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
+import '../theme/app_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../services/available_numbers_service.dart';
-import '../theme/talkfree_colors.dart';
-
 /// Lets the user pick one number from [candidates]. Returns E.164 or null if cancelled.
 Future<String?> showPickAvailableNumberSheet(
   BuildContext context, {
@@ -15,7 +14,7 @@ Future<String?> showPickAvailableNumberSheet(
   return showModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
-    backgroundColor: TalkFreeColors.deepBlack,
+    backgroundColor: AppTheme.darkBg,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
@@ -32,7 +31,7 @@ Future<String?> showPickAvailableNumberSheet(
                 style: GoogleFonts.inter(
                   fontSize: 18,
                   fontWeight: FontWeight.w800,
-                  color: TalkFreeColors.offWhite,
+                  color: Theme.of(context).colorScheme.onSurface,
                 ),
               ),
               const SizedBox(height: 8),
@@ -41,7 +40,7 @@ Future<String?> showPickAvailableNumberSheet(
                 style: GoogleFonts.inter(
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
-                  color: TalkFreeColors.mutedWhite,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
               const SizedBox(height: 16),
@@ -62,14 +61,14 @@ Future<String?> showPickAvailableNumberSheet(
                         style: GoogleFonts.jetBrainsMono(
                           fontWeight: FontWeight.w700,
                           fontSize: 16,
-                          color: TalkFreeColors.offWhite,
+                          color: Theme.of(context).colorScheme.onSurface,
                         ),
                       ),
                       subtitle: Text(
                         n.subtitle,
                         style: GoogleFonts.inter(
                           fontSize: 13,
-                          color: TalkFreeColors.mutedWhite,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
                       onTap: () => Navigator.of(context).pop(n.phoneNumber),

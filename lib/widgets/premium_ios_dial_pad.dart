@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-/// Elite dark shell + emerald accent (TalkFree premium dialer).
-const Color premiumDialBackground = Color(0xFF0F172A);
-const Color premiumDialKeyFill = Color(0xFF1E293B);
-const Color premiumDialCallGreen = Color(0xFF10B981);
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
+
+/// Elite dark shell + neon accent (TalkFree premium dialer).
+const Color premiumDialBackground = AppTheme.darkBg;
+const Color premiumDialKeyFill = AppColors.cardDark;
+Color get premiumDialCallGreen => AppColors.primary;
 
 TextStyle eliteDialDigitStyle(double fontSize) => GoogleFonts.inter(
       fontSize: fontSize,
@@ -347,7 +350,7 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
                   child: Ink(
                     width: diameter,
                     height: diameter,
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       gradient: LinearGradient(
                         begin: Alignment.topLeft,

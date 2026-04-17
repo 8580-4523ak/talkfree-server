@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-
-import '../theme/talkfree_colors.dart';
+import '../theme/app_theme.dart';
 
 /// Call bubble + dialpad mark, beige on transparent (login / splash hero).
 class TalkFreeLogo extends StatelessWidget {
@@ -14,7 +13,7 @@ class TalkFreeLogo extends StatelessWidget {
       width: size,
       height: size,
       child: CustomPaint(
-        painter: _TalkFreeLogoPainter(color: TalkFreeColors.beigeGold),
+        painter: _TalkFreeLogoPainter(color: AppTheme.neonGreen),
         size: Size(size, size),
       ),
     );

@@ -29,8 +29,8 @@ Future<void> showVoipGateDialog(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                const Color(0xFF0F172A),
-                const Color(0xFF1E293B).withValues(alpha: 0.98),
+                AppColors.cardDark,
+                AppColors.darkBackgroundDeep,
               ],
             ),
             border: Border.all(

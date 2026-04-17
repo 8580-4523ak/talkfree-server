@@ -10,22 +10,49 @@ abstract final class VoiceBackendConfig {
   /// Base URL only, no trailing slash.
   static String get baseUrl => productionOrigin;
 
-  /// `GET /call?to=<number>` — query built with [Uri.https] so `+` encodes correctly.
-  static Uri callUri(String to) {
-    return Uri.https(_host, '/call', <String, String>{'to': to});
-  }
+  /// `POST /call` with JSON `{ "to": "+..." }` and Firebase `Authorization: Bearer`.
+  static Uri initiateCallUri() => Uri.https(_host, '/call');
 
-  /// `GET /token?identity=<id>` for Twilio Voice access token.
-  static Uri tokenUri(String identity) {
-    return Uri.https(
-      _host,
-      '/token',
-      <String, String>{'identity': identity},
-    );
+  /// `GET /token` — Twilio Voice access JWT; requires Firebase `Authorization: Bearer`.
+  static Uri tokenUri() => Uri.https(_host, '/token');
+
+  /// `GET /browse-available-numbers` — US/CA local inventory (server-side Twilio).
+  static Uri browseAvailableNumbersUri({
+    required String country,
+    int pageSize = 100,
+    String? areaCode,
+    String? contains,
+    String? inRegion,
+    String? nextPage,
+  }) {
+    final q = <String, String>{
+      'country': country.trim().toUpperCase(),
+      'pageSize': '$pageSize',
+    };
+    final ac = areaCode?.trim();
+    if (ac != null && ac.isNotEmpty) {
+      q['areaCode'] = ac;
+    }
+    final ct = contains?.trim();
+    if (ct != null && ct.isNotEmpty) {
+      q['contains'] = ct;
+    }
+    final ir = inRegion?.trim();
+    if (ir != null && ir.isNotEmpty) {
+      q['inRegion'] = ir;
+    }
+    final np = nextPage?.trim();
+    if (np != null && np.isNotEmpty) {
+      q['nextPage'] = np;
+    }
+    return Uri.https(_host, '/browse-available-numbers', q);
   }
 
   /// `POST /grant-reward` — Firebase ID token in `Authorization` (server adds credits).
   static Uri grantRewardUri() => Uri.https(_host, '/grant-reward');
+
+  /// `POST /claim-welcome-bonus` — one-time welcome credits (secured; idempotent).
+  static Uri claimWelcomeBonusUri() => Uri.https(_host, '/claim-welcome-bonus');
 
   /// `GET /available-numbers` — Firebase ID token; optional `areaCode` query (3 digits).
   static Uri availableNumbersUri({String? areaCode}) {
@@ -40,6 +67,9 @@ abstract final class VoiceBackendConfig {
   /// `POST /assign-number` — Firebase ID token; provisions a real US Twilio number when eligible.
   static Uri assignNumberUri() => Uri.https(_host, '/assign-number');
 
+  /// `POST /api/twilio/provision-number` — Firebase ID token; premium-only purchase + Firestore.
+  static Uri provisionNumberUri() => Uri.https(_host, '/api/twilio/provision-number');
+
   /// `POST /send-sms` — Firebase ID token; JSON `{ "to", "body" }` (server uses Twilio + assigned_number fallback).
   static Uri sendSmsUri() => Uri.https(_host, '/send-sms');
 
@@ -51,4 +81,15 @@ abstract final class VoiceBackendConfig {
 
   /// `POST /sync-call-billing` — JSON `{ "callSid" }` after hangup (same settlement as Twilio `/call-status`).
   static Uri syncCallBillingUri() => Uri.https(_host, '/sync-call-billing');
+
+  /// `POST /create-subscription-order` — JSON `{ "plan": "daily"|… }`; Razorpay Orders API.
+  static Uri createSubscriptionOrderUri() =>
+      Uri.https(_host, '/create-subscription-order');
+
+  /// `POST /verify-payment` — Razorpay `payment_id`, `order_id`, `signature`; grants Pro via Admin.
+  static Uri verifyPaymentUri() => Uri.https(_host, '/verify-payment');
+
+  /// `POST /purchase-number` — deduct credits + buy Twilio number (secured).
+  /// Alias on server: `POST /purchase-browse-number`.
+  static Uri purchaseNumberUri() => Uri.https(_host, '/purchase-number');
 }

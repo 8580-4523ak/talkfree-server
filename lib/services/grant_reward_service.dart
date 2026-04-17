@@ -5,18 +5,24 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../config/voice_backend_config.dart';
-import 'billing_service.dart';
-import 'firestore_user_service.dart';
 
-/// Result of POST `/grant-reward` (server increments [adSubCounter], may add credits).
+/// Result of POST `/grant-reward` (server adds [creditsAdded] per ad, typically 2).
 class GrantRewardResult {
   const GrantRewardResult({
     required this.creditsAdded,
+    required this.baseCredits,
+    required this.streakBonus,
+    required this.streakCount,
     required this.adSubCounter,
     required this.adsWatchedToday,
   });
 
+  /// Total credits added this grant (base + optional streak milestone).
   final int creditsAdded;
+  final int baseCredits;
+  final int streakBonus;
+  final int streakCount;
+  /// Legacy field; server keeps this at 0 (no multi-ad cycle).
   final int adSubCounter;
   final int adsWatchedToday;
 }
@@ -90,19 +96,19 @@ class GrantRewardService {
     }
 
     final j = jsonDecode(response.body) as Map<String, dynamic>?;
+    final total = (j?['creditsAdded'] as num?)?.toInt() ?? 0;
+    final base = (j?['baseCredits'] as num?)?.toInt();
+    final streakB = (j?['streakBonus'] as num?)?.toInt() ?? 0;
+    final streakC = (j?['streakCount'] as num?)?.toInt() ?? 0;
     final result = GrantRewardResult(
-      creditsAdded: (j?['creditsAdded'] as num?)?.toInt() ?? 0,
+      creditsAdded: total,
+      baseCredits: base ?? (total - streakB).clamp(0, total),
+      streakBonus: streakB,
+      streakCount: streakC,
       adSubCounter: (j?['adSubCounter'] as num?)?.toInt() ?? 0,
       adsWatchedToday: (j?['adsWatchedToday'] as num?)?.toInt() ?? 0,
     );
-    try {
-      final balance = await FirestoreUserService.fetchUsableCredits(user.uid);
-      await BillingService.instance.syncCreditsToCloud(balance);
-    } catch (e, st) {
-      if (kDebugMode) {
-        debugPrint('post-grant credit sync: $e\n$st');
-      }
-    }
+    // Server (Admin SDK) updates Firestore; client must not write credits — listeners refresh UI.
     return result;
   }
 }

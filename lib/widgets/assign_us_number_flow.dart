@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../services/assign_number_service.dart';
 import '../services/available_numbers_service.dart';
+import '../utils/user_facing_service_error.dart';
 import 'pick_available_number_sheet.dart';
 
 /// Loads inventory, optionally auto-picks the first number (premium), else shows picker,
@@ -35,8 +36,8 @@ Future<void> runAssignUsNumberFlow(
     if (!context.mounted) return;
     onSuccess(r);
   } on AssignNumberException catch (e) {
-    onError(e.message);
+    onError(userFacingServiceError(e.message));
   } catch (e) {
-    onError(e.toString());
+    onError(userFacingServiceError(e.toString()));
   }
 }

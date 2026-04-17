@@ -1,10 +1,15 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:lottie/lottie.dart';
+
+import '../theme/app_theme.dart';
 
 import '../models/virtual_number.dart';
-import '../theme/talkfree_colors.dart';
+import '../services/browse_inventory_client.dart';
+import '../services/browse_number_purchase_service.dart';
 import '../services/firestore_user_service.dart';
-import '../services/twilio_service.dart';
+import '../utils/user_facing_service_error.dart';
+import 'virtual_number_claim_flow.dart';
 
 /// Arguments for [Navigator.pushNamed] → [NumberSelectionScreen.routeName].
 class NumberSelectionRouteArgs {
@@ -93,33 +98,33 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
 
     try {
       if (loadMore) {
-        final page = await TwilioService.fetchAvailableUsLocalNumbersPage(
+        final page = await BrowseInventoryClient.instance.fetchLocalPage(
+          country: 'US',
           pageSize: 100,
-          nextPageUri: _nextPageUri,
+          nextPage: _nextPageUri,
         );
         if (!mounted) return;
         setState(() {
           _numbers = [..._numbers, ...page.numbers];
           _loadingMore = false;
-          _nextPageUri = page.nextPageUri;
+          _nextPageUri = page.nextPage;
         });
       } else {
-        final usPage = await TwilioService.fetchAvailableUsLocalNumbersPage(
+        final usPage = await BrowseInventoryClient.instance.fetchLocalPage(
+          country: 'US',
           pageSize: 100,
           areaCode: _areaCodeCtrl.text,
           contains: _containsCtrl.text,
           inRegion: _stateCtrl.text,
-          nextPageUri: null,
         );
         var combined = List<VirtualNumber>.from(usPage.numbers);
         if (_stateCtrl.text.trim().isEmpty) {
           try {
-            final caPage = await TwilioService.fetchAvailableCaLocalNumbersPage(
+            final caPage = await BrowseInventoryClient.instance.fetchLocalPage(
+              country: 'CA',
               pageSize: 100,
               areaCode: _areaCodeCtrl.text,
               contains: _containsCtrl.text,
-              inRegion: null,
-              nextPageUri: null,
             );
             combined = [...combined, ...caPage.numbers];
           } catch (e, st) {
@@ -130,7 +135,7 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
         setState(() {
           _numbers = combined;
           _loading = false;
-          _nextPageUri = usPage.nextPageUri;
+          _nextPageUri = usPage.nextPage;
         });
       }
     } catch (e) {
@@ -157,101 +162,117 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
 
   Future<void> _onLoadMore() => _fetch(reset: false, loadMore: true);
 
-  Future<void> _activate(VirtualNumber vn, int liveCredits) async {
+  Future<void> _activate(
+    VirtualNumber vn,
+    int liveCredits,
+    bool isPremium,
+  ) async {
     if (_activateBusy) return;
-    if (liveCredits < vn.price) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Not enough credits (500 required).'),
-        ),
-      );
-      return;
-    }
-
-    if (!mounted) return;
     setState(() => _activateBusy = true);
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => const AlertDialog(
-        content: Row(
-          children: [
-            SizedBox(
-              width: 28,
-              height: 28,
-              child: CircularProgressIndicator(strokeWidth: 2.5),
-            ),
-            SizedBox(width: 20),
-            Expanded(child: Text('Processing…')),
-          ],
-        ),
-      ),
-    );
-
     try {
-      await FirestoreUserService.deductCredits(widget.userUid, vn.price);
-      try {
-        await TwilioService.purchaseIncomingNumber(vn.e164);
-      } catch (e) {
-        try {
-          await FirestoreUserService.addCredits(widget.userUid, vn.price);
-        } catch (refundErr, st) {
-          debugPrint('Refund after Twilio failure also failed: $refundErr\n$st');
-        }
-        rethrow;
+      final confirmed = await VirtualNumberClaimFlow.showClaimNumberConfirmation(
+        context,
+        vn.phoneNumber,
+      );
+      if (!confirmed || !mounted) return;
+
+      if (isPremium) {
+        await VirtualNumberClaimFlow.executePremiumProvisionFromBrowse(
+          context,
+          vn.e164,
+        );
+        return;
       }
-      await FirestoreUserService.setAllocatedNumber(widget.userUid, vn.e164);
+
+      if (liveCredits < vn.price) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Not enough credits (500 required).'),
+          ),
+        );
+        return;
+      }
 
       if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop();
-
-      await showDialog<void>(
+      showDialog<void>(
         context: context,
         barrierDismissible: false,
-        builder: (ctx) => AlertDialog(
-          icon: Icon(
-            Icons.check_circle_rounded,
-            color: Colors.green.shade600,
-            size: 48,
-          ),
-          title: const Text('Success'),
-          content: Text(
-            'Your new number is ${vn.phoneNumber}.\n'
-            'It has been saved to your profile.',
-          ),
-          actions: [
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              style: FilledButton.styleFrom(
-                backgroundColor: TalkFreeColors.beigeGold,
-                foregroundColor: TalkFreeColors.onPrimary,
+        builder: (ctx) => const AlertDialog(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
               ),
-              child: const Text('Great'),
-            ),
-          ],
+              SizedBox(width: 20),
+              Expanded(child: Text('Processing…')),
+            ],
+          ),
         ),
       );
 
-      if (!mounted) return;
-      Navigator.of(context).pop();
-    } on InsufficientCreditsException {
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Insufficient credits. Earn more and try again.'),
-        ),
-      );
-    } catch (e) {
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_activateErrorMessage(e)),
-          duration: const Duration(seconds: 10),
-        ),
-      );
+      try {
+        await BrowseNumberPurchaseService.instance.purchaseNumber(
+          phoneE164: vn.e164,
+          price: vn.price,
+        );
+
+        if (!mounted) return;
+        Navigator.of(context, rootNavigator: true).pop();
+
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            icon: Icon(
+              Icons.check_circle_rounded,
+              color: Colors.green.shade600,
+              size: 48,
+            ),
+            title: const Text('Success'),
+            content: Text(
+              'Your new number is ${vn.phoneNumber}.\n'
+              'It has been saved to your profile.',
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppTheme.neonGreen,
+                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                ),
+                child: const Text('Great'),
+              ),
+            ],
+          ),
+        );
+
+        if (!mounted) return;
+        Navigator.of(context).pop();
+      } on BrowseNumberPurchaseException catch (e) {
+        if (mounted) Navigator.of(context, rootNavigator: true).pop();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              e.statusCode == 402
+                  ? 'Insufficient credits. Earn more and try again.'
+                  : e.message,
+            ),
+          ),
+        );
+      } catch (e) {
+        if (mounted) Navigator.of(context, rootNavigator: true).pop();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_activateErrorMessage(e)),
+            duration: const Duration(seconds: 10),
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _activateBusy = false);
     }
@@ -263,6 +284,7 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
     final colorScheme = theme.colorScheme;
 
     return Scaffold(
+      backgroundColor: AppTheme.darkBg,
       appBar: AppBar(
         title: const Text('Choose your number'),
       ),
@@ -272,6 +294,10 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
           final credits = creditSnap.hasData
               ? FirestoreUserService.usableCreditsFromSnapshot(creditSnap.data!)
               : widget.userCredits;
+          final userData =
+              creditSnap.hasData ? creditSnap.data!.data() : null;
+          final isPremium =
+              FirestoreUserService.isPremiumFromUserData(userData);
 
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -280,21 +306,25 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                 child: Card(
                   elevation: 0,
-                  color: TalkFreeColors.cardBg,
+                  color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                     side: BorderSide(
-                      color: TalkFreeColors.beigeGold.withValues(alpha: 0.35),
+                      color: AppTheme.neonGreen.withValues(alpha: 0.35),
                     ),
                   ),
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: Row(
                       children: [
-                        Icon(
-                          Icons.stars_rounded,
-                          color: TalkFreeColors.beigeGold,
-                          size: 28,
+                        SizedBox(
+                          width: 48,
+                          height: 48,
+                          child: Lottie.asset(
+                            AppTheme.lottieMoney,
+                            fit: BoxFit.contain,
+                            repeat: true,
+                          ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
@@ -304,20 +334,20 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
                               Text(
                                 'Your balance',
                                 style: theme.textTheme.labelLarge?.copyWith(
-                                  color: TalkFreeColors.mutedWhite,
+                                  color: Theme.of(context).colorScheme.onSurfaceVariant,
                                 ),
                               ),
                               Text(
                                 '$credits credits',
                                 style: theme.textTheme.titleLarge?.copyWith(
                                   fontWeight: FontWeight.bold,
-                                  color: TalkFreeColors.beigeGold,
+                                  color: AppTheme.neonGreen,
                                 ),
                               ),
                               Text(
                                 'Activation costs ${VirtualNumber.defaultPrice} credits each',
                                 style: theme.textTheme.bodySmall?.copyWith(
-                                  color: TalkFreeColors.offWhite
+                                  color: Theme.of(context).colorScheme.onSurface
                                       .withValues(alpha: 0.75),
                                 ),
                               ),
@@ -333,11 +363,11 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: Card(
                   elevation: 0,
-                  color: TalkFreeColors.cardBg,
+                  color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                     side: BorderSide(
-                      color: TalkFreeColors.beigeGold.withValues(alpha: 0.2),
+                      color: AppTheme.neonGreen.withValues(alpha: 0.2),
                     ),
                   ),
                   child: Padding(
@@ -415,7 +445,12 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
               ),
               const SizedBox(height: 8),
               Expanded(
-                child: _buildNumbersBody(theme, colorScheme, credits),
+                child: _buildNumbersBody(
+                  theme,
+                  colorScheme,
+                  credits,
+                  isPremium,
+                ),
               ),
             ],
           );
@@ -428,6 +463,7 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
     ThemeData theme,
     ColorScheme colorScheme,
     int credits,
+    bool isPremium,
   ) {
     if (_loading && _numbers.isEmpty) {
       return const Center(child: CircularProgressIndicator());
@@ -483,7 +519,7 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
             child: _NumberListCard(
               virtualNumber: vn,
               userCredits: credits,
-              onActivate: () => _activate(vn, credits),
+              onActivate: () => _activate(vn, credits, isPremium),
               activateLocked: _activateBusy,
             ),
           );
@@ -522,9 +558,8 @@ class _NumbersLoadError extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final msg = error is TwilioApiException
-        ? (error as TwilioApiException).message
-        : '$error';
+    final raw = '$error';
+    final msg = userFacingServiceError(raw);
 
     return Center(
       child: Padding(
@@ -597,15 +632,17 @@ class _NumberListCard extends StatelessWidget {
         child: Row(
           children: [
             Container(
-              padding: const EdgeInsets.all(12),
+              width: 56,
+              height: 56,
+              padding: const EdgeInsets.all(4),
               decoration: BoxDecoration(
-                color: TalkFreeColors.beigeGold.withValues(alpha: 0.12),
+                color: AppTheme.neonGreen.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: Icon(
-                Icons.phone_android_rounded,
-                color: TalkFreeColors.beigeGold,
-                size: 28,
+              child: Lottie.asset(
+                AppTheme.lottiePhoneCall,
+                fit: BoxFit.contain,
+                repeat: true,
               ),
             ),
             const SizedBox(width: 14),
@@ -652,7 +689,7 @@ class _NumberListCard extends StatelessWidget {
                 Text(
                   '${virtualNumber.price} cr',
                   style: theme.textTheme.labelLarge?.copyWith(
-                    color: TalkFreeColors.beigeGold,
+                    color: AppTheme.neonGreen,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -669,9 +706,9 @@ class _NumberListCard extends StatelessWidget {
                   label: const Text('Activate'),
                   style: FilledButton.styleFrom(
                     backgroundColor:
-                        canActivate ? TalkFreeColors.beigeGold : null,
+                        canActivate ? AppTheme.neonGreen : null,
                     foregroundColor:
-                        canActivate ? TalkFreeColors.onPrimary : null,
+                        canActivate ? Theme.of(context).colorScheme.onPrimary : null,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 8,
@@ -690,13 +727,5 @@ class _NumberListCard extends StatelessWidget {
 }
 
 String _activateErrorMessage(Object e) {
-  if (e is TwilioApiException && e.twilioCode == 21404) {
-    return 'Trial limit: Twilio allows only ONE number per account. You '
-        'already have one (e.g. your SMS From number in .env). Upgrade at '
-        'twilio.com to buy more numbers, or use that existing number in the app.';
-  }
-  if (e is TwilioApiException) {
-    return 'Twilio: ${e.message}';
-  }
-  return 'Something went wrong: $e';
+  return userFacingServiceError('Something went wrong: $e');
 }

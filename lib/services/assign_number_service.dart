@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../config/voice_backend_config.dart';
+import '../utils/user_facing_service_error.dart';
 
 /// Shown when POST `/assign-number` returns 409 (number taken between list and purchase).
 const String kAssignNumberTakenMessage =
@@ -121,7 +122,9 @@ class AssignNumberService {
       }
       throw AssignNumberException(
         response.statusCode,
-        _userFacingAssignNumberError(response.statusCode, response.body),
+        userFacingServiceError(
+          _userFacingAssignNumberError(response.statusCode, response.body),
+        ),
       );
     }
 

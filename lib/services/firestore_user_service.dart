@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 import '../config/credits_policy.dart';
+import 'welcome_bonus_service.dart';
 
 class InsufficientCreditsException implements Exception {
   InsufficientCreditsException([this.message = 'Insufficient credits']);
@@ -27,6 +28,17 @@ class AdRewardDailyCapException implements Exception {
   String toString() => message;
 }
 
+/// Result of [FirestoreUserService.syncUserAndWelcomeBonus] (login bootstrap).
+class LoginBootstrapResult {
+  const LoginBootstrapResult({
+    required this.credits,
+    required this.showWelcomeSnack,
+  });
+
+  final int credits;
+  final bool showWelcomeSnack;
+}
+
 class FirestoreUserService {
   FirestoreUserService._();
 
@@ -42,12 +54,6 @@ class FirestoreUserService {
   }
 
   static Timestamp? _ts(Map<String, dynamic> d, String k) => d[k] as Timestamp?;
-
-  /// Canonical reward fields (see `firestore_schema.md`). Falls back to legacy keys.
-  static int _readAdProgress(Map<String, dynamic> m) {
-    if (m.containsKey('ad_progress')) return _int(m['ad_progress']);
-    return _int(m['adRewardCycleCount']);
-  }
 
   static int _readAdsWatchedToday(Map<String, dynamic> m, String dayKey) {
     final reset =
@@ -143,10 +149,16 @@ class FirestoreUserService {
     return 0;
   }
 
+  /// Consecutive UTC days with ≥1 rewarded ad (`POST /grant-reward` maintains).
+  static int adStreakCountFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return 0;
+    return _int(data['ad_streak_count']);
+  }
+
   /// `true` when `isPremium` is set or legacy tier fields say Pro.
   ///
-  /// **Security:** Firestore rules currently allow clients to edit their own doc — in production,
-  /// restrict `isPremium` (and credit buckets) to Admin / payment webhooks only.
+  /// **Security:** `isPremium` / credits must be written only by Firebase Admin (Node `/verify-payment`,
+  /// `/grant-reward`, billing). See `firestore.rules`.
   static bool isPremiumFromUserData(Map<String, dynamic>? data) {
     if (data == null) return false;
     final p = data['isPremium'];
@@ -164,38 +176,27 @@ class FirestoreUserService {
     return isPremiumFromUserData(data) ? 'pro' : 'free';
   }
 
+  /// Outbound calls completed (server increments on Twilio settlement).
+  static int totalOutboundCallsFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return 0;
+    final v = data['totalOutboundCalls'];
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return 0;
+  }
+
+  /// Sum of [durationSeconds] for settled outbound calls (server).
+  static int totalCallTalkSecondsFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return 0;
+    final v = data['totalCallTalkSeconds'];
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return 0;
+  }
+
   static Future<bool> fetchIsPremium(String uid) async {
     final s = await _userRef(uid).get();
     return isPremiumFromUserData(s.data());
-  }
-
-  /// One-time [CreditsPolicy.premiumWelcomeBonusCredits] when `isPremium` is true and not yet granted.
-  static Future<void> claimPremiumWelcomeBonusIfEligible(String uid) async {
-    try {
-      await _db.runTransaction((tx) async {
-        final ref = _userRef(uid);
-        final snap = await tx.get(ref);
-        if (!snap.exists) return;
-        final d = snap.data()!;
-        if (!isPremiumFromUserData(d)) return;
-        if (d['premiumWelcomeBonusGranted'] == true) return;
-        final m = Map<String, dynamic>.from(d);
-        _migrateLegacyInPlace(m);
-        var paid = _int(m['paidCredits']);
-        final reward = _int(m['rewardCredits']);
-        final bonus = CreditsPolicy.premiumWelcomeBonusCredits;
-        paid += bonus;
-        tx.update(ref, <String, Object?>{
-          'paidCredits': paid,
-          'credits': paid + reward,
-          'premiumWelcomeBonusGranted': true,
-        });
-      });
-    } catch (e, st) {
-      if (kDebugMode) {
-        debugPrint('claimPremiumWelcomeBonusIfEligible: $e\n$st');
-      }
-    }
   }
 
   static Future<void> expireRewardCreditsIfNeeded(String uid) async {
@@ -217,6 +218,21 @@ class FirestoreUserService {
         'credits': paid,
       });
     });
+  }
+
+  /// Login pipeline: [syncUserWithFirestoreOnLogin], then server [WelcomeBonusService.claimIfEligible],
+  /// then fresh balance. [LoginBootstrapResult.showWelcomeSnack] is true when +welcome credits were applied.
+  static Future<LoginBootstrapResult> syncUserAndWelcomeBonus(User user) async {
+    await syncUserWithFirestoreOnLogin(user);
+    var showWelcome = false;
+    try {
+      showWelcome = await WelcomeBonusService.instance.claimIfEligible(user);
+    } catch (_) {}
+    final balance = await fetchUsableCredits(user.uid);
+    return LoginBootstrapResult(
+      credits: balance,
+      showWelcomeSnack: showWelcome,
+    );
   }
 
   /// Creates `users/{uid}` for new sign-ins or refreshes email; returns current usable credits.
@@ -305,6 +321,9 @@ class FirestoreUserService {
       'premiumWelcomeBonusGranted': false,
       'created_at': FieldValue.serverTimestamp(),
       'createdAt': FieldValue.serverTimestamp(),
+      'totalOutboundCalls': 0,
+      'totalCallTalkSeconds': 0,
+      'welcomeCallingCreditsGranted': false,
     };
   }
 
@@ -412,6 +431,9 @@ class FirestoreUserService {
         'premiumWelcomeBonusGranted': false,
         'created_at': FieldValue.serverTimestamp(),
         'createdAt': FieldValue.serverTimestamp(),
+        'totalOutboundCalls': 0,
+        'totalCallTalkSeconds': 0,
+        'welcomeCallingCreditsGranted': false,
       });
       return;
     }
@@ -432,15 +454,12 @@ class FirestoreUserService {
     }
   }
 
-  /// Records one rewarded-ad view: daily cap, cooldown, sub-counter toward 4 ads.
-  /// If [serverGrantNeeded] is true, call [GrantRewardService.requestMinuteGrant].
+  /// Records one rewarded-ad view (daily cap + cooldown). Prefer **POST /grant-reward** for credits.
+  /// Returns [serverGrantNeeded] **true** — call [GrantRewardService] to sync server-side grant (+2 credits).
   static Future<
       ({
         bool serverGrantNeeded,
-        int cycleProgress,
       })> registerRewardedAdWatch(String uid) async {
-    var serverGrantNeeded = false;
-    var cycleProgressOut = 0;
     await _db.runTransaction((tx) async {
       final ref = _userRef(uid);
       final snap = await tx.get(ref);
@@ -473,31 +492,19 @@ class FirestoreUserService {
         throw AdRewardDailyCapException();
       }
 
-      var cycle = _readAdProgress(m);
-      cycle += 1;
-      if (cycle >= CreditsPolicy.adsRequiredForMinuteGrant) {
-        cycle = 0;
-        serverGrantNeeded = true;
-      }
-      cycleProgressOut = cycle;
-
       tx.update(ref, {
-        'ad_progress': cycle,
+        'ad_progress': 0,
+        'ad_sub_counter': 0,
+        'adRewardCycleCount': 0,
         'ads_watched_today': count + 1,
-        // Lifetime total (not daily count) — matches server POST /grant-reward.
-        'ads_watched_count': _int(m['ads_watched_count']) + 1,
         'last_reset_date': storedDay,
         'last_ad_timestamp': FieldValue.serverTimestamp(),
-        'adRewardCycleCount': cycle,
         'adRewardsCount': count + 1,
         'adRewardsDayKey': storedDay,
         'lastAdRewardAt': FieldValue.serverTimestamp(),
       });
     });
-    return (
-      serverGrantNeeded: serverGrantNeeded,
-      cycleProgress: cycleProgressOut,
-    );
+    return (serverGrantNeeded: true);
   }
 
   static Future<void> addPaidCredits(String uid, int amount) async {
@@ -584,7 +591,6 @@ class FirestoreUserService {
   static ({
     int adsToday,
     int cooldownRemaining,
-    int cycleProgress,
     bool dailyLimitReached,
   }) _adRewardStatusFromSnap(
     DocumentSnapshot<Map<String, dynamic>> doc,
@@ -593,7 +599,6 @@ class FirestoreUserService {
       return (
         adsToday: 0,
         cooldownRemaining: 0,
-        cycleProgress: 0,
         dailyLimitReached: false,
       );
     }
@@ -602,7 +607,6 @@ class FirestoreUserService {
     final dayKey =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     final count = _readAdsWatchedToday(m, dayKey);
-    final cycleProgress = _readAdProgress(m);
 
     var cool = 0;
     final last = _readLastAdTimestamp(m);
@@ -617,7 +621,6 @@ class FirestoreUserService {
     return (
       adsToday: count,
       cooldownRemaining: cool,
-      cycleProgress: cycleProgress,
       dailyLimitReached: dailyLimitReached,
     );
   }
@@ -628,7 +631,6 @@ class FirestoreUserService {
   static ({
     int adsToday,
     int cooldownRemaining,
-    int cycleProgress,
     bool dailyLimitReached,
   }) adRewardStatusFromSnapshot(
     DocumentSnapshot<Map<String, dynamic>> doc,
@@ -641,7 +643,6 @@ class FirestoreUserService {
       ({
         int adsToday,
         int cooldownRemaining,
-        int cycleProgress,
         bool dailyLimitReached,
       })> watchAdRewardStatus(
     String uid,
@@ -698,4 +699,5 @@ class FirestoreUserService {
           .orderBy('settledAt', descending: true)
           .limit(limit)
           .snapshots();
+
 }

@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import '../theme/app_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../services/twilio_sms_service.dart' show TwilioSmsException, sendTwilioSMS;
-import '../theme/talkfree_colors.dart';
+import '../utils/user_facing_service_error.dart';
 
 /// Simple screen to exercise [sendTwilioSMS] (Twilio trial: To-number often must be verified).
 class SmsTestScreen extends StatefulWidget {
@@ -64,7 +65,7 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
       final is401 = e.statusCode == 401;
       final text = is401
           ? 'Sign-in expired or invalid. Sign out and back in, then try again.'
-          : e.message;
+          : userFacingServiceError(e.message);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: SelectableText(
@@ -97,6 +98,7 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
     final theme = Theme.of(context);
 
     return Scaffold(
+      backgroundColor: AppTheme.darkBg,
       appBar: AppBar(
         title: const Text('Send test SMS'),
       ),
@@ -137,7 +139,7 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
                     height: 20,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
-                      color: TalkFreeColors.onPrimary,
+                      color: Theme.of(context).colorScheme.onPrimary,
                     ),
                   )
                 : const Icon(Icons.sms_rounded, color: Colors.white),
@@ -145,12 +147,12 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
               _sending ? 'Sending…' : 'Send SMS',
               style: GoogleFonts.manrope(
                 fontWeight: FontWeight.w700,
-                color: TalkFreeColors.onPrimary,
+                color: Theme.of(context).colorScheme.onPrimary,
               ),
             ),
             style: FilledButton.styleFrom(
-              backgroundColor: TalkFreeColors.beigeGold,
-              foregroundColor: TalkFreeColors.onPrimary,
+              backgroundColor: AppTheme.neonGreen,
+              foregroundColor: Theme.of(context).colorScheme.onPrimary,
               minimumSize: const Size.fromHeight(52),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(14),

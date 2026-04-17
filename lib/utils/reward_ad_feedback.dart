@@ -1,0 +1,76 @@
+import 'dart:async';
+
+import 'package:http/http.dart' as http;
+
+import '../config/credits_policy.dart';
+import '../services/grant_reward_service.dart';
+
+/// User-facing copy for rewarded-ad flows — keep messages consistent app-wide.
+abstract final class RewardAdFeedback {
+  RewardAdFeedback._();
+
+  static const String incompleteAd = 'Watch full ad to earn credits';
+  static const String processingReward = 'Processing reward...';
+  static const String network = 'Check your internet connection';
+  static const String serverIssue = 'Server issue. Try again later';
+  static const String dailyLimit = 'Daily limit reached. Come back tomorrow';
+
+  static String cooldownBeforeNextAd() =>
+      'Please wait ${CreditsPolicy.adRewardCooldownSeconds} seconds before next ad';
+
+  static String successCreditsAdded(int credits) =>
+      '+$credits credits added 🎉';
+
+  static String adsRemainingToday(int remaining) =>
+      'You can watch $remaining ads today';
+
+  static const String adShowFailed =
+      'Could not show the ad. Try again in a moment.';
+  static const String grantSyncFailed =
+      'Could not add credits. Try again.';
+
+  /// Maps [GrantRewardException] and generic errors to short UI strings.
+  static String forGrantError(Object error) {
+    if (error is GrantRewardException) {
+      return _forStatus(error.statusCode, error.message);
+    }
+    if (_isNetworkLike(error)) return network;
+    return grantSyncFailed;
+  }
+
+  /// Ad load/show failures (before `/grant-reward`).
+  static String forAdPlaybackError(Object error) {
+    if (_isNetworkLike(error)) return network;
+    return adShowFailed;
+  }
+
+  static bool _isNetworkLike(Object error) {
+    if (error is TimeoutException) return true;
+    if (error is http.ClientException) return true;
+    final s = error.toString();
+    return s.contains('SocketException') ||
+        s.contains('ClientException') ||
+        s.contains('Failed host lookup') ||
+        s.contains('Network is unreachable');
+  }
+
+  static String _forStatus(int code, String serverMessage) {
+    switch (code) {
+      case 429:
+        return cooldownBeforeNextAd();
+      case 403:
+        return dailyLimit;
+      case 503:
+        return serverIssue;
+      default:
+        if (serverMessage.toLowerCase().contains('limit')) {
+          return dailyLimit;
+        }
+        if (serverMessage.toLowerCase().contains('wait')) {
+          return cooldownBeforeNextAd();
+        }
+        if (code >= 500) return serverIssue;
+        return serverMessage.isNotEmpty ? serverMessage : serverIssue;
+    }
+  }
+}

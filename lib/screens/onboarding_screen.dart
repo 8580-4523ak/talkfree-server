@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:lottie/lottie.dart';
+
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config/legal_urls.dart';
-import '../theme/talkfree_colors.dart';
 import '../widgets/premium_backdrop.dart';
 
 class OnboardingScreen extends StatefulWidget {
@@ -50,7 +53,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: TalkFreeColors.backgroundTop,
+      backgroundColor: AppTheme.darkBg,
       body: PremiumBackdrop(
         child: SafeArea(
           child: Column(
@@ -81,7 +84,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   child: FilledButton(
                     onPressed: _onContinue,
                     style: FilledButton.styleFrom(
-                      backgroundColor: TalkFreeColors.beigeGold,
+                      backgroundColor: AppTheme.neonGreen,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
@@ -111,7 +114,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         'Terms Of Use',
                         style: GoogleFonts.montserrat(
                           fontSize: 12,
-                          color: TalkFreeColors.mutedWhite,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                           decoration: TextDecoration.underline,
                         ),
                       ),
@@ -122,7 +125,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         'Privacy Policy',
                         style: GoogleFonts.montserrat(
                           fontSize: 12,
-                          color: TalkFreeColors.mutedWhite,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                           decoration: TextDecoration.underline,
                         ),
                       ),
@@ -157,7 +160,7 @@ class _PageDots extends StatelessWidget {
             width: 22,
             height: 8,
             decoration: BoxDecoration(
-              color: TalkFreeColors.beigeGold,
+              color: AppTheme.neonGreen,
               borderRadius: BorderRadius.circular(999),
             ),
           );
@@ -167,7 +170,7 @@ class _PageDots extends StatelessWidget {
           width: 8,
           height: 8,
           decoration: BoxDecoration(
-            color: TalkFreeColors.beigeGold.withValues(alpha: 0.28),
+            color: AppTheme.neonGreen.withValues(alpha: 0.28),
             shape: BoxShape.circle,
           ),
         );
@@ -191,8 +194,8 @@ class _HeroPhotoStrip extends StatelessWidget {
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            TalkFreeColors.cardBg.withValues(alpha: 0.55),
-            TalkFreeColors.backgroundTop.withValues(alpha: 0.95),
+            (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface).withValues(alpha: 0.55),
+            AppTheme.darkBg.withValues(alpha: 0.95),
           ],
         ),
       ),
@@ -207,7 +210,7 @@ class _HeroPhotoStrip extends StatelessWidget {
                 end: Alignment.bottomCenter,
                 colors: [
                   Colors.transparent,
-                  TalkFreeColors.backgroundTop.withValues(alpha: 0.88),
+                  AppTheme.darkBg.withValues(alpha: 0.88),
                 ],
               ),
             ),
@@ -226,7 +229,7 @@ class _SilhouettePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = TalkFreeColors.offWhite.withValues(alpha: dark ? 0.04 : 0.07)
+      ..color = AppColors.textOnDark.withValues(alpha: dark ? 0.04 : 0.07)
       ..style = PaintingStyle.fill;
     final w = size.width;
     final h = size.height;
@@ -258,14 +261,25 @@ class _OnboardingPagePrivateNumber extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
         children: [
-          const _HeroPhotoStrip(),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(22),
+            child: SizedBox(
+              height: 200,
+              width: double.infinity,
+              child: Lottie.asset(
+                AppTheme.lottieGlobalMap,
+                fit: BoxFit.cover,
+                repeat: true,
+              ),
+            ),
+          ),
           const SizedBox(height: 20),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(999),
               border: Border.all(
-                color: TalkFreeColors.beigeGold.withValues(alpha: 0.65),
+                color: AppTheme.neonGreen.withValues(alpha: 0.65),
               ),
             ),
             child: Text(
@@ -273,7 +287,7 @@ class _OnboardingPagePrivateNumber extends StatelessWidget {
               style: GoogleFonts.montserrat(
                 fontSize: 18,
                 fontWeight: FontWeight.w600,
-                color: TalkFreeColors.offWhite,
+                color: Theme.of(context).colorScheme.onSurface,
                 letterSpacing: 4,
               ),
             ),
@@ -286,7 +300,7 @@ class _OnboardingPagePrivateNumber extends StatelessWidget {
               fontSize: 22,
               fontWeight: FontWeight.w700,
               height: 1.25,
-              color: TalkFreeColors.beigeGold,
+              color: AppTheme.neonGreen,
             ),
           ),
           const SizedBox(height: 16),
@@ -297,7 +311,7 @@ class _OnboardingPagePrivateNumber extends StatelessWidget {
               fontSize: 15,
               height: 1.45,
               fontWeight: FontWeight.w500,
-              color: TalkFreeColors.offWhite.withValues(alpha: 0.92),
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.92),
             ),
           ),
           const SizedBox(height: 12),
@@ -307,7 +321,7 @@ class _OnboardingPagePrivateNumber extends StatelessWidget {
             style: GoogleFonts.montserrat(
               fontSize: 15,
               fontWeight: FontWeight.w700,
-              color: TalkFreeColors.offWhite,
+              color: Theme.of(context).colorScheme.onSurface,
             ),
           ),
           const SizedBox(height: 36),
@@ -325,7 +339,7 @@ class _FeatureIconRow extends StatelessWidget {
     Widget line() => Expanded(
           child: Container(
             height: 1,
-            color: TalkFreeColors.offWhite.withValues(alpha: 0.2),
+            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.2),
           ),
         );
     Widget circle(IconData icon) {
@@ -335,10 +349,10 @@ class _FeatureIconRow extends StatelessWidget {
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           border: Border.all(
-            color: TalkFreeColors.offWhite.withValues(alpha: 0.45),
+            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.45),
           ),
         ),
-        child: Icon(icon, color: TalkFreeColors.offWhite, size: 24),
+        child: Icon(icon, color: Theme.of(context).colorScheme.onSurface, size: 24),
       );
     }
 
@@ -367,10 +381,14 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
         children: [
           const _HeroPhotoStrip(extraDark: true),
           const SizedBox(height: 24),
-          Icon(
-            Icons.verified_user_outlined,
-            size: 48,
-            color: TalkFreeColors.offWhite.withValues(alpha: 0.9),
+          SizedBox(
+            height: 168,
+            width: double.infinity,
+            child: Lottie.asset(
+              AppTheme.lottieOnboardingNeon,
+              fit: BoxFit.contain,
+              repeat: true,
+            ),
           ),
           const SizedBox(height: 24),
           Text(
@@ -380,7 +398,7 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
               fontSize: 22,
               fontWeight: FontWeight.w700,
               height: 1.25,
-              color: TalkFreeColors.beigeGold,
+              color: AppTheme.neonGreen,
             ),
           ),
           const SizedBox(height: 16),
@@ -391,7 +409,7 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
               fontSize: 15,
               height: 1.45,
               fontWeight: FontWeight.w500,
-              color: TalkFreeColors.offWhite.withValues(alpha: 0.9),
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.9),
             ),
           ),
           const SizedBox(height: 32),
@@ -405,7 +423,7 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
                 decoration: BoxDecoration(
                   border: Border(
                     bottom: BorderSide(
-                      color: TalkFreeColors.offWhite.withValues(alpha: 0.55),
+                      color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.55),
                       width: 2,
                     ),
                   ),
@@ -415,7 +433,7 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
                   i == 0 ? '*' : '',
                   style: GoogleFonts.montserrat(
                     fontSize: 22,
-                    color: TalkFreeColors.offWhite,
+                    color: Theme.of(context).colorScheme.onSurface,
                   ),
                 ),
               );
@@ -426,10 +444,10 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: TalkFreeColors.cardBg,
+              color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
-                color: TalkFreeColors.beigeGold.withValues(alpha: 0.75),
+                color: AppTheme.neonGreen.withValues(alpha: 0.75),
               ),
             ),
             child: Row(
@@ -437,7 +455,7 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
               children: [
                 Icon(
                   Icons.sms_outlined,
-                  color: TalkFreeColors.beigeGold,
+                  color: AppTheme.neonGreen,
                   size: 22,
                 ),
                 const SizedBox(width: 12),
@@ -447,7 +465,7 @@ class _OnboardingPageSmsVerification extends StatelessWidget {
                     style: GoogleFonts.montserrat(
                       fontSize: 13,
                       height: 1.4,
-                      color: TalkFreeColors.offWhite.withValues(alpha: 0.88),
+                      color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.88),
                     ),
                   ),
                 ),
@@ -481,10 +499,14 @@ class _OnboardingPageConnectWorldwide extends StatelessWidget {
         children: [
           const _HeroPhotoStrip(extraDark: true),
           const SizedBox(height: 28),
-          Icon(
-            Icons.sim_card_outlined,
-            size: 48,
-            color: TalkFreeColors.offWhite.withValues(alpha: 0.92),
+          SizedBox(
+            height: 88,
+            width: 88,
+            child: Lottie.asset(
+              AppTheme.lottieIntroGlobe,
+              fit: BoxFit.contain,
+              repeat: true,
+            ),
           ),
           const SizedBox(height: 20),
           Text(
@@ -493,7 +515,7 @@ class _OnboardingPageConnectWorldwide extends StatelessWidget {
             style: GoogleFonts.montserrat(
               fontSize: 22,
               fontWeight: FontWeight.w700,
-              color: TalkFreeColors.beigeGold,
+              color: AppTheme.neonGreen,
             ),
           ),
           const SizedBox(height: 14),
@@ -504,7 +526,7 @@ class _OnboardingPageConnectWorldwide extends StatelessWidget {
               fontSize: 14,
               height: 1.45,
               fontWeight: FontWeight.w500,
-              color: TalkFreeColors.offWhite.withValues(alpha: 0.9),
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.9),
             ),
           ),
           const SizedBox(height: 28),
@@ -522,10 +544,10 @@ class _OnboardingPageConnectWorldwide extends StatelessWidget {
               final label = _regions[i];
               return Container(
                 decoration: BoxDecoration(
-                  color: TalkFreeColors.cardBg,
+                  color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                    color: TalkFreeColors.beigeGold.withValues(alpha: 0.55),
+                    color: AppTheme.neonGreen.withValues(alpha: 0.55),
                   ),
                 ),
                 padding: const EdgeInsets.all(10),
@@ -546,7 +568,7 @@ class _OnboardingPageConnectWorldwide extends StatelessWidget {
                       style: GoogleFonts.montserrat(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
-                        color: TalkFreeColors.offWhite,
+                        color: Theme.of(context).colorScheme.onSurface,
                       ),
                     ),
                   ],
@@ -569,7 +591,7 @@ class _MiniMapBlobPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = TalkFreeColors.beigeGold.withValues(alpha: 0.55)
+      ..color = AppTheme.neonGreen.withValues(alpha: 0.55)
       ..style = PaintingStyle.fill;
     final cx = size.width * 0.5;
     final cy = size.height * 0.45;

@@ -1,4 +1,5 @@
 import 'dart:async' show unawaited;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io' show Platform;
 
 import 'package:twilio_voice/twilio_voice.dart';
@@ -8,19 +9,23 @@ import 'dart:ui' show ImageFilter;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_picker/country_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show ValueNotifier, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:lottie/lottie.dart';
 import '../config/credits_policy.dart';
 import '../services/ad_service.dart';
-import '../config/voice_backend_config.dart';
 import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 import '../services/call_service.dart';
 import '../services/firestore_user_service.dart';
 import '../utils/voip_runtime_permissions.dart';
 import '../widgets/premium_ios_dial_pad.dart';
+import '../widgets/low_credit_nudge.dart';
+import 'call_success_screen.dart';
 import 'calling_screen.dart';
+import 'subscription_screen.dart';
 
 class DialerScreen extends StatefulWidget {
   const DialerScreen({
@@ -30,20 +35,20 @@ class DialerScreen extends StatefulWidget {
     this.onEarnMinutes,
     this.rewardedAdBusy = false,
     this.cooldownRemaining = 0,
-    this.rewardCycleProgress = 0,
     this.rewardDailyLimitReached = false,
+    required this.outboundCallsTotal,
   });
 
   final User user;
-  /// Pro subscribers get a lower per-minute rate (see [CreditsPolicy.creditsPerMinutePremium]).
+  /// Pro subscribers get unlimited outbound calling (no per-minute credit UI).
   final bool isPremium;
   final Future<void> Function()? onEarnMinutes;
   final bool rewardedAdBusy;
   final int cooldownRemaining;
-  /// Firestore `ad_progress` toward 4 ads / grant.
-  final int rewardCycleProgress;
   /// 24 ads/day cap from Firestore.
   final bool rewardDailyLimitReached;
+  /// When > 0, first-call hint is hidden ([DashboardScreen] passes server total).
+  final ValueNotifier<int> outboundCallsTotal;
 
   @override
   State<DialerScreen> createState() => _DialerScreenState();
@@ -51,6 +56,9 @@ class DialerScreen extends StatefulWidget {
 
 class _DialerScreenState extends State<DialerScreen>
     with TickerProviderStateMixin {
+  static const String _kFirstCallHintPrefsKey =
+      'talkfree_dialer_first_call_hint_v1';
+
   final StringBuffer _digits = StringBuffer();
   bool _callBusy = false;
   /// True while opening / showing the in-call screen — neon pulsing overlay.
@@ -71,16 +79,47 @@ class _DialerScreenState extends State<DialerScreen>
     duration: const Duration(milliseconds: 1400),
   );
 
+  bool _showFirstCallHint = false;
+
   String get _display => _digits.toString();
 
   @override
   void initState() {
     super.initState();
     _country = Country.parse('IN');
+    unawaited(_loadFirstCallHint());
+    widget.outboundCallsTotal.addListener(_onOutboundCallsChanged);
+  }
+
+  void _onOutboundCallsChanged() {
+    final n = widget.outboundCallsTotal.value;
+    if (n > 0 && _showFirstCallHint) {
+      unawaited(_dismissFirstCallHint(savePrefs: true));
+    }
+  }
+
+  Future<void> _loadFirstCallHint() async {
+    if (widget.isPremium) return;
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    final dismissed = p.getBool(_kFirstCallHintPrefsKey) ?? false;
+    if (!dismissed) {
+      setState(() => _showFirstCallHint = true);
+    }
+  }
+
+  Future<void> _dismissFirstCallHint({required bool savePrefs}) async {
+    if (!_showFirstCallHint) return;
+    setState(() => _showFirstCallHint = false);
+    if (savePrefs) {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kFirstCallHintPrefsKey, true);
+    }
   }
 
   @override
   void dispose() {
+    widget.outboundCallsTotal.removeListener(_onOutboundCallsChanged);
     _digitFadeIn.dispose();
     _connectPulse.dispose();
     super.dispose();
@@ -178,6 +217,99 @@ class _DialerScreenState extends State<DialerScreen>
     return ensureVoipRuntimePermissions(context);
   }
 
+  Future<void> _showLowCreditsForCall() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppTheme.darkBg,
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        final bottom = MediaQuery.paddingOf(ctx).bottom;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(24, 8, 24, 24 + bottom),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Not enough credits',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                widget.onEarnMinutes != null
+                    ? 'Watch a short ad to earn credits, then try your call again.'
+                    : 'Add credits or keep your Pro benefits to continue calling.',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  height: 1.4,
+                  color: Colors.white70,
+                ),
+              ),
+              const SizedBox(height: 22),
+              if (widget.onEarnMinutes != null)
+                FilledButton(
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    widget.onEarnMinutes!();
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppTheme.neonGreen,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: Text(
+                    'Watch Ad to continue',
+                    style: GoogleFonts.inter(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                )
+              else ...[
+                FilledButton(
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    Navigator.of(context).push<void>(
+                      SubscriptionScreen.createRoute(),
+                    );
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppTheme.neonGreen,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: Text(
+                    'View plans',
+                    style: GoogleFonts.inter(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   /// In-app VoIP only: [TwilioVoipFacade] + [CallingScreen] (neon in-call UI).
   /// Does **not** use [url_launcher], `tel:` URIs, or the system phone app — stays inside TalkFree.
   Future<void> _onCall() async {
@@ -212,9 +344,7 @@ class _DialerScreenState extends State<DialerScreen>
     final usable = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
     if (!mounted) return;
     if (usable < CreditsPolicy.minCreditsToStartCallFor(widget.isPremium)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Not enough credits')),
-      );
+      await _showLowCreditsForCall();
       return;
     }
 
@@ -266,34 +396,42 @@ class _DialerScreenState extends State<DialerScreen>
       if (!mounted) return;
       final r = result;
       if (r == null) return;
-      if (!r.insufficientCredits && !widget.isPremium) {
+      if (r.exitReason == CallingScreenExitReason.ok && !widget.isPremium) {
         unawaited(AdService.instance.loadAndShowInterstitialAd());
+        if (mounted) {
+          await Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => CallSuccessScreen(syncedBalance: r.syncedBalance),
+            ),
+          );
+        }
       }
-      if (r.insufficientCredits) {
-        final b = r.syncedBalance;
+      if (!mounted) return;
+      if (r.exitReason == CallingScreenExitReason.voipFailure) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
+          const SnackBar(
             content: Text(
-              b != null
-                  ? 'Insufficient credits. Current balance: $b credits.'
-                  : 'Insufficient credits',
+              'Call failed. Check internet or permissions',
             ),
           ),
         );
+      } else if (r.exitReason == CallingScreenExitReason.insufficientCredits) {
+        await _showLowCreditsForCall();
       } else if (r.serverBillingPending) {
         final b = r.syncedBalance;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               b != null
-                  ? 'Balance still $b credits — server may be slow. If it does not drop, check Twilio '
-                      'Status Callback → ${VoiceBackendConfig.baseUrl}/call-status'
-                  : 'Credits usually update shortly after the call. If not, check Twilio Status Callback on your server.',
+                  ? 'Balance still shows $b credits — updates can take a moment. '
+                      'If it looks wrong, try again in a little while.'
+                  : 'Credits usually update shortly after the call. If not, try again later.',
             ),
             duration: const Duration(seconds: 7),
           ),
         );
-      } else if (r.syncedBalance != null) {
+      } else if (r.syncedBalance != null &&
+          !(r.exitReason == CallingScreenExitReason.ok && !widget.isPremium)) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Balance: ${r.syncedBalance} credits'),
@@ -324,7 +462,7 @@ class _DialerScreenState extends State<DialerScreen>
           topLeft: Radius.circular(20),
           topRight: Radius.circular(20),
         ),
-        backgroundColor: const Color(0xFF0B1220),
+        backgroundColor: AppTheme.darkBg,
         textStyle: GoogleFonts.inter(
           color: Colors.white.withValues(alpha: 0.94),
           fontSize: 16,
@@ -332,7 +470,7 @@ class _DialerScreenState extends State<DialerScreen>
         searchTextStyle: GoogleFonts.inter(color: Colors.white),
         inputDecoration: InputDecoration(
           filled: true,
-          fillColor: const Color(0xFF151D2B),
+          fillColor: AppColors.cardDark,
           labelText: 'Search',
           labelStyle: GoogleFonts.inter(color: Colors.white54),
           hintText: 'Country or code',
@@ -379,7 +517,7 @@ class _DialerScreenState extends State<DialerScreen>
       clipBehavior: Clip.none,
       children: [
         Scaffold(
-              backgroundColor: premiumDialBackground,
+              backgroundColor: AppTheme.darkBg,
               body: SafeArea(
                 bottom: false,
                 child: Column(
@@ -397,10 +535,100 @@ class _DialerScreenState extends State<DialerScreen>
                                   creditSnap.data!,
                                 )
                               : 0;
-                          return _GlassCreditsCard(credits: c);
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _GlassCreditsCard(
+                                credits: c,
+                                isPremium: widget.isPremium,
+                              ),
+                              if (!widget.isPremium) ...[
+                                const SizedBox(height: 10),
+                                LowCreditNudge(
+                                  credits: c,
+                                  isPremium: widget.isPremium,
+                                  onWatchAd: () {
+                                    if (widget.onEarnMinutes != null) {
+                                      unawaited(widget.onEarnMinutes!());
+                                    }
+                                  },
+                                ),
+                              ],
+                            ],
+                          );
                         },
                       ),
                     ),
+                    if (_showFirstCallHint && !widget.isPremium)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                        child: ValueListenableBuilder<int>(
+                          valueListenable: widget.outboundCallsTotal,
+                          builder: (context, outboundN, _) {
+                            if (outboundN > 0) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                unawaited(
+                                  _dismissFirstCallHint(savePrefs: true),
+                                );
+                              });
+                            }
+                            return Material(
+                              color: AppColors.cardDark.withValues(alpha: 0.94),
+                              borderRadius: BorderRadius.circular(14),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(14),
+                                onTap: () =>
+                                    unawaited(_dismissFirstCallHint(savePrefs: true)),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 10,
+                                  ),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Icon(
+                                        Icons.tips_and_updates_rounded,
+                                        color: AppTheme.neonGreen.withValues(
+                                          alpha: 0.95,
+                                        ),
+                                        size: 22,
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          'Use your free credits to make your first call',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                            height: 1.35,
+                                            color: Colors.white.withValues(
+                                              alpha: 0.94,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      IconButton(
+                                        visualDensity: VisualDensity.compact,
+                                        icon: Icon(
+                                          Icons.close_rounded,
+                                          color: Colors.white.withValues(
+                                            alpha: 0.55,
+                                          ),
+                                          size: 20,
+                                        ),
+                                        onPressed: () => unawaited(
+                                          _dismissFirstCallHint(savePrefs: true),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     if (!kIsWeb && Platform.isAndroid) ...[
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -440,9 +668,9 @@ class _DialerScreenState extends State<DialerScreen>
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       child: _CountryPickerTile(
                         country: _country,
-                        rateLine:
-                            'Rate: ${CreditsPolicy.creditsPerMinuteForUser(widget.isPremium)} ⚡/min'
-                            '${widget.isPremium ? ' (Pro)' : ''}',
+                        rateLine: widget.isPremium
+                            ? 'Unlimited calling (Pro)'
+                            : 'Rate: ${CreditsPolicy.creditsPerMinuteForUser(false)} ⚡/min',
                         onOpen: _openCountryPicker,
                       ),
                     ),
@@ -511,7 +739,6 @@ class _DialerScreenState extends State<DialerScreen>
                 child: _DialerGetTwoMinsFab(
                   busy: widget.rewardedAdBusy,
                   cooldownRemaining: widget.cooldownRemaining,
-                  cycleProgress: widget.rewardCycleProgress,
                   dailyLimitReached: widget.rewardDailyLimitReached,
                   onPressed: widget.onEarnMinutes!,
                 ),
@@ -647,9 +874,13 @@ class _DialerConnectingOverlay extends StatelessWidget {
 }
 
 class _GlassCreditsCard extends StatelessWidget {
-  const _GlassCreditsCard({required this.credits});
+  const _GlassCreditsCard({
+    required this.credits,
+    this.isPremium = false,
+  });
 
   final int credits;
+  final bool isPremium;
 
   @override
   Widget build(BuildContext context) {
@@ -702,10 +933,14 @@ class _GlassCreditsCard extends StatelessWidget {
                     ),
                   ],
                 ),
-                child: Icon(
-                  Icons.bolt_rounded,
-                  color: AppColors.accentAmber.withValues(alpha: 0.98),
-                  size: 22,
+                child: SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: Lottie.asset(
+                    AppTheme.lottieMoney,
+                    fit: BoxFit.contain,
+                    repeat: true,
+                  ),
                 ),
               ),
               const SizedBox(width: 14),
@@ -714,7 +949,7 @@ class _GlassCreditsCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'AVAILABLE CREDITS',
+                      isPremium ? 'UNLIMITED CALLING' : 'AVAILABLE CREDITS',
                       style: GoogleFonts.inter(
                         fontSize: 10,
                         fontWeight: FontWeight.w700,
@@ -724,9 +959,9 @@ class _GlassCreditsCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '$credits',
+                      isPremium ? 'Unlimited calling (Pro)' : '$credits',
                       style: GoogleFonts.inter(
-                        fontSize: 28,
+                        fontSize: isPremium ? 22 : 28,
                         fontWeight: FontWeight.w700,
                         height: 1.0,
                         color: Colors.white.withValues(alpha: 0.96),
@@ -739,16 +974,16 @@ class _GlassCreditsCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    'Wallet',
+                    isPremium ? 'Pro' : 'Wallet',
                     style: GoogleFonts.inter(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
-                      color: AppColors.accentAmber.withValues(alpha: 0.9),
+                      color: AppColors.primary.withValues(alpha: 0.9),
                     ),
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'balance',
+                    isPremium ? 'included' : 'balance',
                     style: GoogleFonts.inter(
                       fontSize: 11,
                       color: Colors.white.withValues(alpha: 0.35),
@@ -807,7 +1042,17 @@ class _CountryPickerTile extends StatelessWidget {
                 country.flagEmoji,
                 style: const TextStyle(fontSize: 28),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 36,
+                height: 36,
+                child: Lottie.asset(
+                  AppTheme.lottiePhoneCall,
+                  fit: BoxFit.contain,
+                  repeat: true,
+                ),
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -986,14 +1231,12 @@ class _DialerGetTwoMinsFab extends StatefulWidget {
   const _DialerGetTwoMinsFab({
     required this.busy,
     required this.cooldownRemaining,
-    required this.cycleProgress,
     required this.dailyLimitReached,
     required this.onPressed,
   });
 
   final bool busy;
   final int cooldownRemaining;
-  final int cycleProgress;
   final bool dailyLimitReached;
   final Future<void> Function() onPressed;
 
@@ -1041,48 +1284,11 @@ class _DialerGetTwoMinsFabState extends State<_DialerGetTwoMinsFab>
     final tapLocked =
         widget.busy || widget.dailyLimitReached || widget.cooldownRemaining > 0;
     const fabSize = 56.0;
-    final p = widget.cycleProgress.clamp(
-      0,
-      CreditsPolicy.adsRequiredForMinuteGrant,
-    );
-    final progressValue =
-        CreditsPolicy.adsRequiredForMinuteGrant == 0
-            ? 0.0
-            : p / CreditsPolicy.adsRequiredForMinuteGrant;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        Text(
-          'Ad $p/${CreditsPolicy.adsRequiredForMinuteGrant} watched',
-          style: GoogleFonts.inter(
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            color: premiumDialCallGreen.withValues(alpha: 0.95),
-            letterSpacing: 0.2,
-            shadows: [
-              Shadow(
-                color: premiumDialCallGreen.withValues(alpha: 0.35),
-                blurRadius: 8,
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 6),
-        SizedBox(
-          width: fabSize + 16,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: progressValue,
-              minHeight: 5,
-              backgroundColor: Colors.white.withValues(alpha: 0.12),
-              color: premiumDialCallGreen.withValues(alpha: 0.92),
-            ),
-          ),
-        ),
-        const SizedBox(height: 8),
         AnimatedBuilder(
           animation: _scale,
           builder: (context, child) {
@@ -1116,7 +1322,7 @@ class _DialerGetTwoMinsFabState extends State<_DialerGetTwoMinsFab>
                       end: Alignment.bottomRight,
                       colors: [
                         premiumDialCallGreen.withValues(alpha: 0.92),
-                        const Color(0xFF00A86B),
+                        AppColors.darkBackgroundDeep,
                       ],
                     ),
                     boxShadow: [
@@ -1153,30 +1359,38 @@ class _DialerGetTwoMinsFabState extends State<_DialerGetTwoMinsFab>
                                 color: Colors.white.withValues(alpha: 0.75),
                                 size: 26,
                               )
-                        : widget.cooldownRemaining > 0
-                            ? Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.timer_outlined,
-                                    color: Colors.white.withValues(alpha: 0.95),
-                                    size: 20,
-                                  ),
-                                  Text(
-                                    '${widget.cooldownRemaining}s',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w800,
-                                      color: Colors.white.withValues(alpha: 0.95),
-                                      height: 1.0,
+                            : widget.cooldownRemaining > 0
+                                ? Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.timer_outlined,
+                                        color: Colors.white.withValues(
+                                          alpha: 0.95,
+                                        ),
+                                        size: 20,
+                                      ),
+                                      Text(
+                                        '${widget.cooldownRemaining}s',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w800,
+                                          color: Colors.white.withValues(
+                                            alpha: 0.95,
+                                          ),
+                                          height: 1.0,
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                : Padding(
+                                    padding: const EdgeInsets.all(6),
+                                    child: Lottie.asset(
+                                      AppTheme.lottieFlyingMoney,
+                                      fit: BoxFit.contain,
+                                      repeat: true,
                                     ),
                                   ),
-                                ],
-                              )
-                            : const Text(
-                                '🎁',
-                                style: TextStyle(fontSize: 28),
-                              ),
                   ),
                 ),
               ),
@@ -1224,7 +1438,7 @@ class _DialerDeleteIconButton extends StatefulWidget {
 class _DialerDeleteIconButtonState extends State<_DialerDeleteIconButton>
     with TickerProviderStateMixin {
   static const double _size = 50;
-  static const Color _accent = premiumDialCallGreen;
+  static Color get _accent => AppColors.primary;
 
   late final AnimationController _tapCtrl = AnimationController(
     vsync: this,

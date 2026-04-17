@@ -1,19 +1,20 @@
+import 'package:dots_indicator/dots_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:introduction_screen/introduction_screen.dart';
 import 'package:lottie/lottie.dart';
 
 import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
+import '../theme/system_ui.dart';
 import '../widgets/glass_panel.dart';
 
 /// Premium navy → near-black (matches dashboard hero gradient spec).
 const Color _kBgTop = Color(0xFF0A1628);
 const Color _kBgBottom = Color(0xFF050A12);
 
-/// Bundled Lottie animations.
+/// Bundled map (page 1).
 const String _lottieMap = 'assets/lottie/global_map.json';
-const String _lottieCalling = 'assets/lottie/intro_calling.json';
-const String _lottieWallet = 'assets/lottie/intro_wallet.json';
 
 /// First-launch onboarding (before login). Driven by [TalkFreeRoot].
 class TalkFreeValueIntroScreen extends StatefulWidget {
@@ -30,8 +31,30 @@ class TalkFreeValueIntroScreen extends StatefulWidget {
 }
 
 class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
+  final GlobalKey<IntroductionScreenState> _introKey =
+      GlobalKey<IntroductionScreenState>();
+
   bool _finishing = false;
   int _pageIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    applyTalkFreeDarkNavigationChrome();
+  }
+
+  static const int _kPageCount = 3;
+
+  DotsDecorator get _dotsDecorator => DotsDecorator(
+        color: Colors.white.withValues(alpha: 0.22),
+        activeColor: AppColors.primary.withValues(alpha: 0.95),
+        size: const Size(8, 8),
+        activeSize: const Size(26, 9),
+        activeShape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(5),
+        ),
+        spacing: const EdgeInsets.symmetric(horizontal: 4),
+      );
 
   Future<void> _finish() async {
     if (_finishing) return;
@@ -119,6 +142,7 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
         ),
       ),
       child: IntroductionScreen(
+        key: _introKey,
         /// Inset scaffold so footer clears status bar, notches, and home indicator.
         safeAreaList: const [true, true, true, true],
         globalBackgroundColor: Colors.transparent,
@@ -193,15 +217,19 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
         baseBtnStyle: TextButton.styleFrom(
           foregroundColor: Colors.white.withValues(alpha: 0.9),
         ),
-        dotsDecorator: DotsDecorator(
-          color: Colors.white.withValues(alpha: 0.22),
-          activeColor: AppColors.primary.withValues(alpha: 0.95),
-          size: const Size(8, 8),
-          activeSize: const Size(26, 9),
-          activeShape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(5),
+        dotsDecorator: _dotsDecorator,
+        customProgress: Center(
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.center,
+            child: DotsIndicator(
+              dotsCount: _kPageCount,
+              position: _pageIndex.toDouble(),
+              decorator: _dotsDecorator,
+              onTap: (pos) =>
+                  _introKey.currentState?.animateScroll(pos.toInt()),
+            ),
           ),
-          spacing: const EdgeInsets.symmetric(horizontal: 4),
         ),
         /// Balanced flex: middle column must stay wide enough for [DotsIndicator]
         /// (1:1:8 squeezed dots on narrow phones and caused horizontal overflow).
@@ -253,7 +281,7 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
                 'Experience high-quality VoIP calling worldwide.',
             image: _lottieHero(
               context,
-              _lottieCalling,
+              AppTheme.lottiePhoneCall,
               'High-quality calling',
               height: lottieHeight,
             ),
@@ -265,7 +293,7 @@ class _TalkFreeValueIntroScreenState extends State<TalkFreeValueIntroScreen> {
                 'Upgrade to Pro for an ad-free premium experience.',
             image: _lottieHero(
               context,
-              _lottieWallet,
+              AppTheme.lottieMoney,
               'Premium Pro',
               height: lottieHeight,
             ),

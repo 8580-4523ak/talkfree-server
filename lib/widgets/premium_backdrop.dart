@@ -2,7 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import '../theme/talkfree_colors.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 
 /// Deep charcoal → black gradient plus a faint globe / network watermark.
 class PremiumBackdrop extends StatelessWidget {
@@ -18,16 +19,16 @@ class PremiumBackdrop extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DecoratedBox(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            TalkFreeColors.backgroundTop,
-            TalkFreeColors.charcoal,
-            TalkFreeColors.backgroundBottom,
+            AppTheme.darkBg,
+            AppColors.surfaceDark,
+            AppColors.darkBackgroundDeep,
           ],
-          stops: [0.0, 0.42, 1.0],
+          stops: const [0.0, 0.42, 1.0],
         ),
       ),
       child: Stack(
@@ -54,7 +55,7 @@ class _GlobeWatermarkPainter extends CustomPainter {
     final c = Offset(size.width * 0.5, size.height * 0.28);
     final r = size.width * 0.55;
     final line = Paint()
-      ..color = TalkFreeColors.beigeGold.withValues(alpha: 0.06)
+      ..color = AppTheme.neonGreen.withValues(alpha: 0.06)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1;
 
@@ -73,7 +74,7 @@ class _GlobeWatermarkPainter extends CustomPainter {
     }
 
     final dots = Paint()
-      ..color = TalkFreeColors.offWhite.withValues(alpha: 0.05)
+      ..color = AppColors.textOnDark.withValues(alpha: 0.05)
       ..style = PaintingStyle.fill;
     final random = math.Random(42);
     for (var i = 0; i < 48; i++) {

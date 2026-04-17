@@ -5,15 +5,17 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/firestore_user_service.dart';
+import '../theme/app_theme.dart';
 import 'dashboard_screen.dart';
 import 'intro_screen.dart';
 import 'login_screen.dart';
+import 'splash/splash_screen.dart';
 
 /// Persists after the first-launch value intro is completed.
 const String kFirstLaunchIntroCompleteKey = 'talkfree_first_launch_intro_complete';
 
 /// Root navigator: first launch → [TalkFreeValueIntroScreen] → [LoginScreen];
-/// signed-in users → [DashboardScreen] on the dialer tab (no duplicate intro).
+/// signed-in users → [DashboardScreen] on the **Home** tab (credits, ads, premium).
 class TalkFreeRoot extends StatefulWidget {
   const TalkFreeRoot({super.key});
 
@@ -24,12 +26,14 @@ class TalkFreeRoot extends StatefulWidget {
 class _TalkFreeRootState extends State<TalkFreeRoot> {
   bool _prefsReady = false;
   bool _firstIntroCompleted = false;
+  /// Minimum time the branded splash stays visible (2–3s window).
+  bool _minSplashElapsed = false;
   StreamSubscription<User?>? _authSub;
 
   /// One Firestore sync per signed-in [User.uid] + guest flag (re-sync when anonymous → Google link).
   String? _syncedUid;
   bool? _syncedIsGuest;
-  Future<int>? _loginSyncFuture;
+  Future<LoginBootstrapResult>? _loginSyncFuture;
 
   @override
   void initState() {
@@ -38,6 +42,12 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
       if (mounted) setState(() {});
     });
     unawaited(_loadPrefs());
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 2500), () {
+        if (!mounted) return;
+        setState(() => _minSplashElapsed = true);
+      }),
+    );
   }
 
   @override
@@ -76,17 +86,14 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
       if (_syncedUid != user.uid || _syncedIsGuest != user.isAnonymous) {
         _syncedUid = user.uid;
         _syncedIsGuest = user.isAnonymous;
-        _loginSyncFuture = FirestoreUserService.syncUserWithFirestoreOnLogin(user);
+        _loginSyncFuture = FirestoreUserService.syncUserAndWelcomeBonus(user);
       }
-      return FutureBuilder<int>(
+      return FutureBuilder<LoginBootstrapResult>(
         future: _loginSyncFuture,
         builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const _RootSplash();
-          }
           if (snap.hasError) {
             return Scaffold(
-              backgroundColor: const Color(0xFF040608),
+              backgroundColor: AppTheme.darkBg,
               body: Center(
                 child: Padding(
                   padding: const EdgeInsets.all(24),
@@ -99,10 +106,39 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
               ),
             );
           }
-          return DashboardScreen(
-            key: ValueKey<String>('dash_${user.uid}'),
-            user: user,
-            initialNavIndex: 1,
+          final waitingOnSync = snap.connectionState != ConnectionState.done;
+          final showSplash = waitingOnSync || !_minSplashElapsed;
+          return AnimatedSwitcher(
+            duration: const Duration(milliseconds: 450),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: (Widget child, Animation<double> animation) {
+              final curved = CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOutCubic,
+                reverseCurve: Curves.easeInCubic,
+              );
+              return FadeTransition(
+                opacity: curved,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.035),
+                    end: Offset.zero,
+                  ).animate(curved),
+                  child: child,
+                ),
+              );
+            },
+            child: showSplash
+                ? SplashScreen(
+                    key: const ValueKey<String>('splash_auth'),
+                    showLoader: waitingOnSync,
+                  )
+                : DashboardScreen(
+                    key: ValueKey<String>('dash_${user.uid}'),
+                    user: user,
+                    showWelcomeSnack: snap.data?.showWelcomeSnack ?? false,
+                  ),
           );
         },
       );
@@ -111,8 +147,8 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
     _syncedIsGuest = null;
     _loginSyncFuture = null;
 
-    if (!_prefsReady) {
-      return const _RootSplash();
+    if (!_prefsReady || !_minSplashElapsed) {
+      return SplashScreen(showLoader: !_prefsReady);
     }
 
     return AnimatedSwitcher(
@@ -147,27 +183,6 @@ class _TalkFreeRootState extends State<TalkFreeRoot> {
                 onDone: _onIntroFinished,
               ),
             ),
-    );
-  }
-}
-
-class _RootSplash extends StatelessWidget {
-  const _RootSplash();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      backgroundColor: Color(0xFF040608),
-      body: Center(
-        child: SizedBox(
-          width: 28,
-          height: 28,
-          child: CircularProgressIndicator(
-            strokeWidth: 2.5,
-            color: Color(0xFF00D084),
-          ),
-        ),
-      ),
     );
   }
 }

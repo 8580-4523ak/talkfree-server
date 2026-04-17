@@ -1,7 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
-import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
@@ -25,6 +26,7 @@ class CallService {
   VoidCallback? _onInsufficientCredits;
   void Function(String message)? _onError;
   Future<void> Function()? _hangUpActiveCall;
+  bool _enforceBalanceChecks = true;
 
   bool get isBillingActive => _timer != null;
 
@@ -113,6 +115,7 @@ class CallService {
     final uid = _uid;
     final start = _callStartTime;
     if (uid == null || start == null) return;
+    if (!_enforceBalanceChecks) return;
 
     final elapsedSec = DateTime.now().difference(start).inSeconds;
     final needed = creditsNeededForElapsedSeconds(elapsedSec);
@@ -144,10 +147,12 @@ class CallService {
     Future<void> Function()? hangUpActiveCall,
     required VoidCallback onInsufficientCredits,
     void Function(String message)? onError,
+    bool enforceBalanceChecks = true,
   }) {
     _timer?.cancel();
     _timer = null;
 
+    _enforceBalanceChecks = enforceBalanceChecks;
     _uid = uid;
     _twilioCallSid = twilioCallSid?.trim().isNotEmpty == true ? twilioCallSid!.trim() : null;
     _callStartTime = DateTime.now();
@@ -155,16 +160,19 @@ class CallService {
     _onInsufficientCredits = onInsufficientCredits;
     _onError = onError;
 
-    unawaited(_runOneBalanceCheck());
-
-    _timer = Timer.periodic(CreditsPolicy.callBalanceCheckInterval, (_) {
+    if (enforceBalanceChecks) {
       unawaited(_runOneBalanceCheck());
-    });
+
+      _timer = Timer.periodic(CreditsPolicy.callBalanceCheckInterval, (_) {
+        unawaited(_runOneBalanceCheck());
+      });
+    }
   }
 
   /// After app resume — run an immediate balance check (timer may have stalled).
   Future<void> syncAfterAppResumed() async {
     if (_uid == null || _callStartTime == null) return;
+    if (!_enforceBalanceChecks) return;
     await _runOneBalanceCheck();
   }
 }
@@ -186,18 +194,35 @@ String formatDialInputToE164(
   return '+$defaultCallingCode$d';
 }
 
-/// GET `/call?to=<encoded>` via [VoiceBackendConfig.callUri] — same as browser.
+/// `POST /call` with JSON `{ "to": "+..." }` and Firebase Bearer (server initiates PSTN).
 Future<void> makeCall(String number) async {
   final normalized = _normalizeCallNumberForApi(number);
   if (normalized.isEmpty) {
     throw Exception('Invalid phone number');
   }
 
-  final uri = VoiceBackendConfig.callUri(normalized);
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) {
+    throw Exception('Not signed in');
+  }
+  final idToken = await user.getIdToken();
+  if (idToken == null || idToken.isEmpty) {
+    throw Exception('Could not get Firebase ID token');
+  }
+
+  final uri = VoiceBackendConfig.initiateCallUri();
 
   try {
     final response = await http
-        .get(uri)
+        .post(
+          uri,
+          headers: <String, String>{
+            'Authorization': 'Bearer $idToken',
+            'Content-Type': 'application/json; charset=utf-8',
+            'Accept': 'application/json',
+          },
+          body: jsonEncode(<String, String>{'to': normalized}),
+        )
         .timeout(const Duration(seconds: 30));
 
     if (response.statusCode == 200) {

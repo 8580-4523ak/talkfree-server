@@ -1,12 +1,11 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
+import 'config/app_env.dart';
+
 import 'app_scaffold_messenger.dart';
-import 'config/twilio_env.dart';
 import 'theme/app_theme.dart';
 import 'screens/app_root.dart';
 import 'screens/number_selection_screen.dart';
@@ -16,21 +15,16 @@ import 'screens/virtual_number_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  await FirebaseMessaging.instance.requestPermission();
-  try {
-    await dotenv.load(fileName: '.env');
-  } catch (e, st) {
-    debugPrint('Could not load .env (copy .env.example → .env): $e\n$st');
-  }
-  if (kDebugMode) {
-    debugPrint(
-      'Twilio .env keys present: '
-      '${TwilioEnv.accountSid != null && TwilioEnv.accountSid!.isNotEmpty}',
-    );
-  }
+  await AppEnv.loadDotEnv();
   runApp(const TalkFreeApp());
-  // After first frame so AdMob never installs a native overlay before Flutter UI.
+  // After first frame: native splash clears faster; avoid blocking runApp on the
+  // notification permission dialog or AdMob init.
   WidgetsBinding.instance.addPostFrameCallback((_) async {
+    try {
+      await FirebaseMessaging.instance.requestPermission();
+    } catch (e, st) {
+      debugPrint('FirebaseMessaging.requestPermission: $e\n$st');
+    }
     try {
       await MobileAds.instance.initialize();
     } catch (e, st) {
@@ -49,7 +43,7 @@ class TalkFreeApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'TalkFree',
       theme: AppTheme.light(),
-      darkTheme: AppTheme.dark(),
+      darkTheme: AppTheme.darkTheme,
       themeMode: ThemeMode.dark,
       home: const TalkFreeRoot(),
       onGenerateRoute: (RouteSettings settings) {

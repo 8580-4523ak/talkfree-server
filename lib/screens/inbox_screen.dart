@@ -1,13 +1,13 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:lottie/lottie.dart';
 
 import '../services/firestore_user_service.dart';
 import '../theme/app_colors.dart';
-import '../theme/talkfree_colors.dart';
-
+import '../theme/app_theme.dart';
+import 'number_selection_screen.dart';
 /// OTP / SMS inbox for the virtual 2nd line (`users/{uid}/messages`).
 class InboxScreen extends StatelessWidget {
   const InboxScreen({super.key, required this.user});
@@ -45,7 +45,7 @@ class InboxScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: AppColors.darkBackground,
+      color: AppTheme.darkBg,
       child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: FirestoreUserService.watchInboxMessages(user.uid),
         builder: (context, snap) {
@@ -57,7 +57,7 @@ class InboxScreen extends StatelessWidget {
                   'Could not load inbox.\n${snap.error}',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.inter(
-                    color: TalkFreeColors.mutedWhite,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                     height: 1.4,
                   ),
                 ),
@@ -90,10 +90,14 @@ class InboxScreen extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    SvgPicture.asset(
-                      'assets/svg/inbox_empty.svg',
+                    SizedBox(
                       width: 220,
                       height: 180,
+                      child: Lottie.asset(
+                        AppTheme.lottieInboxEmptyNeon,
+                        fit: BoxFit.contain,
+                        repeat: true,
+                      ),
                     ),
                     const SizedBox(height: 28),
                     Text(
@@ -102,10 +106,59 @@ class InboxScreen extends StatelessWidget {
                       style: GoogleFonts.inter(
                         fontSize: 20,
                         fontWeight: FontWeight.w700,
-                        color: TalkFreeColors.offWhite,
+                        color: Theme.of(context).colorScheme.onSurface,
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: () async {
+                          final doc = await FirestoreUserService.watchUserDocument(
+                            user.uid,
+                          ).first;
+                          final credits =
+                              FirestoreUserService.usableCreditsFromSnapshot(doc);
+                          if (!context.mounted) return;
+                          await Navigator.of(context).pushNamed(
+                            NumberSelectionScreen.routeName,
+                            arguments: NumberSelectionRouteArgs(
+                              userUid: user.uid,
+                              userCredits: credits,
+                            ),
+                          );
+                        },
+                        style: FilledButton.styleFrom(
+                          backgroundColor: AppTheme.neonGreen,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          elevation: 0,
+                        ),
+                        child: Text(
+                          'Claim Your US Number',
+                          style: GoogleFonts.inter(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Private numbers start receiving SMS instantly after activation.',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(
+                        fontSize: 13,
+                        height: 1.45,
+                        fontWeight: FontWeight.w500,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     Text(
                       'OTPs and SMS to your US line will show up here in real time.',
                       textAlign: TextAlign.center,
@@ -113,7 +166,7 @@ class InboxScreen extends StatelessWidget {
                         fontSize: 15,
                         height: 1.5,
                         fontWeight: FontWeight.w500,
-                        color: TalkFreeColors.mutedWhite,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                     ),
                   ],
@@ -217,7 +270,7 @@ class _InboxBubble extends StatelessWidget {
                     style: GoogleFonts.inter(
                       fontWeight: FontWeight.w800,
                       fontSize: 13,
-                      color: TalkFreeColors.offWhite,
+                      color: Theme.of(context).colorScheme.onSurface,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -228,7 +281,7 @@ class _InboxBubble extends StatelessWidget {
                     timeLabel,
                     style: GoogleFonts.inter(
                       fontSize: 11,
-                      color: TalkFreeColors.mutedWhite.withValues(alpha: 0.75),
+                      color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.75),
                     ),
                   ),
               ],
@@ -239,7 +292,7 @@ class _InboxBubble extends StatelessWidget {
               style: GoogleFonts.inter(
                 fontSize: 15,
                 height: 1.4,
-                color: TalkFreeColors.offWhite.withValues(alpha: 0.95),
+                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.95),
               ),
             ),
           ],

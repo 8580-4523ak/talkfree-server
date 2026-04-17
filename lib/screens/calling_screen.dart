@@ -9,24 +9,36 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:twilio_voice/twilio_voice.dart';
 
 import '../config/credits_policy.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 import '../config/voice_backend_config.dart';
 import '../services/call_service.dart';
 import '../widgets/voip_gate_dialog.dart';
-import '../services/billing_service.dart';
 import '../services/firestore_user_service.dart';
 import '../services/call_live_billing_service.dart';
 import '../services/twilio_voip_facade.dart';
+import '../utils/user_facing_service_error.dart';
 import '../widgets/premium_ios_dial_pad.dart' show premiumDialCallGreen;
+
+/// Why [CallingScreen] closed — drives dialer messaging (credit vs VoIP) and interstitial rules.
+enum CallingScreenExitReason {
+  /// User hang up, remote end, or normal disconnect with billing sync.
+  ok,
+  /// Balance too low to place or continue the call.
+  insufficientCredits,
+  /// VoIP/SDK, web, token, network, or permissions — not a credit issue.
+  voipFailure,
+}
 
 /// Returned when [CallingScreen] closes; [syncedBalance] is set after disconnect via Firestore fetch.
 class CallingScreenResult {
   const CallingScreenResult({
-    required this.insufficientCredits,
+    required this.exitReason,
     this.syncedBalance,
     this.serverBillingPending = false,
   });
 
-  final bool insufficientCredits;
+  final CallingScreenExitReason exitReason;
 
   /// Authoritative usable credits from Firestore (e.g. after call end).
   final int? syncedBalance;
@@ -76,6 +88,8 @@ class _CallingScreenState extends State<CallingScreen>
   String? _activeCallSid;
   /// Tier-2 settlement in progress — shows a light overlay so the 5s window does not feel frozen.
   bool _finalizingBill = false;
+  /// Cached at dial — Pro users skip live ticks, balance UI, and [CallService] enforcement.
+  bool _isPremium = false;
 
   late final AnimationController _callVisualPulse = AnimationController(
     vsync: this,
@@ -115,6 +129,7 @@ class _CallingScreenState extends State<CallingScreen>
 
   void _onLiveCreditTick(Timer timer) {
     if (!mounted) return;
+    if (_isPremium) return;
     final sid = _activeCallSid;
     if (sid == null || sid.isEmpty) return;
     if (kDebugMode) {
@@ -182,6 +197,33 @@ class _CallingScreenState extends State<CallingScreen>
     }
     _connectedCreditTimerStarted = true;
 
+    if (_isPremium) {
+      var sid = _activeCallSid ?? '';
+      for (var i = 0; i < 50 && sid.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        if (!mounted) return;
+        final g = await TwilioVoipFacade.instance.getActiveCallSid();
+        if (g != null && g.isNotEmpty) {
+          sid = g;
+          _activeCallSid = g;
+          CallService.instance.setActiveCallSid(g);
+        }
+      }
+      if (kDebugMode) {
+        debugPrint(
+          'DEBUG: Pro — unlimited in-call UI; no /call-live-tick '
+          '(sid=${sid.isEmpty ? "none" : "ok"})',
+        );
+      }
+      if (!mounted) return;
+      _creditsNotifier.value = CreditsPolicy.unlimitedBalanceUiSentinel;
+      _creditPulse.forward(from: 0);
+      _cancelConnectedTimers();
+      _elapsedNotifier.value = 0;
+      _elapsedTimer = Timer.periodic(const Duration(seconds: 1), _onElapsedTick);
+      return;
+    }
+
     final credits = await FirestoreUserService.fetchUsableCredits(
       widget.user.uid,
     );
@@ -248,15 +290,19 @@ class _CallingScreenState extends State<CallingScreen>
     } catch (_) {}
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Call ended — not enough credits.')),
+        const SnackBar(content: Text('Not enough credits')),
       );
-      await _popWithFirestoreSync(insufficientCredits: true);
+      await _popWithFirestoreSync(
+        exitReason: CallingScreenExitReason.insufficientCredits,
+      );
     }
   }
 
   /// After hangup: [CallLiveBillingService.runFinalSettlementWindow] (5s Tier-2 sync) then Firestore read
   /// so the dialer does not flash the pre-call balance. Twilio `/call-status` still settles if the app died.
-  Future<void> _popWithFirestoreSync({required bool insufficientCredits}) async {
+  Future<void> _popWithFirestoreSync({
+    required CallingScreenExitReason exitReason,
+  }) async {
     if (!mounted) return;
     setState(() => _finalizingBill = true);
     int? synced;
@@ -265,9 +311,7 @@ class _CallingScreenState extends State<CallingScreen>
       final settled = await _fetchUsableCreditsAfterCallSettles();
       synced = settled.balance;
       serverBillingPending = settled.serverBillingPending;
-      if (synced != null) {
-        await BillingService.instance.syncCreditsToCloud(synced);
-      }
+      // Balance comes from server billing + Firestore; do not client-write credits.
     } catch (_) {
     } finally {
       if (mounted) {
@@ -277,7 +321,7 @@ class _CallingScreenState extends State<CallingScreen>
     if (!mounted) return;
     Navigator.of(context).pop(
       CallingScreenResult(
-        insufficientCredits: insufficientCredits,
+        exitReason: exitReason,
         syncedBalance: synced,
         serverBillingPending: serverBillingPending,
       ),
@@ -355,7 +399,7 @@ class _CallingScreenState extends State<CallingScreen>
       context: context,
       builder: (ctx) {
         return AlertDialog(
-          backgroundColor: const Color(0xFF1E293B),
+          backgroundColor: AppColors.cardDark,
           title: Text(
             'Could not start VoIP call',
             style: GoogleFonts.poppins(
@@ -365,11 +409,10 @@ class _CallingScreenState extends State<CallingScreen>
           ),
           content: SingleChildScrollView(
             child: Text(
-              'Twilio Voice did not start the call. Check:\n\n'
-              '• Microphone & Phone permissions for this app.\n'
-              '• Android: enable this app as a calling account (ConnectionService).\n'
-              '• Twilio Console → TwiML Apps → same SID as server TWILIO_TWIML_APP_SID → '
-              'Voice request URL = ${VoiceBackendConfig.baseUrl}/call (POST, returns TwiML to <Dial>).',
+              'The call could not start. Check:\n\n'
+              '• Microphone & Phone permissions for TalkFree.\n'
+              '• Android: enable TalkFree as a calling account (ConnectionService) if asked.\n'
+              '• Try again in a moment with a stable internet connection.',
               style: GoogleFonts.inter(
                 fontSize: 14,
                 height: 1.45,
@@ -385,7 +428,9 @@ class _CallingScreenState extends State<CallingScreen>
                   if (!mounted) return;
                   alreadyLeftCallingScreen = true;
                   Navigator.of(context).pop(
-                    const CallingScreenResult(insufficientCredits: true),
+                    const CallingScreenResult(
+                      exitReason: CallingScreenExitReason.voipFailure,
+                    ),
                   );
                   await TwilioVoice.instance.openPhoneAccountSettings();
                 },
@@ -397,7 +442,9 @@ class _CallingScreenState extends State<CallingScreen>
                 if (!mounted) return;
                   alreadyLeftCallingScreen = true;
                   Navigator.of(context).pop(
-                    const CallingScreenResult(insufficientCredits: true),
+                    const CallingScreenResult(
+                      exitReason: CallingScreenExitReason.voipFailure,
+                    ),
                   );
                   await openAppSettings();
               },
@@ -413,7 +460,9 @@ class _CallingScreenState extends State<CallingScreen>
     );
     if (mounted && !alreadyLeftCallingScreen) {
       Navigator.of(context).pop(
-        const CallingScreenResult(insufficientCredits: true),
+        const CallingScreenResult(
+          exitReason: CallingScreenExitReason.voipFailure,
+        ),
       );
     }
   }
@@ -435,11 +484,10 @@ class _CallingScreenState extends State<CallingScreen>
   Future<void> _bootstrap() async {
     if (kIsWeb) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('VoIP is not supported on web.')),
-      );
       Navigator.of(context).pop(
-        const CallingScreenResult(insufficientCredits: true),
+        const CallingScreenResult(
+          exitReason: CallingScreenExitReason.voipFailure,
+        ),
       );
       return;
     }
@@ -447,11 +495,14 @@ class _CallingScreenState extends State<CallingScreen>
     final c = await FirestoreUserService.fetchUsableCredits(widget.user.uid);
     final premium = await FirestoreUserService.fetchIsPremium(widget.user.uid);
     if (!mounted) return;
+    _isPremium = premium;
     _creditsAtSessionStart = c;
     if (c < CreditsPolicy.minCreditsToStartCallFor(premium)) {
       _cancelConnectedTimers();
       Navigator.of(context).pop(
-        const CallingScreenResult(insufficientCredits: true),
+        const CallingScreenResult(
+          exitReason: CallingScreenExitReason.insufficientCredits,
+        ),
       );
       return;
     }
@@ -536,6 +587,7 @@ class _CallingScreenState extends State<CallingScreen>
           unawaited(_onInsufficientFromBilling());
         },
         onError: (_) {},
+        enforceBalanceChecks: !_isPremium,
       );
     } catch (e, _) {
       await sub?.cancel();
@@ -550,7 +602,7 @@ class _CallingScreenState extends State<CallingScreen>
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
-                'Turn ON TalkFree (or Twilio) in Calling accounts — the settings screen will open.',
+                'Turn on TalkFree in Calling accounts — the settings screen will open.',
               ),
               duration: Duration(seconds: 5),
             ),
@@ -573,10 +625,8 @@ class _CallingScreenState extends State<CallingScreen>
           context,
           title: 'Voice service',
           message:
-              'Could not load the Twilio access token from your server '
-              '(${VoiceBackendConfig.baseUrl}/token). '
-              'Ensure the Render app is live and Twilio keys are set.\n\n'
-              '$msg',
+              'Could not connect to the voice service. Check your internet connection '
+              'and try again. If this keeps happening, try again later.',
           icon: Icons.cloud_sync_rounded,
           primaryLabel: 'OK',
           openSettingsOnPrimary: false,
@@ -587,7 +637,7 @@ class _CallingScreenState extends State<CallingScreen>
         await showVoipGateDialog(
           context,
           title: 'Call setup failed',
-          message: msg,
+          message: userFacingServiceError(msg),
           icon: Icons.error_outline_rounded,
           primaryLabel: 'OK',
           openSettingsOnPrimary: false,
@@ -595,7 +645,9 @@ class _CallingScreenState extends State<CallingScreen>
       }
       if (!mounted) return;
       Navigator.of(context).pop(
-        const CallingScreenResult(insufficientCredits: true),
+        const CallingScreenResult(
+          exitReason: CallingScreenExitReason.voipFailure,
+        ),
       );
     }
   }
@@ -606,9 +658,11 @@ class _CallingScreenState extends State<CallingScreen>
     _callSub = null;
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Not enough credits to continue.')),
+        const SnackBar(content: Text('Not enough credits')),
       );
-      await _popWithFirestoreSync(insufficientCredits: true);
+      await _popWithFirestoreSync(
+        exitReason: CallingScreenExitReason.insufficientCredits,
+      );
     }
   }
 
@@ -621,7 +675,7 @@ class _CallingScreenState extends State<CallingScreen>
     await _callSub?.cancel();
     _callSub = null;
     if (mounted) {
-      await _popWithFirestoreSync(insufficientCredits: false);
+      await _popWithFirestoreSync(exitReason: CallingScreenExitReason.ok);
     }
   }
 
@@ -644,9 +698,11 @@ class _CallingScreenState extends State<CallingScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(CallService.instance.syncAfterAppResumed());
+      if (!_isPremium) {
+        unawaited(CallService.instance.syncAfterAppResumed());
+      }
       final sid = _activeCallSid;
-      if (sid != null && sid.isNotEmpty) {
+      if (!_isPremium && sid != null && sid.isNotEmpty) {
         unawaited(CallLiveBillingService.instance.flushPendingTicksForCall(sid));
       }
     }
@@ -661,7 +717,7 @@ class _CallingScreenState extends State<CallingScreen>
       await TwilioVoipFacade.instance.hangUp();
     } catch (_) {}
     if (mounted) {
-      await _popWithFirestoreSync(insufficientCredits: false);
+      await _popWithFirestoreSync(exitReason: CallingScreenExitReason.ok);
     }
   }
 
@@ -670,7 +726,7 @@ class _CallingScreenState extends State<CallingScreen>
     return Stack(
       children: [
         Scaffold(
-          backgroundColor: const Color(0xFF0F172A),
+          backgroundColor: AppTheme.darkBg,
           body: SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
@@ -707,7 +763,7 @@ class _CallingScreenState extends State<CallingScreen>
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 4),
                       child: Text(
-                        'This call uses Twilio VoIP inside TalkFree — not the cellular dialer. '
+                        'This call uses TalkFree internet calling — not the cellular dialer. '
                         'Some phones show the system Phone bar on top; hang up here to end the call.',
                         textAlign: TextAlign.center,
                         style: GoogleFonts.inter(
@@ -834,6 +890,8 @@ class _NeonCreditsBalance extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final unlimited =
+        credits == CreditsPolicy.unlimitedBalanceUiSentinel;
     return AnimatedBuilder(
       animation: pulse,
       builder: (context, child) {
@@ -843,14 +901,18 @@ class _NeonCreditsBalance extends StatelessWidget {
         return Transform.scale(
           scale: scale,
           child: Text(
-            '$credits credits',
-            key: ValueKey<int>(credits),
+            unlimited
+                ? 'Unlimited calling (Pro)'
+                : '$credits credits',
+            key: ValueKey<Object>(unlimited ? 'unlimited' : credits),
             textAlign: TextAlign.center,
+            maxLines: 2,
             style: GoogleFonts.poppins(
-              fontSize: 24,
+              fontSize: unlimited ? 20 : 24,
               fontWeight: FontWeight.w800,
               color: _neon,
-              letterSpacing: 0.8,
+              letterSpacing: unlimited ? 0.4 : 0.8,
+              height: 1.2,
               shadows: [
                 Shadow(
                   color: _neon.withValues(alpha: 0.92),

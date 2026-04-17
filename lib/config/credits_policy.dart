@@ -12,11 +12,14 @@ abstract final class CreditsPolicy {
   /// Default usable balance for a **new** Firestore `users/{uid}` document (strict zero — earn via ads / purchase).
   static const int initialCreditsForNewUser = 0;
 
-  /// Watch this many rewarded ads to earn [creditsPerMinuteGrant] credits (1 min of talk).
-  static const int adsRequiredForMinuteGrant = 4;
+  /// One-time welcome bonus applied by server `POST /claim-welcome-bonus` on first eligible login.
+  static const int welcomeLoginBonusCredits = 10;
 
-  /// Credits granted by the server after every [adsRequiredForMinuteGrant] ads (secured).
-  static const int creditsPerMinuteGrant = 10;
+  /// Credits added per rewarded ad (must match server `REWARD_GRANT_CREDITS`, default 2).
+  static const int creditsPerRewardedAd = 2;
+
+  /// In-call UI: [CallingScreen] uses this balance value to show "Unlimited calling (Pro)" (not a real balance).
+  static const int unlimitedBalanceUiSentinel = -900001;
 
   /// Credits charged per **full minute** of billed talk — **free** users (matches server default).
   static const int creditsPerMinute = 10;
@@ -32,6 +35,10 @@ abstract final class CreditsPolicy {
 
   static int creditsPerMinuteForUser(bool isPremium) =>
       isPremium ? creditsPerMinutePremium : creditsPerMinute;
+
+  /// Free tier per-minute rate minus Pro rate (for “savings” copy on Pro home).
+  static int get creditsSavedPerMinuteVsFree =>
+      creditsPerMinute - creditsPerMinutePremium;
 
   /// First server pulse when the call becomes **Connected** (minimum charge bucket).
   static const int creditsPerCallTick = 10;
@@ -57,18 +64,21 @@ abstract final class CreditsPolicy {
 
   static const int minCreditsToStartCall = callCreditsPerBilledMinute;
 
-  /// Minimum balance to start a call — lower for premium ([creditsPerMinutePremium] connect pulse).
+  /// Minimum balance to start a call — **Pro** users have unlimited calling (no minimum).
   static int minCreditsToStartCallFor(bool isPremium) =>
-      isPremium ? creditsPerMinutePremium : minCreditsToStartCall;
+      isPremium ? 0 : minCreditsToStartCall;
+
+  /// Show low-balance nudges when usable credits fall below this (free tier).
+  static const int lowCreditWarningThreshold = 5;
+
+  /// Consecutive calendar days with ≥1 rewarded ad — milestone bonuses (server `POST /grant-reward`).
+  static const List<int> adStreakMilestoneDays = [3, 7, 14, 30];
 
   /// Must match server `ASSIGN_NUMBER_MIN_CREDITS` (POST `/assign-number`).
   static const int assignNumberMinCredits = 100;
 
   /// Must match server `ASSIGN_NUMBER_MIN_ADS_WATCHED` (lifetime `ads_watched_count`).
   static const int assignNumberMinAdsWatched = 50;
-
-  /// Kept for copy: 4 ads → 10 credits (server grant).
-  static int get adsPerMinute => adsRequiredForMinuteGrant;
 
   /// Must match server `PLAN_*_MS` defaults in `server/index.js` (assign-number lease).
   static int leaseDurationMsForPlanType(String? planType) {

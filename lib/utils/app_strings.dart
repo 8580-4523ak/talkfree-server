@@ -2,6 +2,13 @@
 abstract final class AppStrings {
   AppStrings._();
 
+  /// Shown in system UI / task switcher where [MaterialApp.title] is used.
   static const String appName = 'TalkFree';
-  static const String splashTagline = 'No SIM. No Bill. Just Talk.';
+
+  /// Brand line — About, marketing.
+  static const String brandTagline =
+      'Your Second Identity. Total Privacy. Zero Trace.';
+
+  /// Splash — subtitle (matches marketing mockup casing).
+  static const String splashTagline = 'Call Smart. Pay Less.';
 }

@@ -25,13 +25,23 @@ service cloud.firestore {
           resource.data.email == request.auth.token.email)
       );
       allow create: if request.auth != null && request.auth.uid == userId;
-      // Client may update own profile, but cannot tamper with subscription flag or balance field.
-      // NOTE: The Flutter app currently updates `credits` / `isPremium` in some flows — those writes
-      // will DENY until you route credit changes through Cloud Functions / Admin SDK only, or relax
-      // this rule. Deploy the same text in Firebase Console → Firestore → Rules (not Storage).
+      // Premium + balances: only Firebase Admin / Node (verified Razorpay, grant-reward, billing).
       allow update: if request.auth != null && request.auth.uid == userId
         && request.resource.data.isPremium == resource.data.isPremium
-        && request.resource.data.credits == resource.data.credits;
+        && request.resource.data.subscription_tier == resource.data.subscription_tier
+        && request.resource.data.premium_plan_type == resource.data.premium_plan_type
+        && request.resource.data.credits == resource.data.credits
+        && request.resource.data.paidCredits == resource.data.paidCredits
+        && request.resource.data.rewardCredits == resource.data.rewardCredits
+        && request.resource.data.last_razorpay_payment_id == resource.data.last_razorpay_payment_id
+        && request.resource.data.premiumWelcomeBonusGranted == resource.data.premiumWelcomeBonusGranted
+        && request.resource.data.number_expiry_date == resource.data.number_expiry_date
+        && request.resource.data.premium_subscribed_at == resource.data.premium_subscribed_at
+        && request.resource.data.totalOutboundCalls == resource.data.totalOutboundCalls
+        && request.resource.data.totalCallTalkSeconds == resource.data.totalCallTalkSeconds
+        && request.resource.data.welcomeCallingCreditsGranted == resource.data.welcomeCallingCreditsGranted
+        && request.resource.data.ad_streak_count == resource.data.ad_streak_count
+        && request.resource.data.ad_streak_last_day == resource.data.ad_streak_last_day;
       allow delete: if request.auth != null && request.auth.uid == userId;
 
       match /call_history/{callSid} {

@@ -42,7 +42,7 @@ Future<bool> ensureVoipRuntimePermissions(BuildContext context) async {
     permission: Permission.phone,
     label: 'Phone',
     rationale:
-        'Android needs Phone access so Twilio can register VoIP calls. Allow when the system asks.',
+        'Android needs Phone access so TalkFree can place internet calls. Allow when the system asks.',
   );
 }
 

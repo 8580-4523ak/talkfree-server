@@ -11,6 +11,7 @@ const express = require("express");
 const cors = require("cors");
 const cron = require("node-cron");
 const twilio = require("twilio");
+const Razorpay = require("razorpay");
 
 const {
   TWILIO_ACCOUNT_SID,
@@ -89,6 +90,29 @@ try {
   }
 } catch (e) {
   console.warn("Firebase Admin init failed — /grant-reward disabled:", e.message);
+}
+
+/**
+ * @returns {Promise<string|null>} Firebase Auth uid, or `null` if a 4xx/5xx was already sent.
+ */
+async function getUidFromBearer(req, res) {
+  if (!firebaseAdmin) {
+    res.status(503).json({ error: "Firebase Admin not configured" });
+    return null;
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+    return null;
+  }
+  try {
+    return (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    console.error("verifyIdToken (getUidFromBearer):", e.message);
+    res.status(401).json({ error: "Invalid or expired token" });
+    return null;
+  }
 }
 
 /** Twilio webhooks use `${publicBase}/…` — must NOT end with `/` or you get `…//sms-webhook`. */
@@ -204,30 +228,38 @@ const twimlDialUrl = `${publicBase}/twiml/voice`;
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
-/** Legacy browser/test: GET /call?to= — triggers PSTN; TwiML URL must Dial (see /twiml/voice). */
+/**
+ * GET /call?to= — server-initiated PSTN (legacy / tests).
+ * **Auth:** `Authorization: Bearer <Firebase ID token>` (same as POST /call JSON).
+ */
 app.get("/call", async (req, res) => {
+  const uid = await getUidFromBearer(req, res);
+  if (!uid) return;
   try {
     const to = req.query.to;
-
     if (!to) {
-      return res.send("Missing ?to= number");
+      return res.status(400).send("Missing ?to= number");
     }
-
     await twilioClient.calls.create({
       to: String(to).trim(),
       from: process.env.TWILIO_CALLER_ID,
       url: twimlDialUrl,
     });
-
     res.send("Call triggered successfully");
   } catch (err) {
     console.error(err);
-    res.send("Error: " + err.message);
+    res.status(500).send("Error: " + err.message);
   }
 });
 
-app.get("/token", (req, res) => {
-  const identity = String(req.query.identity || "anonymous").slice(0, 128);
+/**
+ * GET /token — Twilio Voice SDK access JWT.
+ * **Auth:** `Authorization: Bearer <Firebase ID token>`. Identity is always the token uid (client cannot spoof).
+ */
+app.get("/token", async (req, res) => {
+  const uid = await getUidFromBearer(req, res);
+  if (!uid) return;
+  const identity = String(uid).slice(0, 128);
   const token = new AccessToken(
     TWILIO_ACCOUNT_SID,
     TWILIO_API_KEY_SID,
@@ -243,8 +275,10 @@ app.get("/token", (req, res) => {
 });
 
 app.post("/call", async (req, res) => {
-  // Mobile app: JSON `{ "to": "+..." }` — server-initiated PSTN (optional; Voice SDK uses TwiML App POST below).
+  // Mobile app: JSON `{ "to": "+..." }` — server-initiated PSTN (optional; Voice SDK uses form branch below).
   if (req.is("application/json")) {
+    const uid = await getUidFromBearer(req, res);
+    if (!uid) return;
     const toRaw = req.body && (req.body.to ?? req.body.To);
     if (toRaw == null || String(toRaw).trim() === "") {
       return res.status(400).json({ error: "Missing JSON field: to" });
@@ -269,13 +303,32 @@ app.post("/call", async (req, res) => {
   res.send(voiceResponseDialPstn(to).toString());
 });
 
-const REWARD_GRANT_CREDITS = Number(process.env.REWARD_GRANT_CREDITS || 10);
+const REWARD_GRANT_CREDITS = Number(process.env.REWARD_GRANT_CREDITS || 2);
 const MAX_ADS_PER_DAY = 24;
 const AD_GAP_SECONDS = 20;
 
 function utcDayKey(d = new Date()) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
+
+/** Add calendar days to a `utcDayKey` string (YYYY-MM-DD). */
+function utcDayKeyAddDays(dayKey, deltaDays) {
+  const parts = String(dayKey).split("-");
+  if (parts.length !== 3) return dayKey;
+  const y = Number(parts[0]);
+  const mo = Number(parts[1]) - 1;
+  const da = Number(parts[2]);
+  const dt = new Date(Date.UTC(y, mo, da + deltaDays));
+  return utcDayKey(dt);
+}
+
+/** Bonus reward credits when [ad_streak_count] hits these days (first ad of that UTC day). */
+const AD_STREAK_MILESTONE_BONUS = {
+  3: 5,
+  7: 10,
+  14: 25,
+  30: 50,
+};
 
 function readAdsWatchedToday(d, dayKey) {
   const reset = d.last_reset_date || d.adRewardsDayKey || "";
@@ -333,12 +386,13 @@ app.get("/grant-reward", (_req, res) => {
 /**
  * POST /grant-reward — secured ad rewards (Flutter: GrantRewardService).
  * - Verifies Firebase ID token → uid.
- * - Increments progress each successful request: internal counter 1→2→3→4; on the 4th ad
- *   (`ad_progress` / `ad_sub_counter` cycle completes), adds REWARD_GRANT_CREDITS (default 10) and resets progress to 0.
- * - Mirrors legacy fields: `adRewardCycleCount`, `adRewardsCount`, etc.
+ * - Each successful request adds REWARD_GRANT_CREDITS (default 2) to reward credits — **1 ad = 1 grant**.
+ * - Legacy cycle fields (`ad_sub_counter`, `ad_progress`) are cleared to 0 each time.
  * - Daily cap: max 24 ads / UTC day (`ads_watched_today`).
  * - Lifetime rewarded views: `ads_watched_count` += 1 each successful grant (Flutter unlock US number).
  * - Cooldown: must be ≥20s since `last_ad_timestamp` / `lastAdRewardAt` or returns **Wait** (429).
+ * - Streak: consecutive UTC days with ≥1 rewarded ad — `ad_streak_count` / `ad_streak_last_day`;
+ *   milestone bonuses added to the same grant (see AD_STREAK_MILESTONE_BONUS).
  */
 app.post("/grant-reward", async (req, res) => {
   if (!firebaseAdmin) {
@@ -363,7 +417,15 @@ app.post("/grant-reward", async (req, res) => {
   const { FieldValue, Timestamp } = firebaseAdmin.firestore;
   const db = firebaseAdmin.firestore();
 
-  let out = { ok: true, creditsAdded: 0, adSubCounter: 0, adsWatchedToday: 0 };
+  let out = {
+    ok: true,
+    creditsAdded: 0,
+    baseCredits: 0,
+    streakBonus: 0,
+    streakCount: 0,
+    adSubCounter: 0,
+    adsWatchedToday: 0,
+  };
 
   try {
     await db.runTransaction(async (t) => {
@@ -394,13 +456,24 @@ app.post("/grant-reward", async (req, res) => {
         }
       }
 
-      let sub = readAdSubCounter(d);
-      sub += 1;
-      let creditsAdded = 0;
-      if (sub === 4) {
-        sub = 0;
-        creditsAdded = REWARD_GRANT_CREDITS;
+      const baseCredits = REWARD_GRANT_CREDITS;
+
+      const lastStreakDay = String(d.ad_streak_last_day || "");
+      let streakCount = Number(d.ad_streak_count || 0);
+      let streakBonus = 0;
+
+      if (lastStreakDay !== dayKey) {
+        const yesterdayKey = utcDayKeyAddDays(dayKey, -1);
+        if (lastStreakDay === yesterdayKey) {
+          streakCount += 1;
+        } else {
+          streakCount = 1;
+        }
+        const mb = AD_STREAK_MILESTONE_BONUS[streakCount];
+        if (mb != null) streakBonus = mb;
       }
+
+      const creditsAdded = baseCredits + streakBonus;
 
       const adsTodayNew = adsToday + 1;
 
@@ -416,9 +489,7 @@ app.post("/grant-reward", async (req, res) => {
         reward = 0;
       }
 
-      if (creditsAdded > 0) {
-        reward += creditsAdded;
-      }
+      reward += creditsAdded;
 
       let rewardExp = null;
       if (reward > 0) {
@@ -432,9 +503,9 @@ app.post("/grant-reward", async (req, res) => {
       }
 
       const patch = {
-        ad_sub_counter: sub,
-        ad_progress: sub,
-        adRewardCycleCount: sub,
+        ad_sub_counter: 0,
+        ad_progress: 0,
+        adRewardCycleCount: 0,
         ads_watched_today: adsTodayNew,
         adRewardsCount: adsTodayNew,
         /** Lifetime total — Flutter reads `ads_watched_count` for US number unlock (50 ads). */
@@ -443,11 +514,18 @@ app.post("/grant-reward", async (req, res) => {
         adRewardsDayKey: storedDay,
         last_ad_timestamp: FieldValue.serverTimestamp(),
         lastAdRewardAt: FieldValue.serverTimestamp(),
+        ad_streak_count: streakCount,
+        ad_streak_last_day: lastStreakDay === dayKey ? lastStreakDay : dayKey,
         paidCredits: paid,
         rewardCredits: reward,
         rewardCreditsExpiresAt: rewardExp,
         credits: paid + reward,
       };
+
+      if (lastStreakDay === dayKey) {
+        delete patch.ad_streak_count;
+        delete patch.ad_streak_last_day;
+      }
 
       if (creditsAdded > 0) {
         patch.last_grant_reward_at = FieldValue.serverTimestamp();
@@ -462,7 +540,10 @@ app.post("/grant-reward", async (req, res) => {
       out = {
         ok: true,
         creditsAdded,
-        adSubCounter: sub,
+        baseCredits,
+        streakBonus,
+        streakCount,
+        adSubCounter: 0,
         adsWatchedToday: adsTodayNew,
       };
     });
@@ -483,6 +564,508 @@ app.post("/grant-reward", async (req, res) => {
   }
   return res.status(200).json(out);
 });
+
+/** One-time login bonus (paid bucket); idempotent via `welcomeCallingCreditsGranted`. */
+const WELCOME_LOGIN_BONUS = Number(process.env.WELCOME_LOGIN_BONUS || 10);
+
+app.post("/claim-welcome-bonus", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  const { FieldValue } = firebaseAdmin.firestore;
+  const db = firebaseAdmin.firestore();
+
+  try {
+    let granted = false;
+    let balance = 0;
+    await db.runTransaction(async (t) => {
+      const ref = db.collection("users").doc(uid);
+      const doc = await t.get(ref);
+      if (!doc.exists) {
+        throw Object.assign(new Error("User missing"), { http: 404 });
+      }
+      const d = doc.data();
+      if (d.welcomeCallingCreditsGranted === true) {
+        balance = usableCreditsFromUserDoc(d);
+        return;
+      }
+      let paid = Number(d.paidCredits ?? 0);
+      let reward = Number(d.rewardCredits ?? 0);
+      if (d.paidCredits === undefined && d.credits != null) {
+        paid = Number(d.credits);
+        reward = 0;
+      }
+      const now = new Date();
+      const expTs = d.rewardCreditsExpiresAt;
+      if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+        paid += reward;
+        reward = 0;
+      }
+      paid += WELCOME_LOGIN_BONUS;
+      granted = true;
+      balance = paid + reward;
+      t.update(ref, {
+        paidCredits: paid,
+        rewardCredits: reward,
+        rewardCreditsExpiresAt: reward > 0 ? expTs : null,
+        credits: balance,
+        welcomeCallingCreditsGranted: true,
+        welcome_bonus_granted_at: FieldValue.serverTimestamp(),
+      });
+    });
+    return res.status(200).json({ ok: true, granted, balance });
+  } catch (e) {
+    const code = e.http || 500;
+    if (code === 404) {
+      return res.status(404).json({ error: "User missing" });
+    }
+    console.error("/claim-welcome-bonus:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+/** Matches Flutter `_planCheckouts` amounts (INR paise / USD cents). */
+const SUBSCRIPTION_PLAN_AMOUNTS_INR = {
+  daily: 8300,
+  weekly: 41500,
+  monthly: 124900,
+  yearly: 829900,
+};
+const SUBSCRIPTION_PLAN_AMOUNTS_USD = {
+  daily: 99,
+  weekly: 499,
+  monthly: 1499,
+  yearly: 9999,
+};
+
+const PREMIUM_WELCOME_BONUS = Number(process.env.PREMIUM_WELCOME_BONUS || 1000);
+
+function subscriptionExpiryFromPlan(plan) {
+  const now = Date.now();
+  switch (plan) {
+    case "daily":
+      return new Date(now + 86400000);
+    case "weekly":
+      return new Date(now + 604800000);
+    case "monthly":
+      return new Date(now + 2592000000);
+    case "yearly":
+      return new Date(now + 31536000000);
+    default:
+      return new Date(now + 2592000000);
+  }
+}
+
+function verifyRazorpayPaymentSignature(orderId, paymentId, signature, secret) {
+  const body = String(orderId) + "|" + String(paymentId);
+  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  const sig = String(signature ?? "").trim();
+  if (expected.length !== sig.length) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected, "utf8"), Buffer.from(sig, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+let _rzpSingleton = null;
+function getRazorpaySdk() {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !String(keyId).trim() || !keySecret || !String(keySecret).trim()) {
+    return null;
+  }
+  if (!_rzpSingleton) {
+    _rzpSingleton = new Razorpay({
+      key_id: String(keyId).trim(),
+      key_secret: String(keySecret).trim(),
+    });
+  }
+  return _rzpSingleton;
+}
+
+/**
+ * POST /create-subscription-order — Firebase Bearer; body `{ "plan": "daily"|… }`.
+ * Creates a Razorpay Order; Flutter opens Checkout with `order_id` + returned amount.
+ */
+app.post("/create-subscription-order", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured (set FIREBASE_SERVICE_ACCOUNT_JSON)" });
+  }
+  const rzp = getRazorpaySdk();
+  if (!rzp) {
+    return res.status(503).json({
+      error: "Razorpay not configured on server (set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)",
+    });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    console.error("verifyIdToken (create-subscription-order):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  const plan = normalizePlanType(req.body && req.body.plan);
+  if (!plan) {
+    return res.status(400).json({
+      error: "Missing or invalid plan",
+      expected: ["daily", "weekly", "monthly", "yearly"],
+    });
+  }
+  const currency = String(process.env.RAZORPAY_CURRENCY || "INR")
+    .trim()
+    .toUpperCase();
+  const amount =
+    currency === "USD"
+      ? SUBSCRIPTION_PLAN_AMOUNTS_USD[plan]
+      : SUBSCRIPTION_PLAN_AMOUNTS_INR[plan];
+  if (amount == null || !Number.isFinite(amount)) {
+    return res.status(500).json({ error: "Unknown amount for plan/currency" });
+  }
+  const keyId = String(process.env.RAZORPAY_KEY_ID).trim();
+  const receipt = `tf_${uid.slice(0, 12)}_${plan}_${Date.now()}`.slice(0, 40);
+  try {
+    const order = await rzp.orders.create({
+      amount,
+      currency,
+      receipt,
+      notes: {
+        firebase_uid: uid,
+        plan_key: plan,
+      },
+    });
+    return res.status(200).json({
+      orderId: order.id,
+      amount: Number(order.amount),
+      currency: order.currency,
+      keyId,
+    });
+  } catch (e) {
+    console.error("create-subscription-order:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+/**
+ * POST /verify-payment — Firebase Bearer; body:
+ * `{ "razorpay_payment_id", "razorpay_order_id", "razorpay_signature" }`
+ * Verifies HMAC (official Razorpay method), fetches payment + order from Razorpay, updates Firestore via Admin only.
+ */
+app.post("/verify-payment", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured (set FIREBASE_SERVICE_ACCOUNT_JSON)" });
+  }
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keySecret || !String(keySecret).trim()) {
+    return res.status(503).json({ error: "RAZORPAY_KEY_SECRET not set on server" });
+  }
+  const rzp = getRazorpaySdk();
+  if (!rzp) {
+    return res.status(503).json({ error: "Razorpay SDK not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    console.error("verifyIdToken (verify-payment):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  const razorpay_payment_id = String(req.body?.razorpay_payment_id ?? "").trim();
+  const razorpay_order_id = String(req.body?.razorpay_order_id ?? "").trim();
+  const razorpay_signature = String(req.body?.razorpay_signature ?? "").trim();
+  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
+    return res.status(400).json({
+      error: "Missing razorpay_payment_id, razorpay_order_id, or razorpay_signature",
+    });
+  }
+
+  if (!verifyRazorpayPaymentSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature, String(keySecret).trim())) {
+    return res.status(400).json({ error: "Invalid payment signature" });
+  }
+
+  let payment;
+  try {
+    payment = await rzp.payments.fetch(razorpay_payment_id);
+  } catch (e) {
+    console.error("verify-payment fetch payment:", e);
+    return res.status(502).json({ error: "Could not verify payment with Razorpay" });
+  }
+  if (String(payment.order_id || "") !== razorpay_order_id) {
+    return res.status(400).json({ error: "Payment does not match order" });
+  }
+  const okStatus = payment.status === "authorized" || payment.status === "captured";
+  if (!okStatus) {
+    return res.status(400).json({ error: `Payment not successful (status=${payment.status})` });
+  }
+
+  let order;
+  try {
+    order = await rzp.orders.fetch(razorpay_order_id);
+  } catch (e) {
+    console.error("verify-payment fetch order:", e);
+    return res.status(400).json({ error: "Could not load order" });
+  }
+  const notes = order.notes || {};
+  if (String(notes.firebase_uid || "") !== uid) {
+    return res.status(403).json({ error: "Order does not belong to this user" });
+  }
+  const plan = normalizePlanType(notes.plan_key);
+  if (!plan) {
+    return res.status(400).json({ error: "Invalid order metadata (plan)" });
+  }
+  const currency = String(process.env.RAZORPAY_CURRENCY || "INR")
+    .trim()
+    .toUpperCase();
+  const expectedAmount =
+    currency === "USD"
+      ? SUBSCRIPTION_PLAN_AMOUNTS_USD[plan]
+      : SUBSCRIPTION_PLAN_AMOUNTS_INR[plan];
+  if (Number(payment.amount) !== expectedAmount) {
+    return res.status(400).json({ error: "Amount mismatch for plan" });
+  }
+  if (String(payment.currency || "").toUpperCase() !== currency) {
+    return res.status(400).json({ error: "Currency mismatch" });
+  }
+
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  const { FieldValue, Timestamp } = firebaseAdmin.firestore;
+
+  try {
+    const out = await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) {
+        throw Object.assign(new Error("User document not found"), { http: 404 });
+      }
+      const d = snap.data() || {};
+      const existingPid = String(d.last_razorpay_payment_id ?? "").trim();
+      if (existingPid && existingPid === razorpay_payment_id) {
+        return { ok: true, idempotent: true, plan };
+      }
+
+      let paid = Number(d.paidCredits ?? 0);
+      let reward = Number(d.rewardCredits ?? 0);
+      if (d.paidCredits === undefined && d.credits != null) {
+        paid = Number(d.credits);
+        reward = 0;
+      }
+      const expTs = d.rewardCreditsExpiresAt;
+      const now = new Date();
+      if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+        paid += reward;
+        reward = 0;
+      }
+      let bonus = 0;
+      if (d.premiumWelcomeBonusGranted !== true && PREMIUM_WELCOME_BONUS > 0) {
+        bonus = PREMIUM_WELCOME_BONUS;
+        paid += bonus;
+      }
+      const total = paid + reward;
+      const expDate = subscriptionExpiryFromPlan(plan);
+      t.update(ref, {
+        isPremium: true,
+        subscription_tier: "pro",
+        premium_plan_type: plan,
+        number_expiry_date: Timestamp.fromDate(expDate),
+        premium_subscribed_at: FieldValue.serverTimestamp(),
+        last_razorpay_payment_id: razorpay_payment_id,
+        premiumWelcomeBonusGranted: true,
+        paidCredits: paid,
+        rewardCredits: reward,
+        rewardCreditsExpiresAt: reward > 0 ? expTs : null,
+        credits: total,
+      });
+      return { ok: true, idempotent: false, plan, welcomeBonus: bonus };
+    });
+    return res.status(200).json(out);
+  } catch (e) {
+    const code = e.http || 500;
+    console.error("verify-payment tx:", e);
+    return res.status(code >= 400 && code < 600 ? code : 500).json({
+      error: String(e.message || e),
+    });
+  }
+});
+
+const BROWSE_NUMBER_PRICE = Number(process.env.BROWSE_NUMBER_PRICE || 500);
+
+/**
+ * POST /purchase-browse-number — Firebase Bearer; body `{ "phoneNumber": "+1…", "price": <int> }`.
+ * Replaces client-side Firestore credit deduction + Twilio purchase (must match [BROWSE_NUMBER_PRICE]).
+ * Alias: POST /purchase-number
+ */
+async function handlePurchaseBrowseNumber(req, res) {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    console.error("verifyIdToken (purchase-browse-number):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  const priceReq = Number(req.body && req.body.price);
+  if (!Number.isFinite(priceReq) || priceReq !== BROWSE_NUMBER_PRICE) {
+    return res.status(400).json({ error: "Invalid or mismatched price", expected: BROWSE_NUMBER_PRICE });
+  }
+  let phonePick;
+  try {
+    phonePick = normalizeUsE164OrThrow(req.body && req.body.phoneNumber);
+  } catch (e) {
+    return res.status(e.http || 400).json({ error: String(e.message || e) });
+  }
+
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  const snap = await ref.get();
+  if (!snap.exists) {
+    return res.status(404).json({ error: "User document not found" });
+  }
+  const d = snap.data() || {};
+  const usable = usableCreditsFromUserDoc(d);
+  if (usable < BROWSE_NUMBER_PRICE) {
+    return res.status(402).json({
+      error: "Insufficient credits",
+      requiredCredits: BROWSE_NUMBER_PRICE,
+      usableCredits: usable,
+    });
+  }
+
+  let incoming;
+  try {
+    incoming = await purchaseIncomingUsLocal(uid, phonePick);
+  } catch (e) {
+    console.error("purchase-browse-number Twilio:", e);
+    if (isTwilioNumberUnavailableError(e)) {
+      return res.status(409).json({
+        error: "NUMBER_UNAVAILABLE",
+        message: "Oops! This number was just taken. Please pick another one.",
+      });
+    }
+    const status = Number(e.status);
+    const http =
+      e.http != null
+        ? Number(e.http)
+        : Number.isFinite(status) && status >= 400 && status < 600
+          ? status
+          : 502;
+    return res.status(http).json({ error: String(e.message || e) });
+  }
+
+  const e164 = String(incoming.phoneNumber || "").trim();
+  if (!e164) {
+    return res.status(500).json({ error: "Twilio returned empty phone number" });
+  }
+
+  const { FieldValue, Timestamp } = firebaseAdmin.firestore;
+  const now = new Date();
+  let freshSnap;
+  try {
+    freshSnap = await ref.get();
+  } catch (e) {
+    console.error("purchase-browse-number re-get:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+  const d2 = freshSnap.exists ? freshSnap.data() || {} : {};
+  let paid = Number(d2.paidCredits ?? 0);
+  let reward = Number(d2.rewardCredits ?? 0);
+  const expTs = d2.rewardCreditsExpiresAt;
+  if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+    paid += reward;
+    reward = 0;
+  }
+  if (d2.paidCredits === undefined && d2.credits != null) {
+    paid = Number(d2.credits);
+    reward = 0;
+  }
+  const deduct = BROWSE_NUMBER_PRICE;
+  const usable2 = paid + reward;
+  if (usable2 < deduct) {
+    console.error("purchase-browse-number post-Twilio balance shortfall", uid, usable2, deduct);
+    return res.status(409).json({
+      error: "Balance changed during purchase — contact support if charged.",
+      twilioIncomingPhoneSid: incoming.sid,
+      phoneNumber: e164,
+    });
+  }
+  let left = deduct;
+  const takeReward = left < reward ? left : reward;
+  reward -= takeReward;
+  left -= takeReward;
+  paid -= left;
+  let rewardExpOut = null;
+  if (reward > 0) {
+    rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+  }
+  const totalOut = paid + reward;
+
+  try {
+    await ref.update({
+      assigned_number: e164,
+      virtual_number: e164,
+      allocatedNumber: e164,
+      number: e164,
+      twilioIncomingPhoneSid: incoming.sid,
+      twilioPhoneNumberSid: incoming.sid,
+      twilioNumberAssignedAt: FieldValue.serverTimestamp(),
+      paidCredits: paid,
+      rewardCredits: reward,
+      rewardCreditsExpiresAt: rewardExpOut,
+      credits: totalOut,
+    });
+  } catch (e) {
+    console.error("purchase-browse-number Firestore update:", e);
+    return res.status(500).json({
+      error: String(e.message || e),
+      warning:
+        "Twilio number was purchased but profile update failed — check Twilio Console and Firestore manually.",
+      twilioIncomingPhoneSid: incoming.sid,
+      phoneNumber: e164,
+    });
+  }
+
+  return res.status(200).json({
+    ok: true,
+    assigned_number: e164,
+    twilioIncomingPhoneSid: incoming.sid,
+    creditsDeducted: deduct,
+    newBalance: totalOut,
+  });
+}
+
+app.post("/purchase-browse-number", handlePurchaseBrowseNumber);
+app.post("/purchase-number", handlePurchaseBrowseNumber);
 
 /** Constant-time compare for [ADMIN_SECRET_KEY] (mitigate timing leaks on guessable lengths). */
 function adminSecretMatches(provided, expected) {
@@ -706,6 +1289,54 @@ async function searchAvailableUsLocalVoiceSmsMms(opts = {}) {
   return twilioClient.availablePhoneNumbers("US").local.list(params);
 }
 
+/**
+ * Premium-only search: Local or Mobile inventory for an ISO country (default US).
+ * @param {{ country: string, numberType: 'local'|'mobile', areaCode?: string }} opts
+ */
+async function searchAvailableNumbersPremium(opts = {}) {
+  const country = String(opts.country || "US")
+    .trim()
+    .toUpperCase();
+  const numberType = String(opts.numberType || "local")
+    .trim()
+    .toLowerCase();
+  const params = {
+    limit: 20,
+    voiceEnabled: true,
+    smsEnabled: true,
+  };
+  const ac = opts.areaCode != null ? String(opts.areaCode).trim() : "";
+  if (/^\d{3}$/.test(ac)) {
+    params.areaCode = ac;
+  }
+
+  const api = twilioClient.availablePhoneNumbers(country);
+  if (numberType === "mobile") {
+    return api.mobile.list(params);
+  }
+  if (country === "US") {
+    params.mmsEnabled = true;
+    if (!params.areaCode && Number.isFinite(ASSIGN_NUMBER_AREA_CODE)) {
+      params.areaCode = ASSIGN_NUMBER_AREA_CODE;
+    }
+  }
+  return api.local.list(params);
+}
+
+/** Map Twilio available-number instance to API JSON (phoneNumber, isoCountry, capabilities). */
+function mapTwilioAvailableNumber(n, isoCountry) {
+  const c = n.capabilities || {};
+  return {
+    phoneNumber: n.phoneNumber,
+    isoCountry,
+    capabilities: {
+      voice: !!c.voice,
+      sms: !!(c.SMS || c.sms),
+      mms: !!(c.MMS || c.mms),
+    },
+  };
+}
+
 /** Inbound PSTN call to a purchased TalkFree number — simple placeholder TwiML. */
 app.all("/voice-inbound-number", (req, res) => {
   const vr = new twilio.twiml.VoiceResponse();
@@ -839,6 +1470,314 @@ app.get("/available-numbers", async (req, res) => {
     console.error("GET /available-numbers:", e);
     return res.status(500).json({ error: String(e.message || e) });
   }
+});
+
+const AVAILABLE_LOCAL_PATH_PREFIX = `/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/AvailablePhoneNumbers/`;
+
+/**
+ * Normalize Twilio `next_page_uri` (path+query) or full `https://api.twilio.com/...` URL for pagination.
+ * Rejects paths outside this account’s AvailablePhoneNumbers API.
+ */
+function normalizeBrowseInventoryNextPage(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  try {
+    let pathQuery;
+    if (/^https:\/\//i.test(s)) {
+      const u = new URL(s);
+      if (u.hostname !== "api.twilio.com") return null;
+      pathQuery = u.pathname + (u.search || "");
+    } else {
+      const decoded = decodeURIComponent(s);
+      pathQuery = decoded.startsWith("/") ? decoded : `/${decoded}`;
+    }
+    if (pathQuery.includes("..")) return null;
+    if (!pathQuery.startsWith(AVAILABLE_LOCAL_PATH_PREFIX)) return null;
+    return pathQuery;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * GET /browse-available-numbers — US/CA local Twilio inventory (paginated). Server-side only; no Twilio secrets in the app.
+ * **Auth:** `Authorization: Bearer <Firebase ID token>`.
+ * Query: `country`=US|CA, optional `pageSize`, `areaCode`, `contains`, `inRegion`, `nextPage` (opaque path from prior response).
+ */
+app.get("/browse-available-numbers", async (req, res) => {
+  const uid = await getUidFromBearer(req, res);
+  if (!uid) return;
+  const country = String(req.query.country || "US")
+    .trim()
+    .toUpperCase();
+  if (country !== "US" && country !== "CA") {
+    return res.status(400).json({ error: "country must be US or CA" });
+  }
+  const nextNorm = normalizeBrowseInventoryNextPage(req.query.nextPage);
+  let requestUrl;
+  if (nextNorm) {
+    requestUrl = `https://api.twilio.com${nextNorm}`;
+  } else {
+    const pageSize = Math.min(1000, Math.max(1, Number(req.query.pageSize) || 100));
+    const params = new URLSearchParams();
+    params.set("PageSize", String(pageSize));
+    const ac = String(req.query.areaCode ?? "")
+      .trim()
+      .replace(/\D/g, "");
+    if (ac.length >= 3) {
+      params.set("AreaCode", ac.substring(0, 3));
+    }
+    const rawContains = String(req.query.contains ?? "")
+      .trim()
+      .replace(/\D/g, "");
+    if (rawContains.length > 0) {
+      params.set(
+        "Contains",
+        rawContains.length > 7 ? rawContains.substring(0, 7) : rawContains,
+      );
+    }
+    const reg = String(req.query.inRegion ?? "").trim();
+    if (reg.length > 0) {
+      params.set("InRegion", reg.length <= 2 ? reg.toUpperCase() : reg);
+    }
+    requestUrl = `https://api.twilio.com${AVAILABLE_LOCAL_PATH_PREFIX}${country}/Local.json?${params.toString()}`;
+  }
+  const basic = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+  try {
+    const r = await fetch(requestUrl, {
+      headers: { Authorization: `Basic ${basic}`, Accept: "application/json" },
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      console.error("browse-available-numbers Twilio HTTP", r.status, text.slice(0, 500));
+      return res.status(502).json({
+        error: "Twilio inventory request failed",
+        status: r.status,
+      });
+    }
+    let decoded;
+    try {
+      decoded = JSON.parse(text);
+    } catch (e) {
+      return res.status(502).json({ error: "Invalid JSON from Twilio" });
+    }
+    const list = decoded.available_phone_numbers || [];
+    const nextRaw = decoded.next_page_uri;
+    let nextPage = null;
+    if (nextRaw && String(nextRaw).trim()) {
+      const nr = String(nextRaw).trim();
+      try {
+        const pq = nr.startsWith("http") ? new URL(nr).pathname + new URL(nr).search : nr;
+        nextPage = pq.startsWith("/") ? pq : `/${pq}`;
+      } catch (_) {
+        nextPage = null;
+      }
+    }
+    const numbers = list.map((item) => ({
+      phoneNumber: item.phone_number,
+      locality: item.locality || null,
+      region: item.region || null,
+      friendlyName: item.friendly_name || null,
+      postalCode: item.postal_code || null,
+      country,
+    }));
+    return res.status(200).json({
+      ok: true,
+      country,
+      numbers,
+      nextPage,
+    });
+  } catch (e) {
+    console.error("GET /browse-available-numbers:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+/**
+ * GET /api/twilio/available-numbers — Premium OR ad-unlock (lifetime ads ≥ ASSIGN_NUMBER_MIN_ADS_WATCHED).
+ * Local or Mobile inventory by country.
+ * Authorization: Bearer <Firebase ID token>.
+ * Query: country=US (ISO 3166-1 alpha-2), numberType=local|mobile, optional areaCode=415
+ */
+app.get("/api/twilio/available-numbers", async (req, res) => {
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    console.error("verifyIdToken (api/twilio/available-numbers):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  try {
+    const snap = await firebaseAdmin.firestore().collection("users").doc(uid).get();
+    const d = snap.data() || {};
+    const premium = readIsPremium(d);
+    const adsOk = readLifetimeAdsWatched(d) >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
+    if (!premium && !adsOk) {
+      return res.status(403).json({
+        error: "Eligibility required",
+        message:
+          "Browse available numbers after subscribing or completing the rewarded-ad unlock progress.",
+      });
+    }
+  } catch (e) {
+    console.error("GET /api/twilio/available-numbers firestore:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+
+  const country =
+    req.query.country != null ? String(req.query.country).trim().toUpperCase() : "US";
+  const numberType =
+    req.query.numberType != null
+      ? String(req.query.numberType).trim().toLowerCase()
+      : "local";
+  if (!/^[A-Z]{2}$/.test(country)) {
+    return res.status(400).json({
+      error: "Invalid country — use ISO 3166-1 alpha-2, e.g. US",
+    });
+  }
+  if (numberType !== "local" && numberType !== "mobile") {
+    return res.status(400).json({
+      error: "Invalid numberType — use local or mobile",
+    });
+  }
+
+  try {
+    const areaCode = req.query.areaCode != null ? String(req.query.areaCode).trim() : "";
+    const list = await searchAvailableNumbersPremium({
+      country,
+      numberType,
+      areaCode: /^\d{3}$/.test(areaCode) ? areaCode : "",
+    });
+    const numbers = list.map((n) => mapTwilioAvailableNumber(n, country));
+    return res.status(200).json({
+      ok: true,
+      country,
+      numberType,
+      count: numbers.length,
+      numbers,
+    });
+  } catch (e) {
+    console.error("GET /api/twilio/available-numbers twilio:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+/**
+ * POST /api/twilio/provision-number — premium only; purchase a specific US E.164 and update Firestore.
+ * Body: `{ "phoneNumber": "+1…" }`
+ * Authorization: Bearer &lt;Firebase ID token&gt;
+ *
+ * Buys the line via Twilio `incomingPhoneNumbers.create` (see [purchaseIncomingUsLocal]: `phoneNumber` plus SMS/Voice webhooks).
+ * On Twilio failure, responds **400** with Twilio’s message in `error`.
+ */
+app.post("/api/twilio/provision-number", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    console.error("verifyIdToken (api/twilio/provision-number):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  const phoneRaw =
+    req.body && req.body.phoneNumber != null
+      ? String(req.body.phoneNumber).trim().replace(/\s/g, "")
+      : "";
+  if (!phoneRaw) {
+    return res.status(400).json({ error: "Missing phoneNumber in JSON body" });
+  }
+
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  const { FieldValue } = firebaseAdmin.firestore;
+
+  let snap;
+  try {
+    snap = await ref.get();
+  } catch (e) {
+    console.error("POST /api/twilio/provision-number get user:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+  if (!snap.exists) {
+    return res.status(404).json({ error: "User document not found" });
+  }
+
+  const d = snap.data() || {};
+  if (!readIsPremium(d)) {
+    return res.status(403).json({
+      error: "Premium required",
+      message: "Only premium users can provision a number via this endpoint.",
+    });
+  }
+
+  const existingAssigned = String(d.assigned_number ?? "").trim();
+  if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
+    return res.status(409).json({
+      error: "Already assigned",
+      message: "This account already has an assigned number.",
+      assigned_number: existingAssigned,
+    });
+  }
+
+  let incoming;
+  try {
+    incoming = await purchaseIncomingUsLocal(uid, phoneRaw);
+  } catch (e) {
+    console.error("POST /api/twilio/provision-number Twilio:", e);
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+
+  const e164 = String(incoming.phoneNumber || "").trim();
+  if (!e164) {
+    return res.status(400).json({ error: "Twilio returned empty phone number" });
+  }
+
+  try {
+    await ref.update({
+      assigned_number: e164,
+      virtual_number: e164,
+      allocatedNumber: e164,
+      number: e164,
+      twilioIncomingPhoneSid: incoming.sid,
+      twilioPhoneNumberSid: incoming.sid,
+      twilioNumberAssignedAt: FieldValue.serverTimestamp(),
+      number_assigned_at: FieldValue.serverTimestamp(),
+      number_status: "active",
+    });
+  } catch (e) {
+    console.error("POST /api/twilio/provision-number Firestore:", e);
+    return res.status(500).json({
+      error: String(e.message || e),
+      warning:
+        "Twilio number was purchased but profile update failed — check Twilio Console and Firestore manually.",
+      twilioIncomingPhoneSid: incoming.sid,
+      phoneNumber: e164,
+    });
+  }
+
+  return res.status(200).json({
+    ok: true,
+    assigned_number: e164,
+    twilioIncomingPhoneSid: incoming.sid,
+    number_status: "active",
+  });
 });
 
 app.get("/assign-number", (_req, res) => {
@@ -1287,9 +2226,8 @@ async function settleOutboundCallBill({
     const d = userSnap.data();
     const tickUnits = Math.ceil(ds / 6);
     const premium = readIsPremium(d);
-    const billCredits = premium
-      ? Math.max(0, Math.ceil((tickUnits * CALL_CREDITS_PER_MINUTE_PREMIUM) / CALL_CREDITS_PER_MINUTE))
-      : tickUnits;
+    /** Pro: no per-call credit charge (unlimited calling). */
+    const billCredits = premium ? 0 : tickUnits;
     let paid = Number(d.paidCredits ?? 0);
     let reward = Number(d.rewardCredits ?? 0);
     const now = new Date();
@@ -1344,6 +2282,8 @@ async function settleOutboundCallBill({
       rewardCredits: reward,
       rewardCreditsExpiresAt: rewardExpOut,
       credits: totalCreditsOut,
+      totalOutboundCalls: FieldValue.increment(1),
+      totalCallTalkSeconds: FieldValue.increment(ds),
     });
 
     t.set(
@@ -1351,6 +2291,7 @@ async function settleOutboundCallBill({
       {
         firebaseUid: uid,
         callSid,
+        direction: "outgoing",
         twilioCallStatus: String(twilioCallStatus || "completed"),
         durationSeconds: ds,
         billedSixSecondTicks: tickUnits,
@@ -1435,6 +2376,11 @@ app.post("/call-live-tick", async (req, res) => {
   }
 
   const db = firebaseAdmin.firestore();
+  const premiumSnap = await db.collection("users").doc(uid).get();
+  if (premiumSnap.exists && readIsPremium(premiumSnap.data())) {
+    return res.status(200).json({ ok: true, unlimited: true });
+  }
+
   const { FieldValue } = firebaseAdmin.firestore;
 
   try {
@@ -1447,10 +2393,7 @@ app.post("/call-live-tick", async (req, res) => {
       }
 
       const d = userSnap.data();
-      const premium = readIsPremium(d);
-      const debit = premium
-        ? Math.max(0, Math.ceil((amount * CALL_CREDITS_PER_MINUTE_PREMIUM) / CALL_CREDITS_PER_MINUTE))
-        : amount;
+      const debit = amount;
       let paid = Number(d.paidCredits ?? 0);
       let reward = Number(d.rewardCredits ?? 0);
       const now = new Date();
@@ -1483,7 +2426,7 @@ app.post("/call-live-tick", async (req, res) => {
 
       const bal = paid + reward;
       console.log(
-        `[billing] call-live-tick user=${uid} callSid=${callSid} amount=${amount} debit=${debit} premium=${premium} balanceAfter=${bal}`,
+        `[billing] call-live-tick user=${uid} callSid=${callSid} amount=${amount} debit=${debit} balanceAfter=${bal}`,
       );
       t.update(userRef, {
         paidCredits: paid,

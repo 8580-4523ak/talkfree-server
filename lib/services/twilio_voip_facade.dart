@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:twilio_voice/twilio_voice.dart';
@@ -19,8 +20,12 @@ class TwilioVoipFacade {
     if (firebaseUid.trim().isEmpty) {
       throw StateError('registerForOutgoingCalls: empty Firebase uid');
     }
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || user.uid != firebaseUid) {
+      throw StateError('registerForOutgoingCalls: not signed in as this user');
+    }
 
-    final creds = await TwilioTokenClient.fetchAccessToken(firebaseUid);
+    final creds = await TwilioTokenClient.fetchAccessToken();
 
     if (kDebugMode) {
       debugPrint(
@@ -40,8 +45,7 @@ class TwilioVoipFacade {
     );
     if (ok != true) {
       throw StateError(
-        'Twilio Voice setTokens failed after loading token from ${VoiceBackendConfig.baseUrl}. '
-        'Check Twilio env on the server and device permissions.',
+        'Voice calling could not be enabled. Check your connection and app permissions, then try again.',
       );
     }
     if (Platform.isAndroid) {

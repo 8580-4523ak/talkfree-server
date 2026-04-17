@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../theme/talkfree_colors.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 
 const double _kPlanCardRadius = 14;
 
@@ -44,7 +45,7 @@ class _ChoosePlanScreenState extends State<ChoosePlanScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: TalkFreeColors.backgroundTop,
+      backgroundColor: AppTheme.darkBg,
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -68,7 +69,7 @@ class _ChoosePlanScreenState extends State<ChoosePlanScreen> {
                                 fontSize: 28,
                                 fontWeight: FontWeight.w800,
                                 height: 1.15,
-                                color: TalkFreeColors.beigeGold,
+                                color: AppTheme.neonGreen,
                               ),
                             ),
                             const SizedBox(height: 12),
@@ -78,7 +79,7 @@ class _ChoosePlanScreenState extends State<ChoosePlanScreen> {
                                 fontSize: 15,
                                 height: 1.45,
                                 fontWeight: FontWeight.w500,
-                                color: TalkFreeColors.offWhite
+                                color: Theme.of(context).colorScheme.onSurface
                                     .withValues(alpha: 0.92),
                               ),
                             ),
@@ -101,14 +102,14 @@ class _ChoosePlanScreenState extends State<ChoosePlanScreen> {
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               border: Border.all(
-                                color: TalkFreeColors.beigeGold
+                                color: AppTheme.neonGreen
                                     .withValues(alpha: 0.55),
                               ),
                             ),
                             child: Icon(
                               Icons.close_rounded,
                               size: 22,
-                              color: TalkFreeColors.beigeGold,
+                              color: AppTheme.neonGreen,
                             ),
                           ),
                         ),
@@ -128,7 +129,7 @@ class _ChoosePlanScreenState extends State<ChoosePlanScreen> {
                             style: GoogleFonts.montserrat(
                               fontSize: 15,
                               fontWeight: FontWeight.w700,
-                              color: TalkFreeColors.beigeGold,
+                              color: AppTheme.neonGreen,
                             ),
                           ),
                         ),
@@ -168,10 +169,10 @@ class _ChoosePlanScreenState extends State<ChoosePlanScreen> {
                                     : TalkFreeUseCaseKeys.otpSocial,
                               ),
                       style: FilledButton.styleFrom(
-                        backgroundColor: TalkFreeColors.beigeGold,
+                        backgroundColor: AppTheme.neonGreen,
                         foregroundColor: Colors.white,
                         disabledBackgroundColor:
-                            TalkFreeColors.beigeGold.withValues(alpha: 0.45),
+                            AppTheme.neonGreen.withValues(alpha: 0.45),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(_kPlanCardRadius),
                         ),
@@ -225,7 +226,7 @@ class _PlanOptionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final border = Border.all(
       color: selected
-          ? TalkFreeColors.beigeGold.withValues(alpha: 0.85)
+          ? AppTheme.neonGreen.withValues(alpha: 0.85)
           : Colors.transparent,
       width: selected ? 1.2 : 0,
     );
@@ -258,7 +259,7 @@ class _PlanOptionCard extends StatelessWidget {
     }
 
     return Material(
-      color: TalkFreeColors.cardBg.withValues(alpha: 0.92),
+      color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface).withValues(alpha: 0.92),
       borderRadius: BorderRadius.circular(_kPlanCardRadius),
       child: InkWell(
         onTap: onTap,
@@ -351,17 +352,17 @@ class _PlanBackdrop extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        const DecoratedBox(
+        DecoratedBox(
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
               colors: [
-                TalkFreeColors.backgroundTop,
-                TalkFreeColors.charcoal,
-                TalkFreeColors.backgroundBottom,
+                AppTheme.darkBg,
+                AppColors.surfaceDark,
+                AppColors.darkBackgroundDeep,
               ],
-              stops: [0.0, 0.4, 1.0],
+              stops: const [0.0, 0.4, 1.0],
             ),
           ),
         ),
@@ -376,8 +377,8 @@ class _PlanBackdrop extends StatelessWidget {
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
               colors: [
-                TalkFreeColors.backgroundTop.withValues(alpha: 0.2),
-                TalkFreeColors.backgroundBottom.withValues(alpha: 0.92),
+                AppTheme.darkBg.withValues(alpha: 0.2),
+                AppColors.darkBackgroundDeep.withValues(alpha: 0.92),
               ],
             ),
           ),
@@ -391,7 +392,7 @@ class _CoupleSilhouettePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = TalkFreeColors.offWhite.withValues(alpha: 0.045)
+      ..color = AppColors.textOnDark.withValues(alpha: 0.045)
       ..style = PaintingStyle.fill;
 
     final w = size.width;

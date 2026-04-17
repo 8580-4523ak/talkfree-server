@@ -1,53 +1,55 @@
 import 'dart:async' show StreamSubscription, Timer, unawaited;
-import 'dart:math' show max, min, pi;
+import 'dart:math' show max, min;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show immutable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:lottie/lottie.dart';
 
-import '../auth_service.dart';
 import '../config/credits_policy.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
-import '../theme/talkfree_colors.dart';
+import '../theme/system_ui.dart';
 import '../services/ad_service.dart';
+import '../utils/call_log_format.dart';
+import '../utils/reward_ad_feedback.dart';
 import '../utils/us_phone_format.dart';
 import '../widgets/assign_us_number_flow.dart';
+import '../widgets/engagement_overlays.dart';
 import '../widgets/glass_panel.dart';
+import '../widgets/low_credit_nudge.dart';
 import '../widgets/lease_ring_painter.dart';
 import '../services/firestore_user_service.dart';
 import '../services/grant_reward_service.dart';
+import '../services/reward_sound_service.dart';
 import 'call_history_screen.dart';
 import 'dialer_screen.dart';
 import 'inbox_screen.dart';
-import 'sms_test_screen.dart';
+import 'settings_screen.dart';
 import 'subscription_screen.dart';
+import 'virtual_number_screen.dart';
 
 /// Immutable rewarded-ad row for ValueNotifier (equality avoids redundant notifies).
 @immutable
 class _AdRewardView {
   const _AdRewardView({
     required this.adsToday,
-    required this.cycleProgress,
     required this.cooldownRemaining,
     required this.dailyLimitReached,
   });
 
   final int adsToday;
-  final int cycleProgress;
   final int cooldownRemaining;
   final bool dailyLimitReached;
 
   _AdRewardView copyWith({
     int? adsToday,
-    int? cycleProgress,
     int? cooldownRemaining,
     bool? dailyLimitReached,
   }) {
     return _AdRewardView(
       adsToday: adsToday ?? this.adsToday,
-      cycleProgress: cycleProgress ?? this.cycleProgress,
       cooldownRemaining: cooldownRemaining ?? this.cooldownRemaining,
       dailyLimitReached: dailyLimitReached ?? this.dailyLimitReached,
     );
@@ -58,13 +60,12 @@ class _AdRewardView {
     return identical(this, other) ||
         other is _AdRewardView &&
             other.adsToday == adsToday &&
-            other.cycleProgress == cycleProgress &&
             other.cooldownRemaining == cooldownRemaining &&
             other.dailyLimitReached == dailyLimitReached;
   }
 
   @override
-  int get hashCode => Object.hash(adsToday, cycleProgress, cooldownRemaining, dailyLimitReached);
+  int get hashCode => Object.hash(adsToday, cooldownRemaining, dailyLimitReached);
 }
 
 /// Smooth numeric change for wallet / stats (no logic — display only).
@@ -119,6 +120,7 @@ class DashboardScreen extends StatefulWidget {
     super.key,
     required this.user,
     this.initialNavIndex = 0,
+    this.showWelcomeSnack = false,
   }) : assert(
           initialNavIndex >= 0 && initialNavIndex < 3,
           'initialNavIndex must be 0 (home), 1 (dialer), or 2 (inbox)',
@@ -129,12 +131,18 @@ class DashboardScreen extends StatefulWidget {
   /// `0` = home, `1` = dialer, `2` = inbox (OTP/SMS).
   final int initialNavIndex;
 
+  /// Shown once after login when server applied one-time welcome credits.
+  final bool showWelcomeSnack;
+
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+class _DashboardScreenState extends State<DashboardScreen>
+    with TickerProviderStateMixin {
   bool _rewardedAdBusy = false;
+  /// True while `POST /grant-reward` is in flight (after ad earned reward).
+  bool _grantRewardPending = false;
   late int _navIndex;
 
   /// Client-side cooldown after a rewarded ad finishes (sync with [CreditsPolicy.adRewardCooldownSeconds]).
@@ -147,8 +155,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   /// Avoid spamming SnackBars if the user document stream errors repeatedly.
   bool _userDocStreamErrorNotified = false;
+  bool _welcomeSnackShown = false;
+  /// One-shot balance count-up on home wallet (welcome bonus).
+  int? _welcomeBalanceAnimStart;
+  int _welcomeBalanceAnimGeneration = 0;
+  late final AnimationController _walletGlowController;
+  late final Animation<double> _walletGlowAnim;
 
   final ValueNotifier<int> _credits = ValueNotifier<int>(0);
+  /// US line from Firestore (`assigned_number` / mirrors) — updated live from [FirestoreUserService.watchUserDocument]
+  /// while this screen stays mounted (including when other routes are pushed on top). No manual refresh needed after
+  /// `Navigator.popUntil` from number provisioning; the next snapshot updates Home (Virtual Number card) automatically.
   final ValueNotifier<String?> _assignedNumber = ValueNotifier<String?>(null);
   final ValueNotifier<int> _lifetimeAdsWatched = ValueNotifier<int>(0);
   /// `'free'` | `'pro'` from Firestore ([FirestoreUserService.subscriptionTierFromUserData]).
@@ -157,10 +174,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final ValueNotifier<DateTime?> _numberLeaseExpiry =
       ValueNotifier<DateTime?>(null);
   final ValueNotifier<String?> _numberPlanType = ValueNotifier<String?>(null);
+  /// Server-maintained totals (Twilio settlement); see [FirestoreUserService.totalOutboundCallsFromUserData].
+  final ValueNotifier<int> _outboundCallsTotal = ValueNotifier<int>(0);
+  final ValueNotifier<int> _totalCallTalkSeconds = ValueNotifier<int>(0);
+  /// Server-maintained `ad_streak_count` (UTC consecutive ad days).
+  final ValueNotifier<int> _adStreakCount = ValueNotifier<int>(0);
   final ValueNotifier<_AdRewardView> _adView = ValueNotifier<_AdRewardView>(
     const _AdRewardView(
       adsToday: 0,
-      cycleProgress: 0,
       cooldownRemaining: 0,
       dailyLimitReached: false,
     ),
@@ -180,7 +201,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _setAdViewIfChanged(
       _AdRewardView(
         adsToday: t.adsToday,
-        cycleProgress: t.cycleProgress,
         cooldownRemaining: cool,
         dailyLimitReached: t.dailyLimitReached,
       ),
@@ -211,21 +231,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (_numberPlanType.value != planT) {
       _numberPlanType.value = planT;
     }
-    unawaited(
-      FirestoreUserService.claimPremiumWelcomeBonusIfEligible(widget.user.uid),
-    );
+    final calls = FirestoreUserService.totalOutboundCallsFromUserData(d);
+    if (_outboundCallsTotal.value != calls) {
+      _outboundCallsTotal.value = calls;
+    }
+    final talk = FirestoreUserService.totalCallTalkSecondsFromUserData(d);
+    if (_totalCallTalkSeconds.value != talk) {
+      _totalCallTalkSeconds.value = talk;
+    }
+    final streak = FirestoreUserService.adStreakCountFromUserData(d);
+    if (_adStreakCount.value != streak) {
+      _adStreakCount.value = streak;
+    }
   }
 
   void _applyOptimisticAdWatched() {
     final v = _adView.value;
-    final nextCycle =
-        (v.cycleProgress + 1) >= CreditsPolicy.adsRequiredForMinuteGrant
-            ? 0
-            : v.cycleProgress + 1;
     _setAdViewIfChanged(
       v.copyWith(
         adsToday: v.adsToday + 1,
-        cycleProgress: nextCycle,
         dailyLimitReached:
             v.adsToday + 1 >= CreditsPolicy.maxRewardedAdsPerDay,
       ),
@@ -235,6 +259,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
+    _walletGlowController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 420),
+    );
+    _walletGlowAnim = CurvedAnimation(
+      parent: _walletGlowController,
+      curve: Curves.easeInOut,
+    );
+    applyTalkFreeDarkNavigationChrome();
     _navIndex = widget.initialNavIndex;
     _userDocSub =
         FirestoreUserService.watchUserDocument(widget.user.uid).listen(
@@ -265,6 +298,53 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (!mounted) return;
       _refreshFromLatestSnapshot();
     });
+    if (widget.showWelcomeSnack) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_runWelcomeBonusEngagement());
+      });
+    }
+  }
+
+  Future<void> _runWelcomeBonusEngagement() async {
+    if (!mounted || _welcomeSnackShown) return;
+    _welcomeSnackShown = true;
+    for (var i = 0; i < 50; i++) {
+      if (!mounted) return;
+      if (_credits.value >= CreditsPolicy.welcomeLoginBonusCredits) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    if (!mounted) return;
+    final end = _credits.value;
+    final start =
+        (end - CreditsPolicy.welcomeLoginBonusCredits).clamp(0, end);
+    setState(() {
+      _welcomeBalanceAnimStart = start;
+      _welcomeBalanceAnimGeneration++;
+    });
+    unawaited(RewardSoundService.playCoin());
+    EngagementOverlays.showFloatingCreditDelta(
+      context,
+      delta: CreditsPolicy.welcomeLoginBonusCredits,
+    );
+    for (var i = 0; i < 3; i++) {
+      if (!mounted) return;
+      await _walletGlowController.forward();
+      await _walletGlowController.reverse();
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Welcome! You got free calling credits'),
+        behavior: SnackBarBehavior.floating,
+        duration: Duration(seconds: 4),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 900));
+    if (mounted) {
+      setState(() => _welcomeBalanceAnimStart = null);
+    }
   }
 
   @override
@@ -278,7 +358,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _subscriptionTier.dispose();
     _numberLeaseExpiry.dispose();
     _numberPlanType.dispose();
+    _outboundCallsTotal.dispose();
+    _totalCallTalkSeconds.dispose();
+    _adStreakCount.dispose();
     _adView.dispose();
+    _walletGlowController.dispose();
     super.dispose();
   }
 
@@ -307,7 +391,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (dailyLimitReached) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Limit Reached')),
+        SnackBar(
+          content: Text(RewardAdFeedback.dailyLimit),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
       return;
     }
@@ -315,71 +402,100 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Please wait $cooldownRemaining seconds',
-          ),
+          content: Text(RewardAdFeedback.cooldownBeforeNextAd()),
+          behavior: SnackBarBehavior.floating,
         ),
       );
       return;
     }
-    setState(() => _rewardedAdBusy = true);
+    setState(() {
+      _rewardedAdBusy = true;
+      _grantRewardPending = false;
+    });
     try {
       final earned = await AdService.instance.loadAndShowRewardedAd();
       if (!mounted) return;
       if (earned) {
         _applyOptimisticAdWatched();
         _startPostAdCooldown();
+        setState(() => _grantRewardPending = true);
         try {
           final result = await GrantRewardService.instance.requestMinuteGrant();
           if (!mounted) return;
           if (result.creditsAdded > 0) {
+            _credits.value = _credits.value + result.creditsAdded;
+            unawaited(RewardSoundService.playCoin());
+            EngagementOverlays.showAdRewardFanfare(
+              context,
+              creditsAdded: result.creditsAdded,
+              streakBonus: result.streakBonus,
+              streakDays: result.streakCount,
+            );
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  'Great! +${result.creditsAdded} credits added.',
+                  RewardAdFeedback.successCreditsAdded(result.creditsAdded),
                 ),
+                behavior: SnackBarBehavior.floating,
+                duration: const Duration(seconds: 4),
               ),
             );
           } else {
-            final more = CreditsPolicy.adsRequiredForMinuteGrant - result.adSubCounter;
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
+              const SnackBar(
                 content: Text(
-                  'Ad ${result.adSubCounter}/${CreditsPolicy.adsRequiredForMinuteGrant} logged. '
-                  '$more more for +${CreditsPolicy.creditsPerMinuteGrant} credits!',
+                  'Reward recorded — credits will sync shortly.',
                 ),
+                behavior: SnackBarBehavior.floating,
               ),
             );
           }
         } on GrantRewardException catch (e) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(e.message)),
+            SnackBar(
+              content: Text(RewardAdFeedback.forGrantError(e)),
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+            ),
           );
         } catch (e) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(
-                'Could not sync reward. Pull to refresh or try again. ($e)',
-              ),
+              content: Text(RewardAdFeedback.forGrantError(e)),
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
             ),
           );
+        } finally {
+          if (mounted) {
+            setState(() => _grantRewardPending = false);
+          }
         }
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No credits — finish watching the ad to earn rewards.'),
+          SnackBar(
+            content: Text(RewardAdFeedback.incompleteAd),
+            behavior: SnackBarBehavior.floating,
           ),
         );
       }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ad error: $e')),
+        SnackBar(
+          content: Text(RewardAdFeedback.forAdPlaybackError(e)),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
     } finally {
-      if (mounted) setState(() => _rewardedAdBusy = false);
+      if (mounted) {
+        setState(() {
+          _rewardedAdBusy = false;
+          _grantRewardPending = false;
+        });
+      }
     }
   }
 
@@ -415,7 +531,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           builder: (context, ad, _) {
             final cooldownRemaining = ad.cooldownRemaining;
             final adsToday = ad.adsToday;
-            final cycleProgress = ad.cycleProgress;
             final dailyLimitReached = ad.dailyLimitReached;
 
             // One body subtree at a time — no IndexedStack (avoids touch bugs on some
@@ -426,9 +541,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     displayName: displayName,
                     theme: theme,
                     rewardedAdBusy: _rewardedAdBusy,
+                    grantRewardPending: _grantRewardPending,
                     cooldownRemaining: cooldownRemaining,
                     adsToday: adsToday,
-                    cycleProgress: cycleProgress,
                     dailyLimitReached: dailyLimitReached,
                     credits: credits,
                     assignedNumber: _assignedNumber,
@@ -436,6 +551,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     numberPlanType: _numberPlanType,
                     lifetimeAdsWatched: _lifetimeAdsWatched,
                     subscriptionTier: _subscriptionTier,
+                    outboundCallsTotal: _outboundCallsTotal,
+                    totalCallTalkSeconds: _totalCallTalkSeconds,
+                    adStreakCount: _adStreakCount,
                     onDebugAddCredits:
                         kDebugMode ? _debugAddCredits : null,
                     onWatchRewardedAd: () => _onWatchRewardedAd(
@@ -443,6 +561,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       dailyLimitReached,
                     ),
                     onGoToDialer: () => setState(() => _navIndex = 1),
+                    onOpenCallHistory: () {
+                      Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) => CallHistoryScreen(
+                            user: widget.user,
+                            onStartCalling: () {
+                              setState(() => _navIndex = 1);
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                    walletGlow: _walletGlowAnim,
+                    welcomeBalanceAnimStart: _welcomeBalanceAnimStart,
+                    welcomeBalanceAnimGeneration: _welcomeBalanceAnimGeneration,
                   )
                 : _navIndex == 1
                     ? ValueListenableBuilder<String>(
@@ -461,8 +594,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     ),
                             rewardedAdBusy: _rewardedAdBusy,
                             cooldownRemaining: cooldownRemaining,
-                            rewardCycleProgress: cycleProgress,
                             rewardDailyLimitReached: dailyLimitReached,
+                            outboundCallsTotal: _outboundCallsTotal,
                           );
                         },
                       )
@@ -472,9 +605,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       );
 
             return Scaffold(
-              backgroundColor: _navIndex == 0
-                  ? const Color(0xFF020814)
-                  : AppColors.darkBackground,
+              backgroundColor: AppTheme.darkBg,
               appBar: AppBar(
                 title: Text(
                   _navIndex == 0
@@ -494,24 +625,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         );
                       },
                     ),
+                  if (_navIndex == 0)
+                    IconButton(
+                      tooltip: 'My US number',
+                      icon: const Icon(Icons.contact_phone_outlined),
+                      onPressed: () {
+                        Navigator.of(context).pushNamed(
+                          VirtualNumberScreen.routeName,
+                          arguments: VirtualNumberRouteArgs(
+                            userUid: widget.user.uid,
+                            userCredits: credits,
+                          ),
+                        );
+                      },
+                    ),
                   IconButton(
-                    tooltip: 'Call history',
+                    tooltip: 'Recents',
                     icon: const Icon(Icons.history_rounded),
                     onPressed: () {
                       Navigator.of(context).push<void>(
                         MaterialPageRoute<void>(
-                          builder: (_) => CallHistoryScreen(user: widget.user),
-                        ),
-                      );
-                    },
-                  ),
-                  IconButton(
-                    tooltip: 'Chat',
-                    icon: const Icon(Icons.chat_bubble_outline_rounded),
-                    onPressed: () {
-                      Navigator.of(context).push<void>(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const SmsTestScreen(),
+                          builder: (_) => CallHistoryScreen(
+                            user: widget.user,
+                            onStartCalling: () {
+                              setState(() => _navIndex = 1);
+                            },
+                          ),
                         ),
                       );
                     },
@@ -520,30 +659,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     tooltip: 'Settings',
                     icon: const Icon(Icons.settings_outlined),
                     onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Settings — coming soon.')),
+                      Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) => SettingsScreen(
+                            user: widget.user,
+                            credits: credits,
+                          ),
+                        ),
                       );
                     },
-                  ),
-                  IconButton(
-                    tooltip: 'Sign out',
-                    icon: const Icon(Icons.logout_outlined),
-                    onPressed: () => AuthService().signOut(),
                   ),
                 ],
               ),
               body: Material(
-                color: _navIndex == 0 ? Colors.transparent : AppColors.darkBackground,
+                color: _navIndex == 0 ? Colors.transparent : AppTheme.darkBg,
                 child: tabBody,
               ),
               bottomNavigationBar: BottomNavigationBar(
                 currentIndex: _navIndex,
                 onTap: (i) => setState(() => _navIndex = i),
                 type: BottomNavigationBarType.fixed,
-                backgroundColor: AppColors.darkBackground,
+                backgroundColor: AppTheme.darkBg,
                 selectedItemColor: AppColors.primary,
                 unselectedItemColor:
-                    TalkFreeColors.mutedWhite.withValues(alpha: 0.5),
+                    Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
                 items: const [
                   BottomNavigationBarItem(
                     icon: Icon(Icons.home_outlined),
@@ -570,15 +709,129 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 }
 
+/// Premium promo strip with a looping 5:00 urgency countdown (visual retention hook).
+class _ProOfferCountdownStrip extends StatefulWidget {
+  const _ProOfferCountdownStrip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  State<_ProOfferCountdownStrip> createState() =>
+      _ProOfferCountdownStripState();
+}
+
+class _ProOfferCountdownStripState extends State<_ProOfferCountdownStrip> {
+  Timer? _timer;
+  static const int _loopSeconds = 5 * 60;
+  late int _remainingSec;
+
+  @override
+  void initState() {
+    super.initState();
+    _remainingSec = _loopSeconds;
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        if (_remainingSec <= 1) {
+          _remainingSec = _loopSeconds;
+        } else {
+          _remainingSec -= 1;
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String get _mmss {
+    final m = _remainingSec ~/ 60;
+    final s = _remainingSec % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: widget.onTap,
+          child: Ink(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: const Color(0xFFFF7043).withValues(alpha: 0.5),
+              ),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  const Color(0xFFFF6B35).withValues(alpha: 0.22),
+                  const Color(0xFFFF4500).withValues(alpha: 0.08),
+                ],
+              ),
+            ),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 10,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '🔥 Limited time offer on Pro',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.2,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Offer ends in $_mmss',
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2,
+                          color: const Color(0xFFFF7043),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  color: AppColors.primary.withValues(alpha: 0.95),
+                  size: 22,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _DashboardHomeTab extends StatefulWidget {
   const _DashboardHomeTab({
     required this.user,
     required this.displayName,
     required this.theme,
     required this.rewardedAdBusy,
+    required this.grantRewardPending,
     required this.cooldownRemaining,
     required this.adsToday,
-    required this.cycleProgress,
     required this.dailyLimitReached,
     required this.credits,
     required this.assignedNumber,
@@ -586,18 +839,25 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.numberPlanType,
     required this.lifetimeAdsWatched,
     required this.subscriptionTier,
+    required this.outboundCallsTotal,
+    required this.totalCallTalkSeconds,
+    required this.adStreakCount,
     this.onDebugAddCredits,
     required this.onWatchRewardedAd,
     required this.onGoToDialer,
+    required this.onOpenCallHistory,
+    required this.walletGlow,
+    required this.welcomeBalanceAnimStart,
+    required this.welcomeBalanceAnimGeneration,
   });
 
   final User user;
   final String displayName;
   final ThemeData theme;
   final bool rewardedAdBusy;
+  final bool grantRewardPending;
   final int cooldownRemaining;
   final int adsToday;
-  final int cycleProgress;
   final bool dailyLimitReached;
   /// Balance from parent [ValueNotifier] (single Firestore listener).
   final int credits;
@@ -606,9 +866,16 @@ class _DashboardHomeTab extends StatefulWidget {
   final ValueNotifier<String?> numberPlanType;
   final ValueNotifier<int> lifetimeAdsWatched;
   final ValueNotifier<String> subscriptionTier;
+  final ValueNotifier<int> outboundCallsTotal;
+  final ValueNotifier<int> totalCallTalkSeconds;
+  final ValueNotifier<int> adStreakCount;
   final Future<void> Function()? onDebugAddCredits;
   final Future<void> Function() onWatchRewardedAd;
   final VoidCallback onGoToDialer;
+  final VoidCallback onOpenCallHistory;
+  final Animation<double> walletGlow;
+  final int? welcomeBalanceAnimStart;
+  final int welcomeBalanceAnimGeneration;
 
   @override
   State<_DashboardHomeTab> createState() => _DashboardHomeTabState();
@@ -726,12 +993,12 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
             Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(
+                  gradient: LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Color(0xFF0A1628),
-                      Color(0xFF050A12),
+                      AppTheme.darkBg,
+                      AppColors.darkBackgroundDeep,
                     ],
                   ),
                 ),
@@ -745,6 +1012,22 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
             kDebugMode ? 100 : 28,
           ),
           children: [
+            ValueListenableBuilder<String>(
+              valueListenable: widget.subscriptionTier,
+              builder: (context, tier, _) {
+                final low = tier != 'pro' &&
+                    widget.credits <
+                        CreditsPolicy.lowCreditWarningThreshold;
+                return Padding(
+                  padding: EdgeInsets.only(bottom: low ? 14 : 0),
+                  child: LowCreditNudge(
+                    credits: widget.credits,
+                    isPremium: tier == 'pro',
+                    onWatchAd: widget.onWatchRewardedAd,
+                  ),
+                );
+              },
+            ),
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -756,7 +1039,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                 else
                   CircleAvatar(
                     radius: 28,
-                    backgroundColor: TalkFreeColors.cardBg,
+                    backgroundColor: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
                     foregroundColor: AppColors.primary,
                     child: Text(
                       widget.displayName.isNotEmpty
@@ -779,7 +1062,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                           fontSize: 18,
                           fontWeight: FontWeight.w700,
                           letterSpacing: -0.3,
-                          color: TalkFreeColors.offWhite,
+                          color: Theme.of(context).colorScheme.onSurface,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -792,7 +1075,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                           style: GoogleFonts.inter(
                             fontSize: 13,
                             fontWeight: FontWeight.w500,
-                            color: TalkFreeColors.mutedWhite,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -801,9 +1084,22 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                     ],
                   ),
                 ),
-                _LightningWalletPill(
-                  credits: widget.credits,
-                  onDebugLongPress: widget.onDebugAddCredits,
+                ValueListenableBuilder<String>(
+                  valueListenable: widget.subscriptionTier,
+                  builder: (context, tier, _) {
+                    final isPro = tier.toLowerCase() == 'pro';
+                    return _LightningWalletPill(
+                      credits: widget.credits,
+                      isPro: isPro,
+                      onDebugLongPress: widget.onDebugAddCredits,
+                      walletGlow: widget.walletGlow,
+                      welcomeBalanceAnimStart: isPro
+                          ? null
+                          : widget.welcomeBalanceAnimStart,
+                      welcomeBalanceAnimGeneration:
+                          widget.welcomeBalanceAnimGeneration,
+                    );
+                  },
                 ),
               ],
             ),
@@ -822,22 +1118,22 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(999),
                         gradient: isPro
-                            ? const LinearGradient(
+                            ? LinearGradient(
                                 begin: Alignment.topLeft,
                                 end: Alignment.bottomRight,
                                 colors: [
-                                  Color(0xFFE8C547),
-                                  Color(0xFF9333EA),
-                                  Color(0xFF581C87),
+                                  AppTheme.neonGreen,
+                                  AppColors.darkBackgroundDeep,
+                                  AppTheme.darkBg,
                                 ],
-                                stops: [0.0, 0.55, 1.0],
+                                stops: const [0.0, 0.55, 1.0],
                               )
                             : null,
-                        color: isPro ? null : TalkFreeColors.cardBg,
+                        color: isPro ? null : (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
                         border: Border.all(
                           color: isPro
                               ? Colors.transparent
-                              : TalkFreeColors.mutedWhite.withValues(alpha: 0.2),
+                              : Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.2),
                         ),
                       ),
                       child: Row(
@@ -850,7 +1146,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                             size: 16,
                             color: isPro
                                 ? Colors.white.withValues(alpha: 0.95)
-                                : TalkFreeColors.mutedWhite,
+                                : Theme.of(context).colorScheme.onSurfaceVariant,
                           ),
                           const SizedBox(width: 8),
                           Text(
@@ -860,7 +1156,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                               fontWeight: FontWeight.w700,
                               color: isPro
                                   ? Colors.white
-                                  : TalkFreeColors.offWhite,
+                                  : Theme.of(context).colorScheme.onSurface,
                             ),
                           ),
                         ],
@@ -883,6 +1179,67 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                       ),
                     ),
                   ],
+                );
+              },
+            ),
+            ValueListenableBuilder<String>(
+              valueListenable: widget.subscriptionTier,
+              builder: (context, tier, _) {
+                if (tier == 'pro') return const SizedBox.shrink();
+                return _ProOfferCountdownStrip(
+                  onTap: () {
+                    Navigator.of(context).push<void>(
+                      SubscriptionScreen.createRoute(),
+                    );
+                  },
+                );
+              },
+            ),
+            ValueListenableBuilder<String>(
+              valueListenable: widget.subscriptionTier,
+              builder: (context, tier, _) {
+                if (tier == 'pro') return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: AppColors.primary.withValues(alpha: 0.28),
+                      ),
+                      color: AppColors.primary.withValues(alpha: 0.07),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '🎁 Watch Ad → Get FREE Calling Time',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              height: 1.4,
+                              color: Theme.of(context).colorScheme.onSurface,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            '🚀 Go Pro → Call ANYONE Unlimited (No Ads)',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              height: 1.4,
+                              color: Theme.of(context).colorScheme.onSurface,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 );
               },
             ),
@@ -915,14 +1272,20 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                   if (isPro) {
                     return const _ProBenefitsCard();
                   }
-                  return _AdsPowerCard(
-                    rewardedAdBusy: widget.rewardedAdBusy,
-                    cooldownRemaining: widget.cooldownRemaining,
-                    cycleProgress: widget.cycleProgress,
-                    dailyLimitReached: widget.dailyLimitReached,
-                    adsToday: widget.adsToday,
-                    credits: widget.credits,
-                    onEarn: widget.onWatchRewardedAd,
+                  return ValueListenableBuilder<int>(
+                    valueListenable: widget.adStreakCount,
+                    builder: (context, streak, _) {
+                      return _SimpleAdRewardCard(
+                        rewardedAdBusy: widget.rewardedAdBusy,
+                        grantRewardPending: widget.grantRewardPending,
+                        cooldownRemaining: widget.cooldownRemaining,
+                        dailyLimitReached: widget.dailyLimitReached,
+                        adsToday: widget.adsToday,
+                        credits: widget.credits,
+                        adStreakDays: streak,
+                        onEarn: widget.onWatchRewardedAd,
+                      );
+                    },
                   );
                 },
               ),
@@ -975,35 +1338,52 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
               valueListenable: widget.subscriptionTier,
               builder: (context, tier, _) {
                 final isPro = tier == 'pro';
-                final cpm = CreditsPolicy.creditsPerMinuteForUser(isPro);
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: _DashboardStatCard(
-                        icon: Icons.call_made_rounded,
-                        label: 'Calls made',
-                        value: '0',
-                        caption: 'All time',
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: _DashboardStatCard(
-                        icon: Icons.timer_outlined,
-                        label: 'Minutes',
-                        value: (widget.credits / cpm).toStringAsFixed(1),
-                        caption: 'Est. @ $cpm⚡/min',
-                        animatedValue: true,
-                      ),
-                    ),
-                  ],
+                return ValueListenableBuilder<int>(
+                  valueListenable: widget.outboundCallsTotal,
+                  builder: (context, callsMade, _) {
+                    return ValueListenableBuilder<int>(
+                      valueListenable: widget.totalCallTalkSeconds,
+                      builder: (context, talkSec, _) {
+                        final talkMin = talkSec / 60.0;
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: _DashboardStatCard(
+                                icon: Icons.call_made_rounded,
+                                label: 'Calls made',
+                                value: '$callsMade',
+                                caption: 'All time',
+                                animatedValue: true,
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: _DashboardStatCard(
+                                icon: Icons.timer_outlined,
+                                label: 'Minutes',
+                                value: isPro
+                                    ? 'Unlimited'
+                                    : talkMin.toStringAsFixed(1),
+                                caption: isPro
+                                    ? 'Unlimited calling (Pro)'
+                                    : 'Talk time (completed)',
+                                animatedValue: !isPro,
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    );
+                  },
                 );
               },
             ),
             const SizedBox(height: 22),
             _RecentActivitySection(
+              user: widget.user,
               onOpenDialer: widget.onGoToDialer,
+              onSeeAllHistory: widget.onOpenCallHistory,
             ),
           ],
             ),
@@ -1051,7 +1431,7 @@ class _DashboardStatCard extends StatelessWidget {
                   style: GoogleFonts.inter(
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
-                    color: TalkFreeColors.mutedWhite,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -1082,7 +1462,7 @@ class _DashboardStatCard extends StatelessWidget {
                       fontSize: 26,
                       fontWeight: FontWeight.w700,
                       height: 1.05,
-                      color: TalkFreeColors.offWhite,
+                      color: Theme.of(context).colorScheme.onSurface,
                       letterSpacing: -0.5,
                     ),
                   ),
@@ -1093,7 +1473,7 @@ class _DashboardStatCard extends StatelessWidget {
                     fontSize: 26,
                     fontWeight: FontWeight.w700,
                     height: 1.05,
-                    color: TalkFreeColors.offWhite,
+                    color: Theme.of(context).colorScheme.onSurface,
                     letterSpacing: -0.5,
                   ),
                 ),
@@ -1103,7 +1483,7 @@ class _DashboardStatCard extends StatelessWidget {
             style: GoogleFonts.inter(
               fontSize: 11,
               fontWeight: FontWeight.w500,
-              color: TalkFreeColors.mutedWhite.withValues(alpha: 0.85),
+              color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.85),
             ),
           ),
         ],
@@ -1113,9 +1493,15 @@ class _DashboardStatCard extends StatelessWidget {
 }
 
 class _RecentActivitySection extends StatelessWidget {
-  const _RecentActivitySection({required this.onOpenDialer});
+  const _RecentActivitySection({
+    required this.user,
+    required this.onOpenDialer,
+    required this.onSeeAllHistory,
+  });
 
+  final User user;
   final VoidCallback onOpenDialer;
+  final VoidCallback onSeeAllHistory;
 
   @override
   Widget build(BuildContext context) {
@@ -1130,17 +1516,11 @@ class _RecentActivitySection extends StatelessWidget {
               style: GoogleFonts.montserrat(
                 fontSize: 17,
                 fontWeight: FontWeight.w700,
-                color: TalkFreeColors.offWhite,
+                color: Theme.of(context).colorScheme.onSurface,
               ),
             ),
             TextButton(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Full history — coming soon.'),
-                  ),
-                );
-              },
+              onPressed: onSeeAllHistory,
               style: TextButton.styleFrom(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 minimumSize: Size.zero,
@@ -1158,86 +1538,209 @@ class _RecentActivitySection extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 14),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-          decoration: BoxDecoration(
-            color: TalkFreeColors.cardBg.withValues(alpha: 0.88),
-            borderRadius: BorderRadius.circular(AppTheme.radiusLg),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.06),
-            ),
-          ),
-          child: Column(
-            children: [
-              Icon(
-                Icons.history_rounded,
-                size: 40,
-                color: TalkFreeColors.mutedWhite.withValues(alpha: 0.45),
-              ),
-              const SizedBox(height: 14),
-              Text(
-                'No calls yet',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.montserrat(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  color: TalkFreeColors.offWhite,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Your outgoing calls will show up here. Start from the dialer.',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.montserrat(
-                  fontSize: 13,
-                  height: 1.4,
-                  color: TalkFreeColors.mutedWhite,
-                ),
-              ),
-              const SizedBox(height: 18),
-              OutlinedButton.icon(
-                onPressed: onOpenDialer,
-                icon: Icon(
-                  Icons.dialpad_rounded,
-                  size: 20,
-                  color: AppColors.primary,
-                ),
-                label: Text(
-                  'Open dialer',
-                  style: GoogleFonts.montserrat(
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.primary,
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: FirestoreUserService.watchCallHistory(user.uid, limit: 5),
+          builder: (context, snap) {
+            if (snap.hasError) {
+              return _RecentActivityShell(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    'Could not load recents.',
+                    style: GoogleFonts.inter(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(
-                    color: AppColors.primary.withValues(alpha: 0.65),
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 12,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+              );
+            }
+            if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
+              return const _RecentActivityShell(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(
+                    child: SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: CircularProgressIndicator(strokeWidth: 2.5),
+                    ),
                   ),
                 ),
+              );
+            }
+            final docs = snap.data?.docs ?? [];
+            if (docs.isEmpty) {
+              return _RecentActivityShell(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.history_rounded,
+                        size: 40,
+                        color: Theme.of(context)
+                            .colorScheme
+                            .onSurfaceVariant
+                            .withValues(alpha: 0.45),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        'No calls yet',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.montserrat(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Completed calls appear here after each call ends.',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.montserrat(
+                          fontSize: 13,
+                          height: 1.4,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      OutlinedButton.icon(
+                        onPressed: onOpenDialer,
+                        icon: Icon(
+                          Icons.dialpad_rounded,
+                          size: 20,
+                          color: AppColors.primary,
+                        ),
+                        label: Text(
+                          'Open dialer',
+                          style: GoogleFonts.montserrat(
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(
+                            color: AppColors.primary.withValues(alpha: 0.65),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 12,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            return _RecentActivityShell(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                child: Column(
+                  children: [
+                    for (var i = 0; i < docs.length; i++) ...[
+                      if (i > 0) const SizedBox(height: 4),
+                      _DashboardRecentCallTile(data: docs[i].data()),
+                    ],
+                  ],
+                ),
               ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 4),
-        Padding(
-          padding: const EdgeInsets.only(left: 4, top: 6),
-          child: Text(
-            'Preview: call history syncs when available.',
-            style: GoogleFonts.montserrat(
-              fontSize: 11,
-              color: TalkFreeColors.mutedWhite.withValues(alpha: 0.65),
-            ),
-          ),
+            );
+          },
         ),
       ],
+    );
+  }
+}
+
+class _RecentActivityShell extends StatelessWidget {
+  const _RecentActivityShell({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface)
+            .withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.06),
+        ),
+      ),
+      child: child,
+    );
+  }
+}
+
+class _DashboardRecentCallTile extends StatelessWidget {
+  const _DashboardRecentCallTile({required this.data});
+
+  final Map<String, dynamic> data;
+
+  @override
+  Widget build(BuildContext context) {
+    final durationSec = data['durationSeconds'];
+    final sec = durationSec is num ? durationSec.toInt() : 0;
+    final settled = data['settledAt'] is Timestamp
+        ? data['settledAt'] as Timestamp
+        : null;
+    final outgoing = CallLogFormat.isOutgoingFromDocument(data);
+    final labels = CallLogFormat.callHistoryLabels(data, outgoing);
+    final display = CallLogFormat.prettyDisplayNumber(labels.primary);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      child: Row(
+        children: [
+          Icon(
+            Icons.call_made_rounded,
+            size: 20,
+            color: AppColors.primary.withValues(alpha: 0.9),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  display,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${CallLogFormat.formatSettledDate(settled)} · ${CallLogFormat.formatClockTime(settled)}',
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            CallLogFormat.formatDurationMmSs(sec),
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1246,326 +1749,317 @@ class _RecentActivitySection extends StatelessWidget {
 class _LightningWalletPill extends StatelessWidget {
   const _LightningWalletPill({
     required this.credits,
+    this.isPro = false,
     this.onDebugLongPress,
+    required this.walletGlow,
+    this.welcomeBalanceAnimStart,
+    this.welcomeBalanceAnimGeneration = 0,
   });
 
   final int credits;
+  final bool isPro;
   final Future<void> Function()? onDebugLongPress;
+  final Animation<double> walletGlow;
+  final int? welcomeBalanceAnimStart;
+  final int welcomeBalanceAnimGeneration;
 
   @override
   Widget build(BuildContext context) {
-    final amber = AppColors.accentAmber;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onLongPress: onDebugLongPress == null
-            ? null
-            : () {
-                onDebugLongPress!();
-              },
-        borderRadius: BorderRadius.circular(999),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
+    final neon = AppColors.primary;
+    final creditStyle = GoogleFonts.poppins(
+      fontSize: 18,
+      fontWeight: FontWeight.w700,
+      height: 1.05,
+      color: Theme.of(context).colorScheme.onSurface,
+      letterSpacing: -0.4,
+      shadows: [
+        Shadow(
+          color: neon.withValues(alpha: 0.35),
+          blurRadius: 10,
+        ),
+      ],
+    );
+    Widget creditValue;
+    if (isPro) {
+      creditValue = Text('Unlimited', style: creditStyle);
+    } else if (welcomeBalanceAnimStart != null) {
+      creditValue = TweenAnimationBuilder<int>(
+        key: ValueKey<int>(welcomeBalanceAnimGeneration),
+        tween: IntTween(begin: welcomeBalanceAnimStart!, end: credits),
+        duration: const Duration(milliseconds: 820),
+        curve: Curves.easeOutCubic,
+        builder: (context, v, _) {
+          return Text('$v', style: creditStyle);
+        },
+      );
+    } else {
+      creditValue = _AnimatedIntText(
+        value: credits,
+        style: creditStyle,
+      );
+    }
+    return AnimatedBuilder(
+      animation: walletGlow,
+      builder: (context, child) {
+        final g = walletGlow.value.clamp(0.0, 1.0);
+        return Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onLongPress: onDebugLongPress == null
+                ? null
+                : () {
+                    onDebugLongPress!();
+                  },
             borderRadius: BorderRadius.circular(999),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                const Color(0xFF1A1528).withValues(alpha: 0.95),
-                const Color(0xFF0D0B14).withValues(alpha: 0.98),
-              ],
-            ),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.22),
-              width: 0.5,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: amber.withValues(alpha: 0.45),
-                blurRadius: 8,
-                spreadRadius: 2,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.bolt_rounded,
-                color: amber.withValues(alpha: 0.98),
-                size: 20,
-              ),
-              const SizedBox(width: 6),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'CREDITS',
-                    style: GoogleFonts.inter(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.2,
-                      color: TalkFreeColors.mutedWhite.withValues(alpha: 0.85),
-                    ),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(999),
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    const Color(0xFF1A1528).withValues(alpha: 0.95),
+                    const Color(0xFF0D0B14).withValues(alpha: 0.98),
+                  ],
+                ),
+                border: Border.all(
+                  color: Color.lerp(
+                        Colors.white.withValues(alpha: 0.22),
+                        AppTheme.neonGreen.withValues(alpha: 0.85),
+                        g,
+                      ) ??
+                      Colors.white.withValues(alpha: 0.22),
+                  width: 0.5 + g * 1.2,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: neon.withValues(alpha: 0.45),
+                    blurRadius: 8,
+                    spreadRadius: 2,
+                    offset: const Offset(0, 2),
                   ),
-                  _AnimatedIntText(
-                    value: credits,
-                    style: GoogleFonts.poppins(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      height: 1.05,
-                      color: TalkFreeColors.offWhite,
-                      letterSpacing: -0.4,
-                      shadows: [
-                        Shadow(
-                          color: amber.withValues(alpha: 0.35),
-                          blurRadius: 10,
-                        ),
-                      ],
-                    ),
+                  BoxShadow(
+                    color: AppTheme.neonGreen.withValues(alpha: 0.35 * g),
+                    blurRadius: 8 + 20 * g,
+                    spreadRadius: 2 * g,
                   ),
                 ],
               ),
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.bolt_rounded,
+            color: neon.withValues(alpha: 0.98),
+            size: 20,
+          ),
+          const SizedBox(width: 6),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                isPro ? 'CALLING' : 'CREDITS',
+                style: GoogleFonts.inter(
+                  fontSize: 9,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.2,
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurfaceVariant
+                      .withValues(alpha: 0.85),
+                ),
+              ),
+              creditValue,
             ],
           ),
-        ),
+        ],
       ),
     );
   }
 }
 
-class _AdsRingPainter extends CustomPainter {
-  _AdsRingPainter({required this.progress});
-  final double progress;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final c = Offset(size.width / 2, size.height / 2);
-    final r = size.shortestSide / 2 - 12;
-    final bg = Paint()
-      ..color = Colors.white.withValues(alpha: 0.08)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 11;
-    final fg = Paint()
-      ..color = AppColors.primary
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 11
-      ..strokeCap = StrokeCap.round;
-    canvas.drawCircle(c, r, bg);
-    final sweep = 2 * pi * progress.clamp(0.0, 1.0);
-    canvas.drawArc(
-      Rect.fromCircle(center: c, radius: r),
-      -pi / 2,
-      sweep,
-      false,
-      fg,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _AdsRingPainter oldDelegate) =>
-      oldDelegate.progress != progress;
-}
-
-/// Large glass “Power Card” — circular progress for ads toward the minute grant.
-class _AdsPowerCard extends StatelessWidget {
-  const _AdsPowerCard({
+/// Rewarded ads: one tap → server grants [CreditsPolicy.creditsPerRewardedAd] credits each time.
+class _SimpleAdRewardCard extends StatelessWidget {
+  const _SimpleAdRewardCard({
     required this.rewardedAdBusy,
+    required this.grantRewardPending,
     required this.cooldownRemaining,
-    required this.cycleProgress,
     required this.dailyLimitReached,
     required this.adsToday,
     required this.credits,
+    required this.adStreakDays,
     required this.onEarn,
   });
 
   final bool rewardedAdBusy;
+  final bool grantRewardPending;
   final int cooldownRemaining;
-  final int cycleProgress;
   final bool dailyLimitReached;
   final int adsToday;
   final int credits;
+  final int adStreakDays;
   final Future<void> Function() onEarn;
 
   @override
   Widget build(BuildContext context) {
-    final need = CreditsPolicy.adsRequiredForMinuteGrant;
-    final p = cycleProgress.clamp(0, need);
-    final ringProgress = p / need;
+    final maxPerDay = CreditsPolicy.maxRewardedAdsPerDay;
+    final remaining = max(0, maxPerDay - adsToday);
     final canTap =
         !rewardedAdBusy && !dailyLimitReached && cooldownRemaining <= 0;
 
-    return Material(
-      color: Colors.transparent,
-      child: GlassPanel(
-        borderRadius: AppTheme.radiusLg,
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: canTap
-                ? () {
-                    onEarn();
-                  }
-                : null,
-            borderRadius: BorderRadius.circular(AppTheme.radiusLg),
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
+    return GlassPanel(
+      borderRadius: AppTheme.radiusLg,
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  Icon(
-                    Icons.auto_awesome_rounded,
-                    color: AppColors.primary.withValues(alpha: 0.95),
-                    size: 22,
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    'Earn credits',
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.4,
-                      color: TalkFreeColors.mutedWhite,
-                    ),
-                  ),
-                ],
+              Icon(
+                Icons.play_circle_outline_rounded,
+                color: AppColors.primary.withValues(alpha: 0.95),
+                size: 26,
               ),
-              const SizedBox(height: 18),
-              SizedBox(
-                height: 168,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    CustomPaint(
-                      size: const Size(168, 168),
-                      painter: _AdsRingPainter(progress: ringProgress),
-                    ),
-                    if (rewardedAdBusy)
-                      const SizedBox(
-                        width: 36,
-                        height: 36,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 3,
-                          color: AppColors.primary,
-                        ),
-                      )
-                    else if (dailyLimitReached)
-                      Icon(
-                        Icons.block_rounded,
-                        size: 40,
-                        color: TalkFreeColors.mutedWhite.withValues(alpha: 0.6),
-                      )
-                    else if (cooldownRemaining > 0)
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.timer_outlined,
-                            color: AppColors.primary.withValues(alpha: 0.95),
-                            size: 32,
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            '${cooldownRemaining}s',
-                            style: GoogleFonts.poppins(
-                              fontSize: 22,
-                              fontWeight: FontWeight.w700,
-                              color: TalkFreeColors.offWhite,
-                            ),
-                          ),
-                        ],
-                      )
-                    else
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            'Ads watched',
-                            style: GoogleFonts.inter(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: TalkFreeColors.mutedWhite,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            '$p / $need',
-                            style: GoogleFonts.poppins(
-                              fontSize: 28,
-                              fontWeight: FontWeight.w700,
-                              color: TalkFreeColors.offWhite,
-                              letterSpacing: -1,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Tap to watch',
-                            style: GoogleFonts.inter(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.primary,
-                            ),
-                          ),
-                        ],
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 14),
-              Text(
-                '${CreditsPolicy.adsRequiredForMinuteGrant} ads = '
-                '${CreditsPolicy.creditsPerMinuteGrant} credits (1 min)',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.inter(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  height: 1.35,
-                  color: TalkFreeColors.mutedWhite,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text.rich(
-                TextSpan(
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Earn credits',
                   style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: TalkFreeColors.mutedWhite.withValues(alpha: 0.75),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.8,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
-                  children: [
-                    TextSpan(
-                      text: '$adsToday / ${CreditsPolicy.maxRewardedAdsPerDay}',
-                      style: GoogleFonts.poppins(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: TalkFreeColors.mutedWhite.withValues(alpha: 0.85),
-                      ),
-                    ),
-                    const TextSpan(text: ' ads today'),
-                  ],
                 ),
-                textAlign: TextAlign.center,
               ),
-              if (credits == 0 && canTap) ...[
-                const SizedBox(height: 10),
-                Text(
-                  'Start here — your balance is 0',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.accentAmber.withValues(alpha: 0.95),
-                  ),
-                ),
-              ],
             ],
-              ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Each rewarded ad adds +${CreditsPolicy.creditsPerRewardedAd} credits.',
+            style: GoogleFonts.inter(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              height: 1.35,
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.92),
             ),
           ),
-        ),
+          if (adStreakDays > 0) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Day streak: $adStreakDays — bonuses at ${CreditsPolicy.adStreakMilestoneDays.join(', ')} days',
+              style: GoogleFonts.inter(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                height: 1.35,
+                color: AppTheme.neonGreen.withValues(alpha: 0.88),
+              ),
+            ),
+          ],
+          if (cooldownRemaining > 0 && !dailyLimitReached) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Wait ${cooldownRemaining}s before the next ad.',
+              style: GoogleFonts.inter(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: AppColors.primary.withValues(alpha: 0.9),
+              ),
+            ),
+          ],
+          if (credits == 0 && canTap) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Start here — your balance is 0',
+              style: GoogleFonts.inter(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: AppTheme.neonGreen.withValues(alpha: 0.95),
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: canTap ? () => onEarn() : null,
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: AppColors.onPrimary,
+              disabledBackgroundColor:
+                  (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface)
+                      .withValues(alpha: 0.7),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+            child: rewardedAdBusy
+                ? SizedBox(
+                    height: 22,
+                    width: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      color: AppColors.onPrimary.withValues(alpha: 0.95),
+                    ),
+                  )
+                : Text(
+                    'Watch Ad → Earn Credits',
+                    style: GoogleFonts.inter(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+          ),
+          const SizedBox(height: 10),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            child: grantRewardPending
+                ? Row(
+                    key: const ValueKey<String>('grant'),
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppTheme.neonGreen.withValues(alpha: 0.95),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          RewardAdFeedback.processingReward,
+                          style: GoogleFonts.inter(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            height: 1.3,
+                            color: AppTheme.neonGreen.withValues(alpha: 0.95),
+                          ),
+                        ),
+                      ),
+                    ],
+                  )
+                : Text(
+                    key: const ValueKey<String>('remaining'),
+                    RewardAdFeedback.adsRemainingToday(remaining),
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      height: 1.35,
+                      color: Theme.of(context)
+                          .colorScheme
+                          .onSurfaceVariant
+                          .withValues(alpha: 0.9),
+                    ),
+                  ),
+          ),
+        ],
       ),
     );
   }
@@ -1610,20 +2104,20 @@ class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
         child: Ink(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(18),
-            gradient: const LinearGradient(
+            gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                Color(0xFFFFD54F),
-                Color(0xFFE8C547),
-                Color(0xFF9333EA),
-                Color(0xFF4C1D95),
+                AppTheme.neonGreen.withValues(alpha: 0.92),
+                AppTheme.neonGreen,
+                AppColors.darkBackgroundDeep,
+                AppTheme.darkBg,
               ],
-              stops: [0.0, 0.25, 0.55, 1.0],
+              stops: const [0.0, 0.25, 0.55, 1.0],
             ),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFFE8C547).withValues(alpha: 0.4),
+                color: AppTheme.neonGreen.withValues(alpha: 0.4),
                 blurRadius: 22,
                 offset: const Offset(0, 10),
               ),
@@ -1660,16 +2154,30 @@ class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
                       const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
                   child: Row(
                     children: [
-                      Icon(
-                        Icons.emoji_events_rounded,
-                        color: const Color(0xFFFFD700),
-                        size: 28,
-                        shadows: const [
-                          Shadow(
-                            color: Color(0x66FFD700),
-                            blurRadius: 12,
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.white.withValues(alpha: 0.2),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.2),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: Lottie.asset(
+                              AppTheme.lottieMoney,
+                              fit: BoxFit.contain,
+                              repeat: true,
+                            ),
                           ),
-                        ],
+                        ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -1677,7 +2185,7 @@ class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Get Premium',
+                              'Go Pro',
                               style: GoogleFonts.inter(
                                 fontSize: 17,
                                 fontWeight: FontWeight.w800,
@@ -1687,7 +2195,7 @@ class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              'Instant US number · No ads · Bonus credits',
+                              'Unlimited calling · No ads · US number · Bonus credits',
                               style: GoogleFonts.inter(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w500,
@@ -1729,7 +2237,7 @@ class _ProBenefitsCard extends StatelessWidget {
             children: [
               Icon(
                 Icons.verified_rounded,
-                color: const Color(0xFFE8C547).withValues(alpha: 0.95),
+                color: AppTheme.neonGreen.withValues(alpha: 0.95),
                 size: 22,
               ),
               const SizedBox(width: 10),
@@ -1738,21 +2246,31 @@ class _ProBenefitsCard extends StatelessWidget {
                 style: GoogleFonts.inter(
                   fontSize: 15,
                   fontWeight: FontWeight.w800,
-                  color: TalkFreeColors.offWhite,
+                  color: Theme.of(context).colorScheme.onSurface,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          _proLine('Ad-free experience'),
-          _proLine('Bonus credits & lower call rates'),
-          _proLine('Priority line quality'),
+          Text(
+            'You are saving ${CreditsPolicy.creditsSavedPerMinuteVsFree} credits per minute',
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              height: 1.35,
+              color: AppTheme.neonGreen.withValues(alpha: 0.95),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _proLine(context, 'Ad-free experience'),
+          _proLine(context, 'Bonus credits & lower call rates'),
+          _proLine(context, 'Priority line quality'),
         ],
       ),
     );
   }
 
-  static Widget _proLine(String t) {
+  static Widget _proLine(BuildContext context, String t) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
@@ -1761,7 +2279,7 @@ class _ProBenefitsCard extends StatelessWidget {
           Icon(
             Icons.check_circle_rounded,
             size: 18,
-            color: AppColors.primary.withValues(alpha: 0.95),
+            color: AppTheme.neonGreen.withValues(alpha: 0.95),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -1771,7 +2289,7 @@ class _ProBenefitsCard extends StatelessWidget {
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
                 height: 1.35,
-                color: TalkFreeColors.offWhite.withValues(alpha: 0.92),
+                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.92),
               ),
             ),
           ),
@@ -1800,6 +2318,82 @@ String _leaseShortLabel(DateTime now, DateTime? expiry) {
   if (left.inDays >= 1) return '${left.inDays}d left';
   if (left.inHours >= 1) return '${left.inHours}h left';
   return '${left.inMinutes}m left';
+}
+
+/// Animated handset for the virtual-number row; lock / ready badges when no line yet.
+class _VirtualNumberLottieBadge extends StatelessWidget {
+  const _VirtualNumberLottieBadge({
+    required this.hasNumber,
+    required this.isPremium,
+  });
+
+  final bool hasNumber;
+  final bool isPremium;
+
+  @override
+  Widget build(BuildContext context) {
+    final locked = !hasNumber && !isPremium;
+    final dim = Theme.of(context)
+        .colorScheme
+        .onSurfaceVariant
+        .withValues(alpha: 0.78);
+
+    return SizedBox(
+      width: 48,
+      height: 48,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.center,
+        children: [
+          Opacity(
+            opacity: locked ? 0.48 : 1,
+            child: Lottie.asset(
+              AppTheme.lottiePhoneCall,
+              fit: BoxFit.contain,
+              repeat: true,
+            ),
+          ),
+          if (locked)
+            Positioned(
+              right: -2,
+              bottom: -2,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppTheme.darkBg.withValues(alpha: 0.94),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: dim.withValues(alpha: 0.45),
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: Icon(Icons.lock_rounded, size: 13, color: dim),
+                ),
+              ),
+            )
+          else if (!hasNumber && isPremium)
+            Positioned(
+              right: -2,
+              bottom: -2,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppTheme.darkBg.withValues(alpha: 0.94),
+                  shape: BoxShape.circle,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: Icon(
+                    Icons.check_circle_outline_rounded,
+                    size: 14,
+                    color: AppColors.primary,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Glass number block + lease ring; locked state keeps prior card actions.
@@ -1930,12 +2524,9 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
             children: [
               Row(
                 children: [
-                  Icon(
-                    hasNumber ? Icons.verified_user_rounded : Icons.lock_rounded,
-                    color: hasNumber
-                        ? AppColors.primary
-                        : TalkFreeColors.mutedWhite.withValues(alpha: 0.75),
-                    size: 22,
+                  _VirtualNumberLottieBadge(
+                    hasNumber: hasNumber,
+                    isPremium: widget.isPremium,
                   ),
                   const SizedBox(width: 10),
                   Expanded(
@@ -1945,7 +2536,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                         fontSize: 11,
                         fontWeight: FontWeight.w800,
                         letterSpacing: 2,
-                        color: TalkFreeColors.mutedWhite,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                     ),
                   ),
@@ -1958,7 +2549,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                   style: GoogleFonts.inter(
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
-                    color: TalkFreeColors.mutedWhite,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -1999,7 +2590,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                                         fontSize: 20,
                                         fontWeight: FontWeight.w700,
                                         letterSpacing: 0.4,
-                                        color: TalkFreeColors.offWhite,
+                                        color: Theme.of(context).colorScheme.onSurface,
                                       ),
                                     ),
                                     const SizedBox(height: 6),
@@ -2071,7 +2662,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                   style: GoogleFonts.inter(
                     fontSize: 12,
                     height: 1.35,
-                    color: TalkFreeColors.mutedWhite.withValues(alpha: 0.88),
+                    color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.88),
                   ),
                 ),
               ] else ...[
@@ -2091,7 +2682,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                               fontWeight: FontWeight.w800,
                               height: 1.25,
                               letterSpacing: -0.2,
-                              color: TalkFreeColors.offWhite,
+                              color: Theme.of(context).colorScheme.onSurface,
                             ),
                           ),
                           const SizedBox(height: 8),
@@ -2102,7 +2693,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                               fontSize: 13,
                               fontWeight: FontWeight.w500,
                               height: 1.4,
-                              color: TalkFreeColors.mutedWhite.withValues(
+                              color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(
                                 alpha: 0.92,
                               ),
                             ),
@@ -2150,15 +2741,15 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                 const SizedBox(height: 14),
                 Text(
                   widget.isPremium
-                      ? 'Your subscription includes an instant US line — claim it below.'
+                      ? 'Tap Unlock US Number below to assign your included line.'
                       : canUnlock
-                          ? 'Claim your Twilio US line — it appears in Inbox instantly.'
+                          ? 'Claim your US line — it appears in Inbox instantly.'
                           : 'Watch $minAds ads to unlock — your progress:',
                   style: GoogleFonts.inter(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                     height: 1.45,
-                    color: TalkFreeColors.mutedWhite,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ),
                 if (!widget.isPremium && !canUnlock) ...[
@@ -2181,7 +2772,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                           style: GoogleFonts.poppins(
                             fontSize: 14,
                             fontWeight: FontWeight.w700,
-                            color: AppColors.accentAmber.withValues(alpha: 0.95),
+                            color: AppTheme.neonGreen.withValues(alpha: 0.95),
                           ),
                         ),
                       ),
@@ -2197,7 +2788,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                         style: GoogleFonts.inter(
                           fontWeight: FontWeight.w700,
                           fontSize: 13,
-                          color: const Color(0xFFE8C547),
+                          color: AppTheme.neonGreen,
                         ),
                       ),
                     ),
@@ -2213,10 +2804,10 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                     style: FilledButton.styleFrom(
                       backgroundColor: AppColors.primary,
                       disabledBackgroundColor:
-                          TalkFreeColors.cardBg.withValues(alpha: 0.65),
+                          (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface).withValues(alpha: 0.65),
                       foregroundColor: AppColors.onPrimary,
                       disabledForegroundColor:
-                          TalkFreeColors.mutedWhite.withValues(alpha: 0.55),
+                          Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.55),
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),

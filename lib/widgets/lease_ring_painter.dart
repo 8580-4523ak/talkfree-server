@@ -2,13 +2,15 @@ import 'dart:math' show pi;
 
 import 'package:flutter/material.dart';
 
-/// Gold when ≥7d left, electric blue when 24h–7d, red when &lt;24h or expired.
+import '../theme/app_theme.dart';
+
+/// Neon green when ≥7d left, electric blue when 24h–7d, red when &lt;24h or expired.
 Color leaseRingForegroundColor(DateTime now, DateTime? expiry) {
   if (expiry == null) return const Color(0xFF00C8FF);
   final left = expiry.difference(now);
   if (left.inSeconds <= 0) return const Color(0xFFFF3838);
   if (left.inHours < 24) return const Color(0xFFFF3B3B);
-  if (left.inDays >= 7) return const Color(0xFFE8C547);
+  if (left.inDays >= 7) return AppTheme.neonGreen;
   return const Color(0xFF00B4FF);
 }
 

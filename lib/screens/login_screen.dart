@@ -10,9 +10,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../auth_service.dart';
 import '../config/legal_urls.dart';
 import '../theme/app_colors.dart';
-
-/// Vibrant green accent — matches dialer / intro.
-const Color _neon = Color(0xFF00D084);
+import '../theme/app_theme.dart';
+import '../theme/system_ui.dart';
+import '../utils/app_strings.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -42,6 +42,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   @override
   void initState() {
     super.initState();
+    applyTalkFreeDarkNavigationChrome();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _textStagger.forward();
     });
@@ -115,7 +116,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF020814),
+      backgroundColor: AppTheme.darkBg,
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -129,11 +130,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     gradient: LinearGradient(
                       begin: Alignment(math.cos(t) * 0.45, math.sin(t) * 0.35),
                       end: Alignment(-math.cos(t * 0.9) * 0.4, 1.0),
-                      colors: const [
-                        Color(0xFF020814),
-                        Color(0xFF061238),
-                        Color(0xFF040A1A),
-                        Color(0xFF020A14),
+                      colors: [
+                        AppTheme.darkBg,
+                        const Color(0xFF061238),
+                        const Color(0xFF040A1A),
+                        const Color(0xFF020A14),
                       ],
                       stops: const [0.0, 0.35, 0.72, 1.0],
                     ),
@@ -229,8 +230,8 @@ class _LoginGlassCard extends StatelessWidget {
   final VoidCallback onOpenPrivacy;
 
   static const _headlines = [
-    'Welcome to TalkFree',
-    'International calls. Zero hassle.',
+    AppStrings.appName,
+    AppStrings.splashTagline,
   ];
 
   @override
@@ -247,20 +248,20 @@ class _LoginGlassCard extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(radius),
             border: Border.all(
-              color: _neon.withValues(alpha: 0.14),
+              color: AppColors.splashAccent.withValues(alpha: 0.14),
             ),
             gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
                 Colors.white.withValues(alpha: 0.1),
-                _neon.withValues(alpha: 0.04),
+                AppColors.splashAccent.withValues(alpha: 0.04),
                 Colors.white.withValues(alpha: 0.05),
               ],
             ),
             boxShadow: [
               BoxShadow(
-                color: _neon.withValues(alpha: 0.12),
+                color: AppColors.splashAccent.withValues(alpha: 0.12),
                 blurRadius: 28,
                 spreadRadius: -4,
               ),
@@ -274,6 +275,52 @@ class _LoginGlassCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              Center(
+                child: SizedBox(
+                  width: 144,
+                  height: 144,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    clipBehavior: Clip.none,
+                    children: [
+                      Positioned.fill(
+                        child: ImageFiltered(
+                          imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              gradient: RadialGradient(
+                                colors: [
+                                  AppColors.primary.withValues(alpha: 0.28),
+                                  AppColors.primary.withValues(alpha: 0.05),
+                                  Colors.transparent,
+                                ],
+                                stops: const [0.0, 0.4, 1.0],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: ClipOval(
+                          child: SizedBox(
+                            width: 136,
+                            height: 136,
+                            child: Image.asset(
+                              'assets/splash_mark.png',
+                              fit: BoxFit.cover,
+                              alignment: Alignment.center,
+                              filterQuality: FilterQuality.high,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 22),
               for (var i = 0; i < _headlines.length; i++)
                 _StaggeredLine(
                   controller: textStagger,
@@ -304,20 +351,20 @@ class _LoginGlassCard extends StatelessWidget {
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(18),
                       border: Border.all(
-                        color: _neon.withValues(alpha: 0.16),
+                        color: AppColors.splashAccent.withValues(alpha: 0.16),
                       ),
                       gradient: LinearGradient(
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                         colors: [
                           Colors.white.withValues(alpha: 0.14),
-                          _neon.withValues(alpha: 0.08),
+                          AppColors.splashAccent.withValues(alpha: 0.08),
                           Colors.white.withValues(alpha: 0.06),
                         ],
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: _neon.withValues(alpha: 0.1),
+                          color: AppColors.splashAccent.withValues(alpha: 0.1),
                           blurRadius: 18,
                           spreadRadius: -2,
                         ),
@@ -330,7 +377,7 @@ class _LoginGlassCard extends StatelessWidget {
                               height: 24,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2.2,
-                                color: _neon.withValues(alpha: 0.95),
+                                color: AppColors.splashAccent.withValues(alpha: 0.95),
                               ),
                             )
                           : Row(
@@ -363,13 +410,13 @@ class _LoginGlassCard extends StatelessWidget {
                 child: InkWell(
                   onTap: busy ? null : onAnonymous,
                   borderRadius: BorderRadius.circular(18),
-                  splashColor: _neon.withValues(alpha: 0.12),
+                  splashColor: AppColors.splashAccent.withValues(alpha: 0.12),
                   child: Ink(
                     height: 52,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(18),
                       border: Border.all(
-                        color: _neon.withValues(alpha: 0.14),
+                        color: AppColors.splashAccent.withValues(alpha: 0.14),
                       ),
                       color: Colors.white.withValues(alpha: 0.04),
                     ),
@@ -419,9 +466,9 @@ class _LoginGlassCard extends StatelessWidget {
                       style: GoogleFonts.inter(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: _neon.withValues(alpha: 0.95),
+                        color: AppColors.splashAccent.withValues(alpha: 0.95),
                         decoration: TextDecoration.underline,
-                        decorationColor: _neon.withValues(alpha: 0.7),
+                        decorationColor: AppColors.splashAccent.withValues(alpha: 0.7),
                       ),
                     ),
                   ),
@@ -447,9 +494,9 @@ class _LoginGlassCard extends StatelessWidget {
                       style: GoogleFonts.inter(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: _neon.withValues(alpha: 0.95),
+                        color: AppColors.splashAccent.withValues(alpha: 0.95),
                         decoration: TextDecoration.underline,
-                        decorationColor: _neon.withValues(alpha: 0.7),
+                        decorationColor: AppColors.splashAccent.withValues(alpha: 0.7),
                       ),
                     ),
                   ),
@@ -538,7 +585,7 @@ class _LoginNeonConnectionsPainter extends CustomPainter {
       final phase = (progress + i * 0.22) % 1.0;
       final a = 0.08 + 0.12 * (1 - phase);
       final paint = Paint()
-        ..color = _neon.withValues(alpha: a)
+        ..color = AppColors.splashAccent.withValues(alpha: a)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.1 + phase * 0.4
         ..strokeCap = StrokeCap.round;
