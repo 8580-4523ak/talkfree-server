@@ -712,8 +712,8 @@ class _DialerScreenState extends State<DialerScreen>
                                 children: [
                                   PremiumIosDialPad(
                                     onDigit: _append,
-                                    gap: compactDial ? 12 : 14,
-                                    keyHeight: compactDial ? 52 : 56,
+                                    gap: compactDial ? 14 : 16,
+                                    keyHeight: compactDial ? 58 : 68,
                                   ),
                                   SizedBox(height: compactDial ? 24 : 32),
                                   PremiumIosCallButton(
@@ -912,9 +912,9 @@ class _GlassCreditsCard extends StatelessWidget {
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                Colors.white.withValues(alpha: 0.1),
-                Colors.white.withValues(alpha: 0.03),
-                premiumDialCallGreen.withValues(alpha: 0.05),
+                Colors.white.withValues(alpha: 0.12),
+                Colors.white.withValues(alpha: 0.04),
+                premiumDialCallGreen.withValues(alpha: 0.1),
               ],
             ),
           ),

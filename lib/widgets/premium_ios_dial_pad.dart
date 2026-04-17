@@ -309,21 +309,27 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
   @override
   Widget build(BuildContext context) {
     final enabled = !widget.busy && widget.onPressed != null;
-    const diameter = 76.0;
+    const diameter = 86.0;
     final outerShadow = BoxDecoration(
       shape: BoxShape.circle,
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.38),
-          blurRadius: 18,
+          color: Colors.black.withValues(alpha: 0.45),
+          blurRadius: 22,
           spreadRadius: 0,
-          offset: const Offset(0, 8),
+          offset: const Offset(0, 10),
         ),
         BoxShadow(
-          color: premiumDialCallGreen.withValues(alpha: 0.35),
-          blurRadius: 24,
-          spreadRadius: -4,
-          offset: const Offset(0, 10),
+          color: premiumDialCallGreen.withValues(alpha: 0.55),
+          blurRadius: 32,
+          spreadRadius: -2,
+          offset: const Offset(0, 12),
+        ),
+        BoxShadow(
+          color: premiumDialCallGreen.withValues(alpha: 0.25),
+          blurRadius: 48,
+          spreadRadius: 4,
+          offset: const Offset(0, 14),
         ),
       ],
     );
@@ -376,7 +382,7 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
                           : Icon(
                               Icons.call_rounded,
                               color: Colors.white.withValues(alpha: 0.98),
-                              size: 34,
+                              size: 38,
                             ),
                     ),
                   ),

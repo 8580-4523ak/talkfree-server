@@ -6,13 +6,13 @@ import 'app_colors.dart';
 abstract final class AppTheme {
   AppTheme._();
 
-  static const double radiusMd = 16;
-  static const double radiusLg = 20;
+  static const double radiusMd = 18;
+  static const double radiusLg = 22;
 
   /// Global neon accent — same as [ColorScheme.primary] in [darkTheme].
   static const Color neonGreen = AppColors.primary;
 
-  /// Master scaffold / shell (ultra dark blue-black).
+  /// Master scaffold / shell (premium dark #0B0B0F).
   static const Color darkBg = AppColors.darkBackground;
 
   /// Elevated list rows / cards (matches [ColorScheme.surface] in [darkTheme]).

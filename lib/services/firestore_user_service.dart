@@ -91,12 +91,47 @@ class FirestoreUserService {
   ) =>
       computeUsableCredits(doc.data());
 
-  /// Twilio line lease end from `number_expiry_date` (`Timestamp`), or `null`.
+  /// Twilio line lease end — prefers `numberExpiry`, then `expiry_date`, then `number_expiry_date` (matches server).
   static DateTime? numberLeaseExpiryFromUserData(Map<String, dynamic>? data) {
     if (data == null) return null;
-    final x = data['number_expiry_date'];
-    if (x is Timestamp) return x.toDate();
+    for (final key in ['numberExpiry', 'expiry_date', 'number_expiry_date']) {
+      final x = data[key];
+      if (x is Timestamp) return x.toDate();
+    }
     return null;
+  }
+
+  /// Server line tier: `normal` | `vip` | `premium`.
+  static String? numberTierFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    final v = data['number_tier'] ?? data['numberTier'];
+    if (v is String) {
+      final t = v.trim().toLowerCase();
+      if (t.isNotEmpty) return t;
+    }
+    return null;
+  }
+
+  /// Primary line status from server (`active` | `expired`); legacy `number_status`.
+  static String? numberLineStatusFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    for (final key in ['numberStatus', 'number_status']) {
+      final v = data[key];
+      if (v is String) {
+        final t = v.trim();
+        if (t.isNotEmpty) return t.toLowerCase();
+      }
+    }
+    return null;
+  }
+
+  /// Rewarded ads banked toward server POST `/renew-number` (mode `ads`).
+  static int numberRenewAdProgressFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return 0;
+    final v = data['number_renew_ad_progress'];
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return 0;
   }
 
   /// Plan key for lease length (`daily` | `weekly` | `monthly` | `yearly`).
@@ -115,6 +150,7 @@ class FirestoreUserService {
     if (data == null) return null;
     for (final key in [
       'assigned_number',
+      'phoneNumber',
       'virtual_number',
       'allocatedNumber',
       'number',

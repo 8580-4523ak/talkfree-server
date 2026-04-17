@@ -158,7 +158,7 @@ function toE164(input) {
 
 function readAssignedNumberFromUserDoc(d) {
   if (!d || typeof d !== "object") return "";
-  const keys = ["assigned_number", "virtual_number", "allocatedNumber", "number"];
+  const keys = ["assigned_number", "phoneNumber", "virtual_number", "allocatedNumber", "number"];
   for (const k of keys) {
     const v = d[k];
     if (v == null) continue;
@@ -522,6 +522,20 @@ app.post("/grant-reward", async (req, res) => {
         credits: paid + reward,
       };
 
+      const assignedForRenew = String(d.assigned_number ?? "").trim();
+      let renewProg = Number(d.number_renew_ad_progress || 0);
+      if (assignedForRenew && assignedForRenew.toLowerCase() !== "none") {
+        const expR = readNumberExpiryDate(d);
+        if (!expR || expR.getTime() - now.getTime() <= 7 * 86400000) {
+          renewProg = Math.min(NUMBER_RENEW_ADS_REQUIRED, renewProg + 1);
+        } else {
+          renewProg = 0;
+        }
+      } else {
+        renewProg = 0;
+      }
+      patch.number_renew_ad_progress = renewProg;
+
       if (lastStreakDay === dayKey) {
         delete patch.ad_streak_count;
         delete patch.ad_streak_last_day;
@@ -829,6 +843,8 @@ app.post("/verify-payment", async (req, res) => {
         subscription_tier: "pro",
         premium_plan_type: plan,
         number_expiry_date: Timestamp.fromDate(expDate),
+        expiry_date: Timestamp.fromDate(expDate),
+        numberExpiry: Timestamp.fromDate(expDate),
         premium_subscribed_at: FieldValue.serverTimestamp(),
         last_razorpay_payment_id: razorpay_payment_id,
         premiumWelcomeBonusGranted: true,
@@ -899,6 +915,16 @@ async function handlePurchaseBrowseNumber(req, res) {
     });
   }
 
+  if (countTwilioLines(d) >= maxTwilioLinesFor(d)) {
+    return res.status(409).json({
+      error: "Number limit reached",
+      message: readIsPremium(d)
+        ? "Maximum phone lines for your account."
+        : "Free accounts can have one phone line.",
+      max: maxTwilioLinesFor(d),
+    });
+  }
+
   let incoming;
   try {
     incoming = await purchaseIncomingUsLocal(uid, phonePick);
@@ -966,16 +992,26 @@ async function handlePurchaseBrowseNumber(req, res) {
     rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
   }
   const totalOut = paid + reward;
+  const browseExp = Timestamp.fromDate(new Date(now.getTime() + FREE_TIER_NUMBER_LEASE_MS));
 
   try {
     await ref.update({
       assigned_number: e164,
+      phoneNumber: e164,
       virtual_number: e164,
       allocatedNumber: e164,
       number: e164,
       twilioIncomingPhoneSid: incoming.sid,
       twilioPhoneNumberSid: incoming.sid,
       twilioNumberAssignedAt: FieldValue.serverTimestamp(),
+      numberStatus: "active",
+      number_status: "active",
+      number_expiry_date: browseExp,
+      expiry_date: browseExp,
+      numberExpiry: browseExp,
+      number_plan_type: "browse_credits",
+      number_tier: "vip",
+      number_renew_ad_progress: 0,
       paidCredits: paid,
       rewardCredits: reward,
       rewardCreditsExpiresAt: rewardExpOut,
@@ -998,6 +1034,9 @@ async function handlePurchaseBrowseNumber(req, res) {
     twilioIncomingPhoneSid: incoming.sid,
     creditsDeducted: deduct,
     newBalance: totalOut,
+    number_expiry_date: browseExp.toDate().toISOString(),
+    expiry_date: browseExp.toDate().toISOString(),
+    numberExpiry: browseExp.toDate().toISOString(),
   });
 }
 
@@ -1146,6 +1185,27 @@ const PLAN_ASSIGN_MS = {
   yearly: Number(process.env.PLAN_YEARLY_MS || 31536000000),
 };
 
+/** Free non‑Pro Twilio line lease wall‑clock (default 24h). */
+const FREE_TIER_NUMBER_LEASE_MS = Number(process.env.FREE_TIER_NUMBER_LEASE_MS || 86400000);
+/** Rewarded ads banked toward POST `/renew-number` (mode `ads`). */
+const NUMBER_RENEW_ADS_REQUIRED = Math.max(
+  1,
+  Math.min(100, Number(process.env.NUMBER_RENEW_ADS_REQUIRED || 5)),
+);
+const NUMBER_RENEW_CREDITS = Number(process.env.NUMBER_RENEW_CREDITS || 100);
+const SMS_OUTBOUND_CREDIT_COST = Math.max(0, Number(process.env.SMS_OUTBOUND_CREDIT_COST || 3));
+const MAX_TWILIO_LINES_FREE = Math.max(1, Number(process.env.MAX_TWILIO_LINES_FREE || 1));
+const MAX_TWILIO_LINES_PREMIUM = Math.max(1, Number(process.env.MAX_TWILIO_LINES_PREMIUM || 2));
+
+/** After Twilio release, block re-provisioning this E.164 until this many ms (default 24h). */
+const NUMBER_REUSE_COOLDOWN_MS = Number(process.env.NUMBER_REUSE_COOLDOWN_MS || 86400000);
+/** Pro subscription lines: extra time after `numberExpiry` before janitor releases (default 6h). */
+const PREMIUM_SUBSCRIPTION_GRACE_MS = Number(process.env.PREMIUM_SUBSCRIPTION_GRACE_MS || 21600000);
+/** Max POST `/renew-number` successes per UTC calendar day per user (default 2). */
+const MAX_RENEWALS_PER_DAY = Math.max(0, Math.min(50, Number(process.env.MAX_RENEWALS_PER_DAY || 2)));
+
+const RELEASED_NUMBERS_COLLECTION = "released_numbers";
+
 /**
  * @param {string} raw
  * @returns {"daily"|"weekly"|"monthly"|"yearly"|null}
@@ -1156,6 +1216,78 @@ function normalizePlanType(raw) {
     .toLowerCase();
   if (["daily", "weekly", "monthly", "yearly"].includes(s)) return s;
   return null;
+}
+
+function countTwilioLines(d) {
+  if (!d) return 0;
+  let n = 0;
+  const p = String(d.assigned_number ?? d.phoneNumber ?? "").trim();
+  if (p && p.toLowerCase() !== "none") n += 1;
+  const a = String(d.alt_assigned_number ?? "").trim();
+  if (a && a.toLowerCase() !== "none") n += 1;
+  return n;
+}
+
+function maxTwilioLinesFor(d) {
+  return readIsPremium(d) ? MAX_TWILIO_LINES_PREMIUM : MAX_TWILIO_LINES_FREE;
+}
+
+/** Outbound SMS credit deduction (reward balance first). */
+async function deductCreditsForSms(uid, cost) {
+  if (!firebaseAdmin || !cost || cost <= 0) return { newBalance: null };
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  return db.runTransaction(async (t) => {
+    const snap = await t.get(ref);
+    const d = snap.exists ? snap.data() || {} : {};
+    const usable = usableCreditsFromUserDoc(d);
+    if (usable < cost) {
+      throw Object.assign(new Error("Insufficient credits for outbound SMS"), {
+        http: 402,
+        usableCredits: usable,
+        requiredCredits: cost,
+      });
+    }
+    let paid = Number(d.paidCredits ?? 0);
+    let reward = Number(d.rewardCredits ?? 0);
+    if (d.paidCredits === undefined && d.credits != null) {
+      paid = Number(d.credits);
+      reward = 0;
+    }
+    const now = new Date();
+    const expTs = d.rewardCreditsExpiresAt;
+    if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+      paid += reward;
+      reward = 0;
+    }
+    let left = cost;
+    const takeReward = left < reward ? left : reward;
+    reward -= takeReward;
+    left -= takeReward;
+    paid -= left;
+    let rewardExpOut = null;
+    if (reward > 0) {
+      rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+    }
+    const totalOut = paid + reward;
+    t.update(ref, {
+      paidCredits: paid,
+      rewardCredits: reward,
+      rewardCreditsExpiresAt: rewardExpOut,
+      credits: totalOut,
+    });
+    return { newBalance: totalOut };
+  });
+}
+
+async function refundSmsCredits(uid, cost) {
+  if (!firebaseAdmin || !cost || cost <= 0) return;
+  const { FieldValue } = firebaseAdmin.firestore;
+  const ref = firebaseAdmin.firestore().collection("users").doc(uid);
+  await ref.update({
+    paidCredits: FieldValue.increment(cost),
+    credits: FieldValue.increment(cost),
+  });
 }
 
 /** US E.164 (+1 + 10 digits, NPA 2–9). */
@@ -1186,11 +1318,112 @@ function isTwilioNumberUnavailableError(e) {
   );
 }
 
+function e164ToReuseDocId(e164) {
+  return String(e164 ?? "")
+    .replace(/\D/g, "");
+}
+
+/**
+ * @returns {Promise<number|null>} millis when reusable, or null if not in cooldown
+ */
+async function getReuseCooldownUntilMs(e164) {
+  if (!firebaseAdmin) return null;
+  let normalized;
+  try {
+    normalized = normalizeUsE164OrThrow(e164);
+  } catch {
+    return null;
+  }
+  const id = e164ToReuseDocId(normalized);
+  if (!id) return null;
+  const snap = await firebaseAdmin.firestore().collection(RELEASED_NUMBERS_COLLECTION).doc(id).get();
+  if (!snap.exists) return null;
+  const ra = snap.data()?.reusable_after;
+  if (ra && typeof ra.toMillis === "function") return ra.toMillis();
+  return null;
+}
+
+async function assertPhoneReusableOrThrow(e164) {
+  const until = await getReuseCooldownUntilMs(e164);
+  if (until != null && until > Date.now()) {
+    const err = new Error("Number is cooling down before reuse — pick another.");
+    err.http = 409;
+    err.code = "NUMBER_IN_REUSE_COOLDOWN";
+    err.reusableAfter = new Date(until).toISOString();
+    throw err;
+  }
+}
+
+async function recordReleasedNumber(e164) {
+  if (!firebaseAdmin) return;
+  let normalized;
+  try {
+    normalized = normalizeUsE164OrThrow(e164);
+  } catch (e) {
+    console.warn("[released_numbers] skip invalid e164:", e.message || e);
+    return;
+  }
+  const { Timestamp } = firebaseAdmin.firestore;
+  const id = e164ToReuseDocId(normalized);
+  const after = Timestamp.fromMillis(Date.now() + NUMBER_REUSE_COOLDOWN_MS);
+  await firebaseAdmin
+    .firestore()
+    .collection(RELEASED_NUMBERS_COLLECTION)
+    .doc(id)
+    .set(
+      {
+        phoneNumber: normalized,
+        reusable_after: after,
+        released_at: Timestamp.now(),
+      },
+      { merge: true },
+    );
+}
+
+async function clearReuseCooldownRecord(e164) {
+  if (!firebaseAdmin) return;
+  try {
+    const normalized = normalizeUsE164OrThrow(e164);
+    const id = e164ToReuseDocId(normalized);
+    await firebaseAdmin.firestore().collection(RELEASED_NUMBERS_COLLECTION).doc(id).delete();
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/** @param {string[]} e164Candidates */
+async function filterPhoneNumbersPastReuseCooldown(e164Candidates) {
+  if (!firebaseAdmin || !e164Candidates || !e164Candidates.length) return e164Candidates || [];
+  const db = firebaseAdmin.firestore();
+  const refs = [];
+  const normalizedList = [];
+  for (const raw of e164Candidates) {
+    try {
+      const n = normalizeUsE164OrThrow(String(raw).trim());
+      refs.push(db.collection(RELEASED_NUMBERS_COLLECTION).doc(e164ToReuseDocId(n)));
+      normalizedList.push(n);
+    } catch {
+      /* skip */
+    }
+  }
+  if (!refs.length) return e164Candidates;
+  const snaps = await db.getAll(...refs);
+  const blocked = new Set();
+  const now = Date.now();
+  snaps.forEach((sn) => {
+    if (!sn.exists) return;
+    const ra = sn.data()?.reusable_after;
+    if (ra && ra.toMillis && ra.toMillis() > now) blocked.add(sn.id);
+  });
+  return normalizedList.filter((n) => !blocked.has(e164ToReuseDocId(n)));
+}
+
 /**
  * Purchase a specific US local number from Twilio (must still be available — use GET /available-numbers).
  * Voice URL → /voice-inbound-number; SMS → /sms-webhook.
  */
 async function purchaseIncomingUsLocal(uid, phoneNumberE164) {
+  await assertPhoneReusableOrThrow(phoneNumberE164);
   const normalized = normalizeUsE164OrThrow(phoneNumberE164);
   const incoming = await twilioClient.incomingPhoneNumbers.create({
     phoneNumber: normalized,
@@ -1200,6 +1433,7 @@ async function purchaseIncomingUsLocal(uid, phoneNumberE164) {
     voiceUrl: `${publicBase}/voice-inbound-number`,
     voiceMethod: "POST",
   });
+  await clearReuseCooldownRecord(normalized);
   return incoming;
 }
 
@@ -1336,9 +1570,12 @@ app.post("/sms-webhook", async (req, res) => {
   try {
     const db = firebaseAdmin.firestore();
     const { FieldValue } = firebaseAdmin.firestore;
-    const q = await db.collection("users").where("assigned_number", "==", To).get();
+    let q = await db.collection("users").where("assigned_number", "==", To).get();
     if (q.empty) {
-      console.warn("sms-webhook: no user with assigned_number=", To);
+      q = await db.collection("users").where("alt_assigned_number", "==", To).get();
+    }
+    if (q.empty) {
+      console.warn("sms-webhook: no user with assigned_number / alt_assigned_number=", To);
     } else {
       const uid = pickUidForAssignedNumber(q.docs);
       if (uid) {
@@ -1397,10 +1634,13 @@ app.get("/available-numbers", async (req, res) => {
       postalCode: n.postalCode || null,
       capabilities: n.capabilities || {},
     }));
+    const allowed = new Set(await filterPhoneNumbersPastReuseCooldown(numbers.map((n) => n.phoneNumber)));
+    const numbersOut = numbers.filter((n) => allowed.has(n.phoneNumber));
     return res.status(200).json({
       ok: true,
-      count: numbers.length,
-      numbers,
+      count: numbersOut.length,
+      numbers: numbersOut,
+      reuseCooldownHours: NUMBER_REUSE_COOLDOWN_MS / 3600000,
     });
   } catch (e) {
     console.error("GET /available-numbers:", e);
@@ -1509,7 +1749,7 @@ app.get("/browse-available-numbers", async (req, res) => {
         nextPage = null;
       }
     }
-    const numbers = list.map((item) => ({
+    const numbersRaw = list.map((item) => ({
       phoneNumber: item.phone_number,
       locality: item.locality || null,
       region: item.region || null,
@@ -1517,11 +1757,16 @@ app.get("/browse-available-numbers", async (req, res) => {
       postalCode: item.postal_code || null,
       country,
     }));
+    const allowed = new Set(
+      await filterPhoneNumbersPastReuseCooldown(numbersRaw.map((n) => n.phoneNumber).filter(Boolean)),
+    );
+    const numbers = numbersRaw.filter((n) => n.phoneNumber && allowed.has(n.phoneNumber));
     return res.status(200).json({
       ok: true,
       country,
       numbers,
       nextPage,
+      reuseCooldownHours: NUMBER_REUSE_COOLDOWN_MS / 3600000,
     });
   } catch (e) {
     console.error("GET /browse-available-numbers:", e);
@@ -1594,12 +1839,15 @@ app.get("/api/twilio/available-numbers", async (req, res) => {
       areaCode: /^\d{3}$/.test(areaCode) ? areaCode : "",
     });
     const numbers = list.map((n) => mapTwilioAvailableNumber(n, country));
+    const allowed = new Set(await filterPhoneNumbersPastReuseCooldown(numbers.map((n) => n.phoneNumber)));
+    const numbersOut = numbers.filter((n) => allowed.has(n.phoneNumber));
     return res.status(200).json({
       ok: true,
       country,
       numberType,
-      count: numbers.length,
-      numbers,
+      count: numbersOut.length,
+      numbers: numbersOut,
+      reuseCooldownHours: NUMBER_REUSE_COOLDOWN_MS / 3600000,
     });
   } catch (e) {
     console.error("GET /api/twilio/available-numbers twilio:", e);
@@ -1642,7 +1890,7 @@ app.post("/api/twilio/provision-number", async (req, res) => {
 
   const db = firebaseAdmin.firestore();
   const ref = db.collection("users").doc(uid);
-  const { FieldValue } = firebaseAdmin.firestore;
+  const { FieldValue, Timestamp } = firebaseAdmin.firestore;
 
   let snap;
   try {
@@ -1663,14 +1911,17 @@ app.post("/api/twilio/provision-number", async (req, res) => {
     });
   }
 
-  const existingAssigned = String(d.assigned_number ?? "").trim();
-  if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
+  const primary = String(d.assigned_number ?? "").trim();
+  if (primary && primary.toLowerCase() !== "none") {
     return res.status(409).json({
       error: "Already assigned",
       message: "This account already has an assigned number.",
-      assigned_number: existingAssigned,
+      assigned_number: primary,
     });
   }
+
+  const nowDate = new Date();
+  const lineExpTs = Timestamp.fromDate(premiumLineExpiryFromUserDoc(d, nowDate));
 
   let incoming;
   try {
@@ -1688,6 +1939,7 @@ app.post("/api/twilio/provision-number", async (req, res) => {
   try {
     await ref.update({
       assigned_number: e164,
+      phoneNumber: e164,
       virtual_number: e164,
       allocatedNumber: e164,
       number: e164,
@@ -1695,7 +1947,17 @@ app.post("/api/twilio/provision-number", async (req, res) => {
       twilioPhoneNumberSid: incoming.sid,
       twilioNumberAssignedAt: FieldValue.serverTimestamp(),
       number_assigned_at: FieldValue.serverTimestamp(),
+      numberStatus: "active",
       number_status: "active",
+      userNumber: e164,
+      number_country: "US",
+      number_created_at: FieldValue.serverTimestamp(),
+      number_expiry_date: lineExpTs,
+      expiry_date: lineExpTs,
+      numberExpiry: lineExpTs,
+      number_plan_type: String(d.premium_plan_type || "monthly"),
+      number_tier: "premium",
+      number_renew_ad_progress: 0,
     });
   } catch (e) {
     console.error("POST /api/twilio/provision-number Firestore:", e);
@@ -1737,6 +1999,8 @@ async function respondAfterTwilioAssignSuccess(
     adsLifetime,
     enoughAds,
     enoughCredits,
+    /** @type {"normal"|"vip"|"premium"} */
+    numberTier = "vip",
     extraFirestore = {},
     extraResponse = {},
   },
@@ -1754,8 +2018,8 @@ async function respondAfterTwilioAssignSuccess(
   const d2 = freshSnap.exists ? freshSnap.data() || {} : {};
   let paid = Number(d2.paidCredits ?? 0);
   let reward = Number(d2.rewardCredits ?? 0);
-  const expTs = d2.rewardCreditsExpiresAt;
-  if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+  const rewardExpTs = d2.rewardCreditsExpiresAt;
+  if (reward > 0 && rewardExpTs && rewardExpTs.toDate && rewardExpTs.toDate() < now) {
     paid += reward;
     reward = 0;
   }
@@ -1777,20 +2041,27 @@ async function respondAfterTwilioAssignSuccess(
   let rewardExpOut = null;
   if (reward > 0) {
     rewardExpOut =
-      expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+      rewardExpTs && rewardExpTs.toDate && rewardExpTs.toDate() >= now ? rewardExpTs : null;
   }
   const totalOut = paid + reward;
 
+  const expTs = Timestamp.fromDate(expiryDate);
   const patch = {
     assigned_number: e164,
+    phoneNumber: e164,
     virtual_number: e164,
     allocatedNumber: e164,
     number: e164,
     twilioIncomingPhoneSid: incoming.sid,
     twilioPhoneNumberSid: incoming.sid,
     twilioNumberAssignedAt: FieldValue.serverTimestamp(),
-    number_expiry_date: Timestamp.fromDate(expiryDate),
+    numberStatus: "active",
+    number_status: "active",
+    number_expiry_date: expTs,
+    expiry_date: expTs,
+    numberExpiry: expTs,
     number_plan_type: planType,
+    number_tier: numberTier,
     paidCredits: paid,
     rewardCredits: reward,
     rewardCreditsExpiresAt: rewardExpOut,
@@ -1816,8 +2087,11 @@ async function respondAfterTwilioAssignSuccess(
     assigned_number: e164,
     twilioIncomingPhoneSid: incoming.sid,
     planType,
+    number_tier: numberTier,
     creditsDeducted: deduct,
     number_expiry_date: expiryDate.toISOString(),
+    expiry_date: expiryDate.toISOString(),
+    numberExpiry: expiryDate.toISOString(),
     newBalance: totalOut,
     usableCredits: usable,
     adsWatchedLifetime: adsLifetime,
@@ -1867,14 +2141,14 @@ app.post("/assign-free-number", async (req, res) => {
   const d = snap.data() || {};
   const existingAssigned = String(d.assigned_number ?? "").trim();
   if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
-    const ne = d.number_expiry_date;
+    const ne = readNumberExpiryDate(d);
     return res.status(200).json({
       ok: true,
       alreadyAssigned: true,
       assigned_number: existingAssigned,
       twilioIncomingPhoneSid: d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid || null,
-      number_expiry_date:
-        ne && typeof ne.toDate === "function" ? ne.toDate().toISOString() : null,
+      number_expiry_date: ne ? ne.toISOString() : null,
+      expiry_date: ne ? ne.toISOString() : null,
       number_plan_type: d.number_plan_type ?? null,
     });
   }
@@ -1909,6 +2183,16 @@ app.post("/assign-free-number", async (req, res) => {
     });
   }
 
+  if (countTwilioLines(d) >= maxTwilioLinesFor(d)) {
+    return res.status(409).json({
+      error: "Number limit reached",
+      message: readIsPremium(d)
+        ? "Maximum phone lines for your account."
+        : "Free accounts can have one phone line.",
+      max: maxTwilioLinesFor(d),
+    });
+  }
+
   const planCredits = Number(PLAN_ASSIGN_CREDITS[planType] ?? NaN);
   if (!Number.isFinite(planCredits) || planCredits < 0) {
     return res.status(500).json({ error: "Plan credit configuration invalid" });
@@ -1922,7 +2206,7 @@ app.post("/assign-free-number", async (req, res) => {
     });
   }
 
-  const leaseMs = Number(PLAN_ASSIGN_MS[planType] ?? NaN);
+  const leaseMs = FREE_TIER_NUMBER_LEASE_MS;
   if (!Number.isFinite(leaseMs) || leaseMs <= 0) {
     return res.status(500).json({ error: "Plan duration configuration invalid" });
   }
@@ -1937,31 +2221,44 @@ app.post("/assign-free-number", async (req, res) => {
   if (!list || !list.length) {
     return res.status(503).json({ error: "No US numbers available — try again later." });
   }
-  const phonePick = String(list[0].phoneNumber || "").trim();
-  if (!phonePick) {
-    return res.status(503).json({ error: "Empty inventory phone" });
+  const candidates = list.map((x) => String(x.phoneNumber || "").trim()).filter(Boolean);
+  const afterCooldown = await filterPhoneNumbersPastReuseCooldown(candidates);
+  const tryList = afterCooldown.length ? afterCooldown : [];
+  if (!tryList.length) {
+    return res.status(503).json({
+      error: "No numbers past reuse cooldown — try again later.",
+      reuseCooldownHours: NUMBER_REUSE_COOLDOWN_MS / 3600000,
+    });
   }
 
   let incoming;
-  try {
-    incoming = await purchaseIncomingUsLocal(uid, phonePick);
-  } catch (e) {
-    console.error("assign-free-number Twilio purchase:", e);
-    if (isTwilioNumberUnavailableError(e)) {
-      return res.status(409).json({
-        error: "NUMBER_UNAVAILABLE",
-        code: "NUMBER_UNAVAILABLE",
-        message: "Number was taken — try again.",
-      });
+  let lastErr;
+  for (const phonePick of tryList) {
+    try {
+      incoming = await purchaseIncomingUsLocal(uid, phonePick);
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.error("assign-free-number Twilio purchase try:", phonePick, e.message || e);
+      if (isTwilioNumberUnavailableError(e) || (e && e.code === "NUMBER_IN_REUSE_COOLDOWN")) {
+        continue;
+      }
+      const status = Number(e.status);
+      const http =
+        e.http != null
+          ? Number(e.http)
+          : Number.isFinite(status) && status >= 400 && status < 600
+            ? status
+            : 502;
+      return res.status(http).json({ error: String(e.message || e) });
     }
-    const status = Number(e.status);
-    const http =
-      e.http != null
-        ? Number(e.http)
-        : Number.isFinite(status) && status >= 400 && status < 600
-          ? status
-          : 502;
-    return res.status(http).json({ error: String(e.message || e) });
+  }
+  if (!incoming) {
+    return res.status(409).json({
+      error: "NUMBER_UNAVAILABLE",
+      code: "NUMBER_UNAVAILABLE",
+      message: lastErr ? String(lastErr.message || lastErr) : "No number could be claimed — try again.",
+    });
   }
 
   const e164 = String(incoming.phoneNumber || "").trim();
@@ -1986,12 +2283,13 @@ app.post("/assign-free-number", async (req, res) => {
     adsLifetime,
     enoughAds,
     enoughCredits,
+    numberTier: "normal",
     extraFirestore: {
       userNumber: e164,
       number_country: "US",
       number_created_at: FieldValue.serverTimestamp(),
     },
-    extraResponse: { assignMode: "free_auto" },
+    extraResponse: { assignMode: "free_auto", number_tier: "normal" },
   });
 });
 
@@ -2026,7 +2324,7 @@ app.post("/purchase-number", async (req, res) => {
 
   const db = firebaseAdmin.firestore();
   const ref = db.collection("users").doc(uid);
-  const { FieldValue } = firebaseAdmin.firestore;
+  const { FieldValue, Timestamp } = firebaseAdmin.firestore;
 
   let snap;
   try {
@@ -2047,14 +2345,22 @@ app.post("/purchase-number", async (req, res) => {
     });
   }
 
-  const existingAssigned = String(d.assigned_number ?? "").trim();
-  if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
+  const primary = String(d.assigned_number ?? "").trim();
+  const altLine = String(d.alt_assigned_number ?? "").trim();
+  const hasPrimary = primary && primary.toLowerCase() !== "none";
+  const hasAlt = altLine && altLine.toLowerCase() !== "none";
+
+  if (hasPrimary && hasAlt) {
     return res.status(409).json({
-      error: "Already assigned",
-      message: "This account already has an assigned number.",
-      assigned_number: existingAssigned,
+      error: "Line limit reached",
+      message: `You already have ${MAX_TWILIO_LINES_PREMIUM} Pro phone lines.`,
+      max: MAX_TWILIO_LINES_PREMIUM,
     });
   }
+
+  const nowDate = new Date();
+  const lineExpTs = Timestamp.fromDate(premiumLineExpiryFromUserDoc(d, nowDate));
+  const expIso = lineExpTs.toDate().toISOString();
 
   let incoming;
   try {
@@ -2069,9 +2375,11 @@ app.post("/purchase-number", async (req, res) => {
     return res.status(400).json({ error: "Twilio returned empty phone number" });
   }
 
-  try {
+  if (!hasPrimary) {
+    try {
     await ref.update({
       assigned_number: e164,
+      phoneNumber: e164,
       virtual_number: e164,
       allocatedNumber: e164,
       number: e164,
@@ -2079,13 +2387,49 @@ app.post("/purchase-number", async (req, res) => {
       twilioPhoneNumberSid: incoming.sid,
       twilioNumberAssignedAt: FieldValue.serverTimestamp(),
       number_assigned_at: FieldValue.serverTimestamp(),
+      numberStatus: "active",
       number_status: "active",
       userNumber: e164,
       number_country: "US",
       number_created_at: FieldValue.serverTimestamp(),
+      number_expiry_date: lineExpTs,
+      expiry_date: lineExpTs,
+      numberExpiry: lineExpTs,
+      number_plan_type: String(d.premium_plan_type || "monthly"),
+      number_tier: "premium",
+      number_renew_ad_progress: 0,
     });
   } catch (e) {
     console.error("POST /purchase-number Firestore:", e);
+      return res.status(500).json({
+        error: String(e.message || e),
+        warning:
+          "Twilio number was purchased but profile update failed — check Twilio Console and Firestore manually.",
+        twilioIncomingPhoneSid: incoming.sid,
+        phoneNumber: e164,
+      });
+    }
+    return res.status(200).json({
+      ok: true,
+      assigned_number: e164,
+      slot: "primary",
+      twilioIncomingPhoneSid: incoming.sid,
+      number_status: "active",
+      expiry_date: expIso,
+      number_expiry_date: expIso,
+    });
+  }
+
+  try {
+    await ref.update({
+      alt_assigned_number: e164,
+      alt_twilioIncomingPhoneSid: incoming.sid,
+      alt_twilioPhoneNumberSid: incoming.sid,
+      alt_twilioNumberAssignedAt: FieldValue.serverTimestamp(),
+      number_renew_ad_progress: 0,
+    });
+  } catch (e) {
+    console.error("POST /purchase-number Firestore (alt):", e);
     return res.status(500).json({
       error: String(e.message || e),
       warning:
@@ -2098,8 +2442,11 @@ app.post("/purchase-number", async (req, res) => {
   return res.status(200).json({
     ok: true,
     assigned_number: e164,
+    slot: "secondary",
     twilioIncomingPhoneSid: incoming.sid,
     number_status: "active",
+    expiry_date: expIso,
+    number_expiry_date: expIso,
   });
 });
 
@@ -2162,15 +2509,25 @@ app.post("/assign-number", async (req, res) => {
   const d = snap.data() || {};
   const existingAssigned = String(d.assigned_number ?? "").trim();
   if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
-    const ne = d.number_expiry_date;
+    const ne = readNumberExpiryDate(d);
     return res.status(200).json({
       ok: true,
       alreadyAssigned: true,
       assigned_number: existingAssigned,
       twilioIncomingPhoneSid: d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid || null,
-      number_expiry_date:
-        ne && typeof ne.toDate === "function" ? ne.toDate().toISOString() : null,
+      number_expiry_date: ne ? ne.toISOString() : null,
+      expiry_date: ne ? ne.toISOString() : null,
       number_plan_type: d.number_plan_type ?? null,
+    });
+  }
+
+  if (countTwilioLines(d) >= maxTwilioLinesFor(d)) {
+    return res.status(409).json({
+      error: "Number limit reached",
+      message: readIsPremium(d)
+        ? "Maximum phone lines for your account."
+        : "Free accounts can have one phone line.",
+      max: maxTwilioLinesFor(d),
     });
   }
 
@@ -2213,9 +2570,35 @@ app.post("/assign-number", async (req, res) => {
     });
   }
 
-  const leaseMs = Number(PLAN_ASSIGN_MS[planType] ?? NaN);
+  let leaseMs = Number(PLAN_ASSIGN_MS[planType] ?? NaN);
   if (!Number.isFinite(leaseMs) || leaseMs <= 0) {
     return res.status(500).json({ error: "Plan duration configuration invalid" });
+  }
+  if (!premium) {
+    leaseMs = FREE_TIER_NUMBER_LEASE_MS;
+  }
+
+  let tierReq = String(req.body?.numberTier ?? "")
+    .trim()
+    .toLowerCase();
+  if (!tierReq) tierReq = premium ? "premium" : "vip";
+  if (tierReq === "normal") {
+    return res.status(400).json({
+      error: "Use POST /assign-free-number for Normal tier",
+      hint: "POST /assign-number accepts numberTier vip (credits) or premium (Pro).",
+    });
+  }
+  if (tierReq !== "vip" && tierReq !== "premium") {
+    return res.status(400).json({
+      error: "Invalid numberTier",
+      expected: ["vip", "premium"],
+    });
+  }
+  if (tierReq === "premium" && !premium) {
+    return res.status(403).json({
+      error: "Premium tier requires Pro",
+      message: "Upgrade to Pro or choose VIP (credit-based).",
+    });
   }
 
   const phonePick =
@@ -2273,8 +2656,9 @@ app.post("/assign-number", async (req, res) => {
     adsLifetime,
     enoughAds,
     enoughCredits,
+    numberTier: tierReq,
     extraFirestore: {},
-    extraResponse: {},
+    extraResponse: { number_tier: tierReq },
   });
 });
 
@@ -2289,11 +2673,45 @@ function readIsPremium(d) {
   return t === "pro" || t === "premium";
 }
 
-/** Virtual-number lease expiry (`number_expiry_date`). Missing → legacy user (treated as active). */
+/** Line lease end — prefers `numberExpiry`, then `expiry_date`, then `number_expiry_date`. */
 function readNumberExpiryDate(d) {
-  const x = d.number_expiry_date;
-  if (x && typeof x.toDate === "function") return x.toDate();
+  if (!d) return null;
+  const keys = ["numberExpiry", "expiry_date", "number_expiry_date"];
+  for (const k of keys) {
+    const x = d[k];
+    if (x && typeof x.toDate === "function") return x.toDate();
+  }
   return null;
+}
+
+/** Primary line status: `active` | `expired` (and legacy `number_status`). */
+function readNumberLineStatus(d) {
+  if (!d) return "";
+  const a = d.numberStatus;
+  if (typeof a === "string" && a.trim()) return a.trim().toLowerCase();
+  const b = d.number_status;
+  if (typeof b === "string" && b.trim()) return b.trim().toLowerCase();
+  return "";
+}
+
+/** `normal` (free auto-assign) | `vip` (credit assign-number) | `premium` (Pro purchase). */
+function readNumberTier(d) {
+  if (!d) return "normal";
+  const t = String(d.number_tier ?? d.numberTier ?? "").toLowerCase().trim();
+  if (t === "normal" || t === "vip" || t === "premium") return t;
+  const npt = String(d.number_plan_type ?? "").toLowerCase();
+  if (npt === "browse_credits") return "vip";
+  if (readIsPremium(d)) return "premium";
+  return "normal";
+}
+
+function premiumLineExpiryFromUserDoc(d, nowDate) {
+  const ex = readNumberExpiryDate(d);
+  const plan = normalizePlanType(d.premium_plan_type) || "monthly";
+  if (!ex || ex.getTime() <= nowDate.getTime()) {
+    return subscriptionExpiryFromPlan(plan);
+  }
+  return ex;
 }
 
 /**
@@ -2302,11 +2720,20 @@ function readNumberExpiryDate(d) {
  */
 function assertAssignedNumberSubscriptionActive(d) {
   if (!d) return;
-  const assigned = String(d.assigned_number ?? "").trim();
+  const st = readNumberLineStatus(d);
+  if (st === "expired") {
+    const err = new Error("Assigned number has expired — get a new number in the app.");
+    err.http = 403;
+    err.code = "NUMBER_EXPIRED";
+    throw err;
+  }
+  const assigned = String(d.assigned_number ?? d.phoneNumber ?? "").trim();
   if (!assigned || assigned.toLowerCase() === "none") return;
   const exp = readNumberExpiryDate(d);
   if (exp == null) return;
-  if (exp.getTime() < Date.now()) {
+  const tier = readNumberTier(d);
+  const graceMs = tier === "premium" ? PREMIUM_SUBSCRIPTION_GRACE_MS : 0;
+  if (exp.getTime() + graceMs < Date.now()) {
     const err = new Error("Assigned number lease expired — renew your plan in the app.");
     err.http = 403;
     err.code = "NUMBER_EXPIRED";
@@ -2315,8 +2742,8 @@ function assertAssignedNumberSubscriptionActive(d) {
 }
 
 /**
- * Nightly job: Twilio bills monthly per IncomingPhoneNumber — release expired leases so numbers are not left provisioned.
- * Query: number_expiry_date &lt; now (Firestore must store a Timestamp). Clears number fields on the user doc.
+ * Scheduled job: release Twilio numbers whose lease (`numberExpiry` / `expiry_date` / `number_expiry_date`) is in the past.
+ * Runs on cron (default hourly UTC) — see NUMBER_JANITOR_CRON.
  */
 async function runNumberLeaseJanitor() {
   if (!firebaseAdmin) {
@@ -2324,13 +2751,26 @@ async function runNumberLeaseJanitor() {
     return { candidates: 0, twilioReleased: 0, twilioErrors: 0, firestoreCleared: 0, firestoreErrors: 0 };
   }
   const db = firebaseAdmin.firestore();
-  const now = firebaseAdmin.firestore.Timestamp.now();
-  let snapshot;
+  const nowTs = firebaseAdmin.firestore.Timestamp.now();
+  const nowMs = Date.now();
+  let s1;
+  let s2;
+  let s3;
   try {
-    snapshot = await db.collection("users").where("number_expiry_date", "<", now).get();
+    s1 = await db.collection("users").where("number_expiry_date", "<", nowTs).get();
+    s2 = await db.collection("users").where("expiry_date", "<", nowTs).get();
+    s3 = await db.collection("users").where("numberExpiry", "<", nowTs).get();
   } catch (e) {
     console.error("[number-janitor] Firestore query failed:", e.message || e);
     throw e;
+  }
+
+  const seen = new Set();
+  const docs = [];
+  for (const doc of [...s1.docs, ...s2.docs, ...s3.docs]) {
+    if (seen.has(doc.id)) continue;
+    seen.add(doc.id);
+    docs.push(doc);
   }
 
   let twilioReleased = 0;
@@ -2338,14 +2778,50 @@ async function runNumberLeaseJanitor() {
   let firestoreCleared = 0;
   let firestoreErrors = 0;
 
-  for (const doc of snapshot.docs) {
+  async function tryRemoveSidWithReuse(e164, sidRaw) {
+    const sid = String(sidRaw ?? "").trim();
+    if (!sid) return;
+    try {
+      await twilioClient.incomingPhoneNumbers(sid).remove();
+      twilioReleased += 1;
+      const e = String(e164 ?? "").trim();
+      if (e && e.toLowerCase() !== "none") {
+        await recordReleasedNumber(e);
+      }
+    } catch (e) {
+      twilioErrors += 1;
+      console.error(`[number-janitor] Twilio remove failed sid=${sid}:`, e.message || e);
+    }
+  }
+
+  for (const doc of docs) {
     const d = doc.data() || {};
-    const assigned = String(d.assigned_number ?? "").trim();
-    if (!assigned || assigned.toLowerCase() === "none") {
+    const leaseEnd = readNumberExpiryDate(d);
+    if (leaseEnd == null) {
+      continue;
+    }
+    const tier = readNumberTier(d);
+    const graceMs = tier === "premium" ? PREMIUM_SUBSCRIPTION_GRACE_MS : 0;
+    if (leaseEnd.getTime() + graceMs >= nowMs) {
+      continue;
+    }
+
+    const assigned = String(d.assigned_number ?? d.phoneNumber ?? "").trim();
+    const altNum = String(d.alt_assigned_number ?? "").trim();
+    const hasLine =
+      (assigned && assigned.toLowerCase() !== "none") ||
+      (altNum && altNum.toLowerCase() !== "none");
+
+    if (!hasLine) {
       try {
         await doc.ref.update({
           number_expiry_date: null,
+          expiry_date: null,
+          numberExpiry: null,
           number_plan_type: null,
+          phoneNumber: null,
+          numberStatus: null,
+          number_status: null,
         });
       } catch (e) {
         console.error(`[number-janitor] orphan expiry cleanup failed uid=${doc.id}:`, e.message || e);
@@ -2353,33 +2829,41 @@ async function runNumberLeaseJanitor() {
       continue;
     }
 
-    const sid = String(d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid || "").trim();
-    if (sid) {
-      try {
-        await twilioClient.incomingPhoneNumbers(sid).remove();
-        twilioReleased += 1;
-      } catch (e) {
-        twilioErrors += 1;
-        console.error(
-          `[number-janitor] Twilio incomingPhoneNumbers.remove failed uid=${doc.id} sid=${sid}:`,
-          e.message || e,
-        );
-      }
-    } else {
+    await tryRemoveSidWithReuse(assigned, d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid);
+    await tryRemoveSidWithReuse(altNum, d.alt_twilioIncomingPhoneSid || d.alt_twilioPhoneNumberSid);
+
+    if (
+      !String(d.twilioIncomingPhoneSid || d.twilioPhoneNumberSid || "").trim() &&
+      !String(d.alt_twilioIncomingPhoneSid || d.alt_twilioPhoneNumberSid || "").trim()
+    ) {
       console.warn(`[number-janitor] expired lease but no Twilio SID on user ${doc.id} — clearing Firestore only`);
     }
 
     try {
       await doc.ref.update({
         assigned_number: null,
+        phoneNumber: null,
         virtual_number: null,
         allocatedNumber: null,
         number: null,
         twilioIncomingPhoneSid: null,
         twilioPhoneNumberSid: null,
         twilioNumberAssignedAt: null,
+        alt_assigned_number: null,
+        alt_twilioIncomingPhoneSid: null,
+        alt_twilioPhoneNumberSid: null,
+        alt_twilioNumberAssignedAt: null,
         number_expiry_date: null,
+        expiry_date: null,
+        numberExpiry: null,
         number_plan_type: null,
+        userNumber: null,
+        number_country: null,
+        number_created_at: null,
+        number_renew_ad_progress: 0,
+        number_tier: null,
+        numberStatus: "expired",
+        number_status: "expired",
       });
       firestoreCleared += 1;
     } catch (e) {
@@ -2389,10 +2873,10 @@ async function runNumberLeaseJanitor() {
   }
 
   console.log(
-    `[number-janitor] lease_query_hits=${snapshot.size} twilio_released=${twilioReleased} twilio_errors=${twilioErrors} firestore_cleared=${firestoreCleared} firestore_errors=${firestoreErrors}`,
+    `[number-janitor] lease_query_hits=${docs.length} twilio_released=${twilioReleased} twilio_errors=${twilioErrors} firestore_cleared=${firestoreCleared} firestore_errors=${firestoreErrors}`,
   );
   return {
-    candidates: snapshot.size,
+    candidates: docs.length,
     twilioReleased,
     twilioErrors,
     firestoreCleared,
@@ -2921,6 +3405,184 @@ app.get("/send-sms", (_req, res) => {
 });
 
 /**
+ * POST /jobs/run-number-janitor — optional HTTP cron (Render). Header `X-Cron-Secret` must match `CRON_SECRET`.
+ */
+app.post("/jobs/run-number-janitor", async (req, res) => {
+  const secret = String(process.env.CRON_SECRET || "").trim();
+  if (!secret) {
+    return res.status(503).json({ error: "CRON_SECRET not configured" });
+  }
+  const got = String(req.headers["x-cron-secret"] ?? "").trim();
+  if (got !== secret) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const r = await runNumberLeaseJanitor();
+    return res.status(200).json({ ok: true, ...r });
+  } catch (e) {
+    console.error("/jobs/run-number-janitor:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+/**
+ * POST /renew-number — Bearer; JSON `{ "mode": "ads" | "credits" }`. Extends primary line `expiry_date`.
+ */
+app.post("/renew-number", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  const mode = String(req.body?.mode ?? "").trim().toLowerCase();
+  if (mode !== "ads" && mode !== "credits") {
+    return res.status(400).json({ error: "Invalid mode", expected: ["ads", "credits"] });
+  }
+
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  const { Timestamp } = firebaseAdmin.firestore;
+
+  let snap;
+  try {
+    snap = await ref.get();
+  } catch (e) {
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+  if (!snap.exists) {
+    return res.status(404).json({ error: "User not found" });
+  }
+  const d = snap.data() || {};
+  const assigned = String(d.assigned_number ?? d.phoneNumber ?? "").trim();
+  if (!assigned || assigned.toLowerCase() === "none") {
+    return res.status(400).json({ error: "No assigned number to renew" });
+  }
+
+  const now = new Date();
+  const cur = readNumberExpiryDate(d);
+  if (!cur) {
+    return res.status(400).json({ error: "No lease expiry on file — contact support." });
+  }
+
+  const dayKey = now.toISOString().slice(0, 10);
+  let renewDay = String(d.number_renew_utc_day ?? "").trim();
+  let renewCount = Number(d.number_renew_count_day ?? 0);
+  if (!Number.isFinite(renewCount)) renewCount = 0;
+  if (renewDay !== dayKey) {
+    renewCount = 0;
+  }
+  if (MAX_RENEWALS_PER_DAY > 0 && renewCount >= MAX_RENEWALS_PER_DAY) {
+    return res.status(403).json({
+      error: "Daily renew limit reached",
+      code: "RENEW_DAILY_LIMIT",
+      maxRenewalsPerDay: MAX_RENEWALS_PER_DAY,
+      renewalsUsedToday: renewCount,
+    });
+  }
+
+  const premium = readIsPremium(d);
+  const baseMs = Math.max(now.getTime(), cur.getTime());
+  const extendFreeMs = FREE_TIER_NUMBER_LEASE_MS;
+  const planKey = normalizePlanType(d.premium_plan_type) || "monthly";
+  const extendPremMs = Number(PLAN_ASSIGN_MS[planKey] || PLAN_ASSIGN_MS.monthly);
+
+  if (mode === "ads") {
+    const prog = Number(d.number_renew_ad_progress || 0);
+    if (prog < NUMBER_RENEW_ADS_REQUIRED) {
+      return res.status(403).json({
+        error: "Not enough rewarded ads toward renew",
+        number_renew_ad_progress: prog,
+        requiredAds: NUMBER_RENEW_ADS_REQUIRED,
+      });
+    }
+    const newExp = new Date(baseMs + (premium ? extendPremMs : extendFreeMs));
+    const ts = Timestamp.fromDate(newExp);
+    await ref.update({
+      number_expiry_date: ts,
+      expiry_date: ts,
+      numberExpiry: ts,
+      number_renew_utc_day: dayKey,
+      number_renew_count_day: renewCount + 1,
+      number_renew_ad_progress: 0,
+    });
+    return res.status(200).json({
+      ok: true,
+      mode: "ads",
+      expiry_date: newExp.toISOString(),
+      number_expiry_date: newExp.toISOString(),
+      numberExpiry: newExp.toISOString(),
+      maxRenewalsPerDay: MAX_RENEWALS_PER_DAY,
+      renewalsUsedToday: renewCount + 1,
+    });
+  }
+
+  const usable = usableCreditsFromUserDoc(d);
+  if (usable < NUMBER_RENEW_CREDITS) {
+    return res.status(402).json({
+      error: "Insufficient credits to renew",
+      requiredCredits: NUMBER_RENEW_CREDITS,
+      usableCredits: usable,
+    });
+  }
+
+  let paid = Number(d.paidCredits ?? 0);
+  let reward = Number(d.rewardCredits ?? 0);
+  if (d.paidCredits === undefined && d.credits != null) {
+    paid = Number(d.credits);
+    reward = 0;
+  }
+  const expTs = d.rewardCreditsExpiresAt;
+  if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+    paid += reward;
+    reward = 0;
+  }
+  let left = NUMBER_RENEW_CREDITS;
+  const takeReward = left < reward ? left : reward;
+  reward -= takeReward;
+  left -= takeReward;
+  paid -= left;
+  let rewardExpOut = null;
+  if (reward > 0) {
+    rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+  }
+  const totalOut = paid + reward;
+  const newExp = new Date(baseMs + (premium ? extendPremMs : extendFreeMs));
+  const ts = Timestamp.fromDate(newExp);
+  await ref.update({
+    paidCredits: paid,
+    rewardCredits: reward,
+    rewardCreditsExpiresAt: rewardExpOut,
+    credits: totalOut,
+    number_expiry_date: ts,
+    expiry_date: ts,
+    numberExpiry: ts,
+    number_renew_utc_day: dayKey,
+    number_renew_count_day: renewCount + 1,
+    number_renew_ad_progress: 0,
+  });
+  return res.status(200).json({
+    ok: true,
+    mode: "credits",
+    creditsDeducted: NUMBER_RENEW_CREDITS,
+    newBalance: totalOut,
+    expiry_date: newExp.toISOString(),
+    number_expiry_date: newExp.toISOString(),
+    numberExpiry: newExp.toISOString(),
+    maxRenewalsPerDay: MAX_RENEWALS_PER_DAY,
+    renewalsUsedToday: renewCount + 1,
+  });
+});
+
+/**
  * POST /send-sms — Firebase Bearer token; JSON `{ "to": "+...", "body": "..." }`.
  * - `From`: user's `assigned_number` in Firestore if valid E.164, else `TWILIO_CALLER_ID`.
  * - Logs each step for Render logs (URL, From, To, payload size).
@@ -3011,6 +3673,43 @@ app.post("/send-sms", async (req, res) => {
     });
   }
 
+  if (resolved.source === "firestore:assigned_number") {
+    try {
+      assertAssignedNumberSubscriptionActive(userData);
+    } catch (e) {
+      if (e && e.code === "NUMBER_EXPIRED") {
+        return res.status(403).json({
+          error: e.code,
+          message: e.message || "Line lease expired — renew in the app.",
+        });
+      }
+      if (e && e.http >= 400 && e.http < 500) {
+        return res.status(e.http).json({ error: String(e.message || e) });
+      }
+      throw e;
+    }
+  }
+
+  let smsDeducted = 0;
+  let newBalanceAfterSms = null;
+  try {
+    if (SMS_OUTBOUND_CREDIT_COST > 0) {
+      const dr = await deductCreditsForSms(uid, SMS_OUTBOUND_CREDIT_COST);
+      newBalanceAfterSms = dr.newBalance;
+      smsDeducted = SMS_OUTBOUND_CREDIT_COST;
+    }
+  } catch (deductErr) {
+    if (deductErr && deductErr.http === 402) {
+      return res.status(402).json({
+        error: String(deductErr.message || "Insufficient credits"),
+        usableCredits: deductErr.usableCredits,
+        requiredCredits: deductErr.requiredCredits,
+      });
+    }
+    console.error("[send-sms] credit deduct:", deductErr);
+    return res.status(500).json({ error: "Could not apply SMS credit charge" });
+  }
+
   try {
     const msg = await twilioClient.messages.create({
       from,
@@ -3025,8 +3724,17 @@ app.post("/send-sms", async (req, res) => {
       from,
       to,
       fromSource: resolved.source,
+      creditsDeducted: smsDeducted || undefined,
+      newBalance: newBalanceAfterSms,
     });
   } catch (err) {
+    if (smsDeducted > 0) {
+      try {
+        await refundSmsCredits(uid, smsDeducted);
+      } catch (re) {
+        console.error("[send-sms] refund after Twilio failure:", re);
+      }
+    }
     const code = err.code;
     const message = err.message;
     const status = err.status;
@@ -3064,7 +3772,7 @@ const server = app.listen(Number(PORT), () => {
   } else if (!firebaseAdmin) {
     console.warn("[number-janitor] not scheduled — Firebase Admin not configured");
   } else {
-    const schedule = String(process.env.NUMBER_JANITOR_CRON || "0 4 * * *").trim();
+    const schedule = String(process.env.NUMBER_JANITOR_CRON || "0 * * * *").trim();
     cron.schedule(
       schedule,
       () => {
@@ -3074,7 +3782,7 @@ const server = app.listen(Number(PORT), () => {
       },
       { timezone: "UTC" },
     );
-    console.log(`[number-janitor] scheduled (cron="${schedule}" UTC) — releases expired Twilio numbers nightly`);
+    console.log(`[number-janitor] scheduled (cron="${schedule}" UTC) — releases expired Twilio numbers`);
   }
 });
 server.on("error", (err) => {

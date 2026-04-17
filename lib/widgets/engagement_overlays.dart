@@ -202,7 +202,7 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final rnd = math.Random(42);
-    const n = 18;
+    const n = 36;
     final particles = List.generate(n, (i) {
       final ang = rnd.nextDouble() * math.pi * 2;
       final dist = 40.0 + rnd.nextDouble() * 120;
@@ -218,7 +218,7 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
             child: IgnorePointer(
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.08),
+                  color: Colors.black.withValues(alpha: 0.14),
                 ),
               ),
             ),

@@ -609,13 +609,30 @@ class _PlanGlassCard extends StatelessWidget {
     if (highlight) {
       return Container(
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(17),
-          border: Border.all(
-            color: AppColors.primary.withValues(alpha: 0.5),
-            width: 0.5,
+          borderRadius: BorderRadius.circular(22),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              AppColors.primary.withValues(alpha: 0.65),
+              AppColors.primary.withValues(alpha: 0.15),
+              AppColors.primary.withValues(alpha: 0.35),
+            ],
           ),
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.primary.withValues(alpha: 0.35),
+              blurRadius: 28,
+              spreadRadius: -2,
+              offset: const Offset(0, 12),
+            ),
+          ],
         ),
-        child: panel,
+        padding: const EdgeInsets.all(1.5),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(20.5),
+          child: panel,
+        ),
       );
     }
     return panel;

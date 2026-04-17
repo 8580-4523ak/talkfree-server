@@ -12,6 +12,8 @@ Future<void> runAssignUsNumberFlow(
   String planType = 'monthly',
   /// Premium: skip the sheet and assign the first inventory number immediately.
   bool autoPickFirstNumber = false,
+  /// Matches server POST `/assign-number` (`vip` | `premium`).
+  String numberTier = 'vip',
   required void Function(AssignNumberResult r) onSuccess,
   required void Function(String message) onError,
 }) async {
@@ -32,6 +34,7 @@ Future<void> runAssignUsNumberFlow(
     final r = await AssignNumberService.instance.requestAssignNumber(
       phoneNumber: phone,
       planType: planType,
+      numberTier: numberTier,
     );
     if (!context.mounted) return;
     onSuccess(r);

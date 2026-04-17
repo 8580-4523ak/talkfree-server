@@ -64,6 +64,9 @@ abstract final class VoiceBackendConfig {
   /// `POST /assign-number` — Firebase ID token; provisions a real US Twilio number when eligible.
   static Uri assignNumberUri() => Uri.https(_host, '/assign-number');
 
+  /// `POST /renew-number` — Firebase ID token; JSON `{ "mode": "ads" | "credits" }`.
+  static Uri renewNumberUri() => Uri.https(_host, '/renew-number');
+
   /// `POST /assign-free-number` — Firebase ID token; free tier auto-assigns first US local (eligible: ads or credits).
   static Uri assignFreeNumberUri() => Uri.https(_host, '/assign-free-number');
 

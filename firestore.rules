@@ -36,6 +36,22 @@ service cloud.firestore {
         && request.resource.data.last_razorpay_payment_id == resource.data.last_razorpay_payment_id
         && request.resource.data.premiumWelcomeBonusGranted == resource.data.premiumWelcomeBonusGranted
         && request.resource.data.number_expiry_date == resource.data.number_expiry_date
+        && request.resource.data.expiry_date == resource.data.expiry_date
+        && request.resource.data.numberExpiry == resource.data.numberExpiry
+        && request.resource.data.phoneNumber == resource.data.phoneNumber
+        && request.resource.data.numberStatus == resource.data.numberStatus
+        && request.resource.data.number_tier == resource.data.number_tier
+        && request.resource.data.number_renew_utc_day == resource.data.number_renew_utc_day
+        && request.resource.data.number_renew_count_day == resource.data.number_renew_count_day
+        && request.resource.data.alt_assigned_number == resource.data.alt_assigned_number
+        && request.resource.data.alt_twilioIncomingPhoneSid == resource.data.alt_twilioIncomingPhoneSid
+        && request.resource.data.alt_twilioPhoneNumberSid == resource.data.alt_twilioPhoneNumberSid
+        && request.resource.data.alt_twilioNumberAssignedAt == resource.data.alt_twilioNumberAssignedAt
+        && request.resource.data.number_renew_ad_progress == resource.data.number_renew_ad_progress
+        && request.resource.data.number_status == resource.data.number_status
+        && request.resource.data.userNumber == resource.data.userNumber
+        && request.resource.data.number_country == resource.data.number_country
+        && request.resource.data.number_created_at == resource.data.number_created_at
         && request.resource.data.premium_subscribed_at == resource.data.premium_subscribed_at
         && request.resource.data.totalOutboundCalls == resource.data.totalOutboundCalls
         && request.resource.data.totalCallTalkSeconds == resource.data.totalCallTalkSeconds
@@ -53,6 +69,11 @@ service cloud.firestore {
         allow read: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
       }
+    }
+
+    // Twilio number reuse cooldown — server-only (Node janitor + purchase).
+    match /released_numbers/{phoneId} {
+      allow read, write: if false;
     }
   }
 }

@@ -1,5 +1,5 @@
 import 'dart:async' show StreamSubscription, Timer, unawaited;
-import 'dart:math' show max, min;
+import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show immutable, kDebugMode;
@@ -10,6 +10,7 @@ import 'package:lottie/lottie.dart';
 import '../config/credits_policy.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
+import '../theme/neon_tokens.dart';
 import '../theme/system_ui.dart';
 import '../services/ad_service.dart';
 import '../utils/call_log_format.dart';
@@ -17,6 +18,7 @@ import '../utils/reward_ad_feedback.dart';
 import '../utils/us_phone_format.dart';
 import '../services/assign_free_number_service.dart';
 import '../services/assign_number_service.dart';
+import '../services/renew_number_service.dart';
 import '../widgets/assign_us_number_flow.dart';
 import '../widgets/engagement_overlays.dart';
 import '../widgets/glass_panel.dart';
@@ -69,6 +71,13 @@ class _AdRewardView {
 
   @override
   int get hashCode => Object.hash(adsToday, cooldownRemaining, dailyLimitReached);
+}
+
+String _dashboardTimeGreeting() {
+  final h = DateTime.now().hour;
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
 }
 
 /// Smooth numeric change for wallet / stats (no logic — display only).
@@ -168,7 +177,15 @@ class _DashboardScreenState extends State<DashboardScreen>
   /// Twilio line lease (for dashboard ring); `null` if unset / legacy.
   final ValueNotifier<DateTime?> _numberLeaseExpiry =
       ValueNotifier<DateTime?>(null);
+  /// Server line status (`active` | `expired`); see [FirestoreUserService.numberLineStatusFromUserData].
+  final ValueNotifier<String?> _numberLineStatus =
+      ValueNotifier<String?>(null);
+  /// Server `number_tier`: `normal` | `vip` | `premium`.
+  final ValueNotifier<String?> _numberTier =
+      ValueNotifier<String?>(null);
   final ValueNotifier<String?> _numberPlanType = ValueNotifier<String?>(null);
+  /// Banked rewarded ads toward POST `/renew-number` (mode `ads`).
+  final ValueNotifier<int> _numberRenewAdProgress = ValueNotifier<int>(0);
   /// Server-maintained totals (Twilio settlement); see [FirestoreUserService.totalOutboundCallsFromUserData].
   final ValueNotifier<int> _outboundCallsTotal = ValueNotifier<int>(0);
   final ValueNotifier<int> _totalCallTalkSeconds = ValueNotifier<int>(0);
@@ -192,7 +209,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     final snap = _latestUserDoc;
     if (snap == null) return;
     final t = FirestoreUserService.adRewardStatusFromSnapshot(snap);
-    final cool = max(t.cooldownRemaining, _localAdCooldownSeconds);
+    final cool = math.max(t.cooldownRemaining, _localAdCooldownSeconds);
     _setAdViewIfChanged(
       _AdRewardView(
         adsToday: t.adsToday,
@@ -222,9 +239,21 @@ class _DashboardScreenState extends State<DashboardScreen>
         leaseExp?.millisecondsSinceEpoch) {
       _numberLeaseExpiry.value = leaseExp;
     }
+    final lineSt = FirestoreUserService.numberLineStatusFromUserData(d);
+    if (_numberLineStatus.value != lineSt) {
+      _numberLineStatus.value = lineSt;
+    }
+    final nt = FirestoreUserService.numberTierFromUserData(d);
+    if (_numberTier.value != nt) {
+      _numberTier.value = nt;
+    }
     final planT = FirestoreUserService.numberPlanTypeFromUserData(d);
     if (_numberPlanType.value != planT) {
       _numberPlanType.value = planT;
+    }
+    final renewP = FirestoreUserService.numberRenewAdProgressFromUserData(d);
+    if (_numberRenewAdProgress.value != renewP) {
+      _numberRenewAdProgress.value = renewP;
     }
     final calls = FirestoreUserService.totalOutboundCallsFromUserData(d);
     if (_outboundCallsTotal.value != calls) {
@@ -305,7 +334,10 @@ class _DashboardScreenState extends State<DashboardScreen>
     _lifetimeAdsWatched.dispose();
     _subscriptionTier.dispose();
     _numberLeaseExpiry.dispose();
+    _numberLineStatus.dispose();
+    _numberTier.dispose();
     _numberPlanType.dispose();
+    _numberRenewAdProgress.dispose();
     _outboundCallsTotal.dispose();
     _totalCallTalkSeconds.dispose();
     _adStreakCount.dispose();
@@ -496,7 +528,10 @@ class _DashboardScreenState extends State<DashboardScreen>
                     credits: credits,
                     assignedNumber: _assignedNumber,
                     numberLeaseExpiry: _numberLeaseExpiry,
+                    numberLineStatus: _numberLineStatus,
+                    numberTier: _numberTier,
                     numberPlanType: _numberPlanType,
+                    numberRenewAdProgress: _numberRenewAdProgress,
                     lifetimeAdsWatched: _lifetimeAdsWatched,
                     subscriptionTier: _subscriptionTier,
                     outboundCallsTotal: _outboundCallsTotal,
@@ -782,7 +817,10 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.credits,
     required this.assignedNumber,
     required this.numberLeaseExpiry,
+    required this.numberLineStatus,
+    required this.numberTier,
     required this.numberPlanType,
+    required this.numberRenewAdProgress,
     required this.lifetimeAdsWatched,
     required this.subscriptionTier,
     required this.outboundCallsTotal,
@@ -807,7 +845,10 @@ class _DashboardHomeTab extends StatefulWidget {
   final int credits;
   final ValueNotifier<String?> assignedNumber;
   final ValueNotifier<DateTime?> numberLeaseExpiry;
+  final ValueNotifier<String?> numberLineStatus;
+  final ValueNotifier<String?> numberTier;
   final ValueNotifier<String?> numberPlanType;
+  final ValueNotifier<int> numberRenewAdProgress;
   final ValueNotifier<int> lifetimeAdsWatched;
   final ValueNotifier<String> subscriptionTier;
   final ValueNotifier<int> outboundCallsTotal;
@@ -826,6 +867,7 @@ class _DashboardHomeTab extends StatefulWidget {
 class _DashboardHomeTabState extends State<_DashboardHomeTab> {
   late Future<void> _ensureFuture;
   bool _assignNumberBusy = false;
+  bool _renewBusy = false;
 
   @override
   void initState() {
@@ -971,6 +1013,78 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
     );
   }
 
+  Future<void> _onRenewWithAds() async {
+    if (_renewBusy || _assignNumberBusy) return;
+    setState(() => _renewBusy = true);
+    try {
+      await RenewNumberService.instance.renew(mode: 'ads');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Line renewed!',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w700),
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } on RenewNumberException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message, style: GoogleFonts.inter()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$e', style: GoogleFonts.inter()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _renewBusy = false);
+    }
+  }
+
+  Future<void> _onRenewWithCredits() async {
+    if (_renewBusy || _assignNumberBusy) return;
+    setState(() => _renewBusy = true);
+    try {
+      await RenewNumberService.instance.renew(mode: 'credits');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Line renewed — thank you!',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w700),
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } on RenewNumberException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message, style: GoogleFonts.inter()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$e', style: GoogleFonts.inter()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _renewBusy = false);
+    }
+  }
+
   void _retry() {
     setState(() {
       _ensureFuture =
@@ -1039,6 +1153,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                 ),
               ),
             ),
+            Positioned.fill(child: DecoratedBox(decoration: NeonTokens.scaffoldAmbient())),
             ListView(
           padding: EdgeInsets.fromLTRB(
             16,
@@ -1063,154 +1178,181 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                 );
               },
             ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                if (widget.user.photoURL != null)
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundImage: NetworkImage(widget.user.photoURL!),
-                  )
-                else
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundColor: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
-                    foregroundColor: AppColors.primary,
-                    child: Text(
-                      widget.displayName.isNotEmpty
-                          ? widget.displayName[0].toUpperCase()
-                          : '?',
-                      style: GoogleFonts.inter(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 22,
-                      ),
-                    ),
-                  ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+            GlassPanel(
+              borderRadius: NeonTokens.radiusHero,
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Text(
-                        widget.displayName,
-                        style: GoogleFonts.inter(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: -0.3,
-                          color: Theme.of(context).colorScheme.onSurface,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      if (widget.user.email != null &&
-                          widget.user.email!.isNotEmpty) ...[
-                        const SizedBox(height: 4),
-                        Text(
-                          widget.user.email!,
-                          style: GoogleFonts.inter(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      if (widget.user.photoURL != null)
+                        CircleAvatar(
+                          radius: 28,
+                          backgroundImage: NetworkImage(widget.user.photoURL!),
+                        )
+                      else
+                        CircleAvatar(
+                          radius: 28,
+                          backgroundColor: AppColors.surfaceDark,
+                          foregroundColor: AppColors.primary,
+                          child: Text(
+                            widget.displayName.isNotEmpty
+                                ? widget.displayName[0].toUpperCase()
+                                : '?',
+                            style: GoogleFonts.inter(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 22,
+                            ),
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
                         ),
-                      ],
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _dashboardTimeGreeting(),
+                              style: GoogleFonts.inter(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.2,
+                                color: AppColors.primary.withValues(alpha: 0.9),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              widget.displayName,
+                              style: GoogleFonts.inter(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: -0.3,
+                                color: Theme.of(context).colorScheme.onSurface,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if (widget.user.email != null &&
+                                widget.user.email!.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                widget.user.email!,
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      ValueListenableBuilder<String>(
+                        valueListenable: widget.subscriptionTier,
+                        builder: (context, tier, _) {
+                          final isPro = tier.toLowerCase() == 'pro';
+                          return _LightningWalletPill(
+                            credits: widget.credits,
+                            isPro: isPro,
+                            onDebugLongPress: widget.onDebugAddCredits,
+                            walletGlow: widget.walletGlow,
+                          );
+                        },
+                      ),
                     ],
                   ),
-                ),
-                ValueListenableBuilder<String>(
-                  valueListenable: widget.subscriptionTier,
-                  builder: (context, tier, _) {
-                    final isPro = tier.toLowerCase() == 'pro';
-                    return _LightningWalletPill(
-                      credits: widget.credits,
-                      isPro: isPro,
-                      onDebugLongPress: widget.onDebugAddCredits,
-                      walletGlow: widget.walletGlow,
-                    );
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            ValueListenableBuilder<String>(
-              valueListenable: widget.subscriptionTier,
-              builder: (context, tier, _) {
-                final isPro = tier.toLowerCase() == 'pro';
-                return Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 7,
-                      ),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(999),
-                        gradient: isPro
-                            ? LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  AppTheme.neonGreen,
-                                  AppColors.darkBackgroundDeep,
-                                  AppTheme.darkBg,
-                                ],
-                                stops: const [0.0, 0.55, 1.0],
-                              )
-                            : null,
-                        color: isPro ? null : (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface),
-                        border: Border.all(
-                          color: isPro
-                              ? Colors.transparent
-                              : Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.2),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
+                  const SizedBox(height: 14),
+                  ValueListenableBuilder<String>(
+                    valueListenable: widget.subscriptionTier,
+                    builder: (context, tier, _) {
+                      final isPro = tier.toLowerCase() == 'pro';
+                      return Row(
                         children: [
-                          Icon(
-                            isPro
-                                ? Icons.verified_rounded
-                                : Icons.lock_open_rounded,
-                            size: 16,
-                            color: isPro
-                                ? Colors.white.withValues(alpha: 0.95)
-                                : Theme.of(context).colorScheme.onSurfaceVariant,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            'Current plan: ${isPro ? 'Pro' : 'Free'}',
-                            style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 7,
+                            ),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(999),
+                              gradient: isPro
+                                  ? LinearGradient(
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                      colors: [
+                                        AppTheme.neonGreen,
+                                        AppColors.darkBackgroundDeep,
+                                        AppTheme.darkBg,
+                                      ],
+                                      stops: const [0.0, 0.55, 1.0],
+                                    )
+                                  : null,
                               color: isPro
-                                  ? Colors.white
-                                  : Theme.of(context).colorScheme.onSurface,
+                                  ? null
+                                  : (Theme.of(context).cardTheme.color ??
+                                      Theme.of(context).colorScheme.surface),
+                              border: Border.all(
+                                color: isPro
+                                    ? Colors.transparent
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant
+                                        .withValues(alpha: 0.2),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  isPro
+                                      ? Icons.verified_rounded
+                                      : Icons.lock_open_rounded,
+                                  size: 16,
+                                  color: isPro
+                                      ? Colors.white.withValues(alpha: 0.95)
+                                      : Theme.of(context)
+                                          .colorScheme
+                                          .onSurfaceVariant,
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Plan: ${isPro ? 'Pro' : 'Free'}',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: isPro
+                                        ? Colors.white
+                                        : Theme.of(context).colorScheme.onSurface,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () {
+                              Navigator.of(context).push<void>(
+                                SubscriptionScreen.createRoute(),
+                              );
+                            },
+                            child: Text(
+                              'View plans',
+                              style: GoogleFonts.inter(
+                                fontWeight: FontWeight.w800,
+                                fontSize: 14,
+                                color: AppColors.primary,
+                              ),
                             ),
                           ),
                         ],
-                      ),
-                    ),
-                    const Spacer(),
-                    TextButton(
-                      onPressed: () {
-                        Navigator.of(context).push<void>(
-                          SubscriptionScreen.createRoute(),
-                        );
-                      },
-                      child: Text(
-                        'View plans',
-                        style: GoogleFonts.inter(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14,
-                          color: AppColors.primary,
-                        ),
-                      ),
-                    ),
-                  ],
-                );
-              },
+                      );
+                    },
+                  ),
+                ],
+              ),
             ),
             ValueListenableBuilder<String>(
               valueListenable: widget.subscriptionTier,
@@ -1222,54 +1364,6 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                       SubscriptionScreen.createRoute(),
                     );
                   },
-                );
-              },
-            ),
-            ValueListenableBuilder<String>(
-              valueListenable: widget.subscriptionTier,
-              builder: (context, tier, _) {
-                if (tier == 'pro') return const SizedBox.shrink();
-                return Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: AppColors.primary.withValues(alpha: 0.28),
-                      ),
-                      color: AppColors.primary.withValues(alpha: 0.07),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '🎁 Watch Ad → Get FREE Calling Time',
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              height: 1.4,
-                              color: Theme.of(context).colorScheme.onSurface,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            '🚀 Go Pro → Call ANYONE Unlimited (No Ads)',
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              height: 1.4,
-                              color: Theme.of(context).colorScheme.onSurface,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
                 );
               },
             ),
@@ -1325,6 +1419,12 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
               child: ValueListenableBuilder<String?>(
                 valueListenable: widget.assignedNumber,
                 builder: (context, assigned, _) {
+                  return ValueListenableBuilder<String?>(
+                    valueListenable: widget.numberLineStatus,
+                    builder: (context, lineStatus, _) {
+                  return ValueListenableBuilder<String?>(
+                    valueListenable: widget.numberTier,
+                    builder: (context, numTier, _) {
                   return ValueListenableBuilder<int>(
                     valueListenable: widget.lifetimeAdsWatched,
                     builder: (context, adsWatched, _) {
@@ -1337,23 +1437,44 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                               return ValueListenableBuilder<String>(
                                 valueListenable: widget.subscriptionTier,
                                 builder: (context, tier, _) {
-                                  return _VirtualNumberCard(
-                                    assignedNumber: assigned,
-                                    leaseExpiry: leaseExp,
-                                    planType: planType,
-                                    adsWatchedCount: adsWatched,
-                                    credits: widget.credits,
-                                    isPremium: tier == 'pro',
-                                    assigning: _assignNumberBusy,
-                                    onUnlock: _onUnlockUsNumber,
-                                    onGetFreeNumber:
-                                        tier == 'pro' ? null : _onGetFreeNumber,
-                                    onChangeNumber: tier == 'pro'
-                                        ? _onChangeNumberComingSoon
-                                        : null,
-                                    onGetPremium: () {
-                                      Navigator.of(context).push<void>(
-                                        SubscriptionScreen.createRoute(),
+                                  return ValueListenableBuilder<int>(
+                                    valueListenable: widget.numberRenewAdProgress,
+                                    builder: (context, renewProg, _) {
+                                      return _VirtualNumberCard(
+                                        assignedNumber: assigned,
+                                        numberLineStatus: lineStatus,
+                                        numberTier: numTier,
+                                        leaseExpiry: leaseExp,
+                                        planType: planType,
+                                        adsWatchedCount: adsWatched,
+                                        credits: widget.credits,
+                                        isPremium: tier == 'pro',
+                                        assigning:
+                                            _assignNumberBusy || _renewBusy,
+                                        renewAdProgress: renewProg,
+                                        onUnlock: _onUnlockUsNumber,
+                                        onGetFreeNumber: tier == 'pro'
+                                            ? null
+                                            : _onGetFreeNumber,
+                                        onChangeNumber: tier == 'pro'
+                                            ? _onChangeNumberComingSoon
+                                            : null,
+                                        onRenewWithAds: _onRenewWithAds,
+                                        onRenewWithCredits: _onRenewWithCredits,
+                                        onWatchAdForRenew:
+                                            widget.onWatchRewardedAd,
+                                        onExpiredGetNewNumber: () {
+                                          if (tier == 'pro') {
+                                            unawaited(_onUnlockUsNumber());
+                                          } else {
+                                            unawaited(_onGetFreeNumber());
+                                          }
+                                        },
+                                        onGetPremium: () {
+                                          Navigator.of(context).push<void>(
+                                            SubscriptionScreen.createRoute(),
+                                          );
+                                        },
                                       );
                                     },
                                   );
@@ -1363,6 +1484,10 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
                           );
                         },
                       );
+                    },
+                  );
+                    },
+                  );
                     },
                   );
                 },
@@ -1928,12 +2053,13 @@ class _SimpleAdRewardCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final maxPerDay = CreditsPolicy.maxRewardedAdsPerDay;
-    final remaining = max(0, maxPerDay - adsToday);
+    final remaining = math.max(0, maxPerDay - adsToday);
     final canTap =
         !rewardedAdBusy && !dailyLimitReached && cooldownRemaining <= 0;
 
     return GlassPanel(
-      borderRadius: AppTheme.radiusLg,
+      accentNeon: true,
+      borderRadius: NeonTokens.radiusCard,
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1941,19 +2067,19 @@ class _SimpleAdRewardCard extends StatelessWidget {
           Row(
             children: [
               Icon(
-                Icons.play_circle_outline_rounded,
+                Icons.auto_awesome_rounded,
                 color: AppColors.primary.withValues(alpha: 0.95),
                 size: 26,
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Earn credits',
+                  'EARN CREDITS',
                   style: GoogleFonts.inter(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.8,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.4,
+                    color: AppColors.primary.withValues(alpha: 0.95),
                   ),
                 ),
               ),
@@ -1970,14 +2096,41 @@ class _SimpleAdRewardCard extends StatelessWidget {
             ),
           ),
           if (adStreakDays > 0) ...[
-            const SizedBox(height: 8),
-            Text(
-              'Day streak: $adStreakDays — bonuses at ${CreditsPolicy.adStreakMilestoneDays.join(', ')} days',
-              style: GoogleFonts.inter(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                height: 1.35,
-                color: AppTheme.neonGreen.withValues(alpha: 0.88),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: AppColors.primary.withValues(alpha: 0.35),
+                ),
+                gradient: LinearGradient(
+                  colors: [
+                    AppColors.primary.withValues(alpha: 0.12),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.local_fire_department_rounded,
+                    color: Colors.orangeAccent.shade200,
+                    size: 22,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Streak: $adStreakDays days — bonus at ${CreditsPolicy.adStreakMilestoneDays.join(', ')}',
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        height: 1.35,
+                        color: AppTheme.neonGreen.withValues(alpha: 0.92),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -2094,8 +2247,9 @@ class _GetPremiumHeroButton extends StatefulWidget {
 }
 
 class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _shimmer;
+  late final AnimationController _pulse;
 
   @override
   void initState() {
@@ -2104,21 +2258,33 @@ class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
       vsync: this,
       duration: const Duration(milliseconds: 2600),
     )..repeat();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2200),
+    )..repeat(reverse: true);
   }
 
   @override
   void dispose() {
     _shimmer.dispose();
+    _pulse.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Material(
+    return AnimatedBuilder(
+      animation: _pulse,
+      builder: (context, _) {
+        final breathe =
+            1.0 + 0.014 * math.sin(_pulse.value * math.pi * 2);
+        return Transform.scale(
+          scale: breathe,
+          child: Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: widget.onPressed,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(22),
         child: Ink(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(18),
@@ -2235,6 +2401,9 @@ class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
           ),
         ),
       ),
+          ),
+        );
+      },
     );
   }
 }
@@ -2333,9 +2502,31 @@ String _leaseShortLabel(DateTime now, DateTime? expiry) {
   if (expiry == null) return 'No expiry set';
   final left = expiry.difference(now);
   if (left.inSeconds <= 0) return 'Expired';
-  if (left.inDays >= 1) return '${left.inDays}d left';
-  if (left.inHours >= 1) return '${left.inHours}h left';
-  return '${left.inMinutes}m left';
+  if (left.inDays >= 1) {
+    final h = left.inHours % 24;
+    final chunk =
+        h > 0 ? '${left.inDays}d ${h}h' : '${left.inDays}d';
+    return 'Expires in $chunk';
+  }
+  final h = left.inHours;
+  final m = left.inMinutes % 60;
+  final s = left.inSeconds % 60;
+  if (h >= 1) return 'Expires in ${h}h ${m}m';
+  if (m >= 1) return 'Expires in ${m}m ${s}s';
+  return 'Expires in ${s}s';
+}
+
+String _numberTierLabel(String? tier) {
+  switch (tier?.toLowerCase().trim() ?? '') {
+    case 'premium':
+      return 'Pro line';
+    case 'vip':
+      return 'VIP (credits)';
+    case 'normal':
+      return 'Standard (free)';
+    default:
+      return '';
+  }
 }
 
 /// Animated handset for the virtual-number row; lock / ready badges when no line yet.
@@ -2418,30 +2609,48 @@ class _VirtualNumberLottieBadge extends StatelessWidget {
 class _VirtualNumberCard extends StatefulWidget {
   const _VirtualNumberCard({
     required this.assignedNumber,
+    required this.numberLineStatus,
+    required this.numberTier,
     required this.leaseExpiry,
     required this.planType,
     required this.adsWatchedCount,
     required this.credits,
     required this.isPremium,
     required this.assigning,
+    required this.renewAdProgress,
     required this.onUnlock,
     this.onGetFreeNumber,
     this.onChangeNumber,
+    required this.onRenewWithAds,
+    required this.onRenewWithCredits,
+    required this.onWatchAdForRenew,
+    required this.onExpiredGetNewNumber,
     required this.onGetPremium,
   });
 
   final String? assignedNumber;
+  /// Server `numberStatus` / `number_status` (`active` | `expired`).
+  final String? numberLineStatus;
+  /// Server `number_tier`: `normal` | `vip` | `premium`.
+  final String? numberTier;
   final DateTime? leaseExpiry;
   final String? planType;
   final int adsWatchedCount;
   final int credits;
   final bool isPremium;
   final bool assigning;
+  /// Progress toward renew-with-ads (server `number_renew_ad_progress`).
+  final int renewAdProgress;
   final Future<void> Function() onUnlock;
   /// Free tier: auto-assign first US number (server POST `/assign-free-number`).
   final Future<void> Function()? onGetFreeNumber;
   /// Premium: optional “change number” (stub until server supports swap).
   final VoidCallback? onChangeNumber;
+  final Future<void> Function() onRenewWithAds;
+  final Future<void> Function() onRenewWithCredits;
+  final Future<void> Function() onWatchAdForRenew;
+  /// Free: `/assign-free-number`; Pro: number picker.
+  final VoidCallback onExpiredGetNewNumber;
   final VoidCallback onGetPremium;
 
   @override
@@ -2474,7 +2683,10 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
   }
 
   void _syncTicker() {
-    final has = widget.assignedNumber?.trim().isNotEmpty == true;
+    final st = widget.numberLineStatus?.toLowerCase().trim() ?? '';
+    final lineExpired = st == 'expired';
+    final has =
+        !lineExpired && widget.assignedNumber?.trim().isNotEmpty == true;
     final exp = widget.leaseExpiry;
     if (has && exp != null) {
       _tick ??= Timer.periodic(const Duration(seconds: 1), (_) {
@@ -2487,7 +2699,10 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
   }
 
   void _syncPlusPulse() {
-    final has = widget.assignedNumber?.trim().isNotEmpty == true;
+    final st = widget.numberLineStatus?.toLowerCase().trim() ?? '';
+    final lineExpired = st == 'expired';
+    final has =
+        !lineExpired && widget.assignedNumber?.trim().isNotEmpty == true;
     if (has) {
       _plusPulse.stop();
     } else {
@@ -2507,7 +2722,10 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
   @override
   Widget build(BuildContext context) {
     final numberRaw = widget.assignedNumber?.trim();
-    final hasNumber = numberRaw != null && numberRaw.isNotEmpty;
+    final stLine = widget.numberLineStatus?.toLowerCase().trim() ?? '';
+    final lineExpired = stLine == 'expired';
+    final hasNumber =
+        !lineExpired && numberRaw != null && numberRaw.isNotEmpty;
     final minAds = CreditsPolicy.assignNumberMinAdsWatched;
     final minCredits = CreditsPolicy.assignNumberMinCredits;
     final canUnlock = widget.isPremium ||
@@ -2515,6 +2733,118 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
         widget.credits >= minCredits;
 
     final br = BorderRadius.circular(AppTheme.radiusLg);
+
+    if (lineExpired) {
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 420),
+        curve: Curves.easeOutCubic,
+        width: double.infinity,
+        decoration: BoxDecoration(
+          borderRadius: br,
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.primary.withValues(alpha: 0.22),
+              blurRadius: 28,
+              spreadRadius: 2,
+              offset: const Offset(0, 10),
+            ),
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.4),
+              blurRadius: 22,
+              offset: const Offset(0, 12),
+            ),
+          ],
+        ),
+        child: GlassPanel(
+          borderRadius: AppTheme.radiusLg,
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  _VirtualNumberLottieBadge(
+                    hasNumber: false,
+                    isPremium: widget.isPremium,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'VIRTUAL NUMBER',
+                      style: GoogleFonts.inter(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 2,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Your number expired',
+                style: GoogleFonts.inter(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  height: 1.25,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Free numbers are reclaimed after 24 hours. Get a new line or upgrade to Pro.',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  height: 1.4,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 18),
+              if (!widget.isPremium) ...[
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: widget.assigning
+                            ? null
+                            : widget.onExpiredGetNewNumber,
+                        child: Text(
+                          'Get new number',
+                          style: GoogleFonts.inter(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed:
+                            widget.assigning ? null : widget.onGetPremium,
+                        child: Text(
+                          'Go Pro',
+                          style: GoogleFonts.inter(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ] else
+                FilledButton(
+                  onPressed: widget.assigning
+                      ? null
+                      : widget.onExpiredGetNewNumber,
+                  child: Text(
+                    'Get new number',
+                    style: GoogleFonts.inter(fontWeight: FontWeight.w800),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final now = DateTime.now();
     final expiry = widget.leaseExpiry;
     final leaseFrac = (hasNumber && expiry != null)
@@ -2622,6 +2952,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                                     const SizedBox(height: 6),
                                     Text(
                                       _leaseShortLabel(now, expiry),
+                                      textAlign: TextAlign.center,
                                       style: GoogleFonts.poppins(
                                         fontSize: 13,
                                         fontWeight: FontWeight.w600,
@@ -2677,6 +3008,34 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                                   ],
                                 ),
                               ),
+                              if (_numberTierLabel(widget.numberTier)
+                                  .isNotEmpty)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.08),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: Colors.white.withValues(
+                                        alpha: 0.2,
+                                      ),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    _numberTierLabel(widget.numberTier),
+                                    style: GoogleFonts.inter(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.2,
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSurfaceVariant,
+                                    ),
+                                  ),
+                                ),
                             ],
                           ),
                           if (widget.onChangeNumber != null) ...[
@@ -2698,9 +3057,145 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                         ],
                       ),
                 ),
+                if (expiry != null &&
+                    expiry.difference(now).inHours <= 72) ...[
+                  const SizedBox(height: 12),
+                  GlassPanel(
+                    borderRadius: 16,
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          expiry.isBefore(now)
+                              ? 'Your line has expired — renew to keep SMS & calls.'
+                              : 'Your line is expiring soon — renew to stay connected.',
+                          style: GoogleFonts.inter(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            height: 1.35,
+                            color: expiry.isBefore(now)
+                                ? Theme.of(context).colorScheme.error
+                                : AppTheme.neonGreen,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          'Watch rewarded ads (${widget.renewAdProgress}/${CreditsPolicy.numberRenewAdsRequired}) or spend ${CreditsPolicy.numberRenewCredits} credits.',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            height: 1.35,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Max ${CreditsPolicy.maxRenewalsPerDay} renews per UTC day.',
+                          style: GoogleFonts.inter(
+                            fontSize: 11,
+                            height: 1.35,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant
+                                .withValues(alpha: 0.85),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: LinearProgressIndicator(
+                            value: math.min(
+                              1,
+                              widget.renewAdProgress /
+                                  CreditsPolicy.numberRenewAdsRequired,
+                            ),
+                            minHeight: 6,
+                            backgroundColor:
+                                Colors.white.withValues(alpha: 0.08),
+                            color: AppColors.primary,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: (!widget.assigning &&
+                                        widget.renewAdProgress >=
+                                            CreditsPolicy.numberRenewAdsRequired)
+                                    ? () => unawaited(widget.onRenewWithAds())
+                                    : null,
+                                child: Text(
+                                  'Renew (ads)',
+                                  style: GoogleFonts.inter(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: FilledButton.tonal(
+                                onPressed: (!widget.assigning &&
+                                        widget.credits >=
+                                            CreditsPolicy.numberRenewCredits)
+                                    ? () =>
+                                        unawaited(widget.onRenewWithCredits())
+                                    : null,
+                                child: Text(
+                                  'Renew (${CreditsPolicy.numberRenewCredits} cr)',
+                                  style: GoogleFonts.inter(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Align(
+                          alignment: Alignment.center,
+                          child: TextButton(
+                            onPressed: widget.assigning
+                                ? null
+                                : () => unawaited(widget.onWatchAdForRenew()),
+                            child: Text(
+                              'Watch ad — builds renew progress',
+                              style: GoogleFonts.inter(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                                color: AppTheme.neonGreen,
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (!widget.isPremium && expiry.isAfter(now)) ...[
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.tonal(
+                              onPressed: widget.assigning
+                                  ? null
+                                  : widget.onGetPremium,
+                              child: Text(
+                                'Upgrade to Pro — longer leases',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 10),
                 Text(
-                  'SMS and calls route to your Inbox.',
+                  'Each outbound SMS costs ${CreditsPolicy.smsOutboundCreditCost} credits. Calls and messages sync to your Inbox.',
                   style: GoogleFonts.inter(
                     fontSize: 12,
                     height: 1.35,
@@ -2799,7 +3294,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                   ClipRRect(
                     borderRadius: BorderRadius.circular(6),
                     child: LinearProgressIndicator(
-                      value: min(1, widget.adsWatchedCount / minAds),
+                      value: math.min(1, widget.adsWatchedCount / minAds),
                       minHeight: 8,
                       backgroundColor: Colors.white.withValues(alpha: 0.08),
                       color: AppColors.primary,
@@ -2824,7 +3319,7 @@ class _VirtualNumberCardState extends State<_VirtualNumberCard>
                   ClipRRect(
                     borderRadius: BorderRadius.circular(6),
                     child: LinearProgressIndicator(
-                      value: min(1, widget.credits / minCredits),
+                      value: math.min(1, widget.credits / minCredits),
                       minHeight: 8,
                       backgroundColor: Colors.white.withValues(alpha: 0.08),
                       color: AppTheme.neonGreen.withValues(alpha: 0.55),

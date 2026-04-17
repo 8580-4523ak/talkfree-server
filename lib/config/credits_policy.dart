@@ -74,6 +74,18 @@ abstract final class CreditsPolicy {
   /// Must match server `ASSIGN_NUMBER_MIN_CREDITS` (POST `/assign-number`).
   static const int assignNumberMinCredits = 100;
 
+  /// Must match server `NUMBER_RENEW_ADS_REQUIRED` (POST `/renew-number` mode `ads`).
+  static const int numberRenewAdsRequired = 5;
+
+  /// Must match server `NUMBER_RENEW_CREDITS` (POST `/renew-number` mode `credits`).
+  static const int numberRenewCredits = 100;
+
+  /// Must match server `MAX_RENEWALS_PER_DAY` (POST `/renew-number`).
+  static const int maxRenewalsPerDay = 2;
+
+  /// Must match server `SMS_OUTBOUND_CREDIT_COST` (POST `/send-sms`).
+  static const int smsOutboundCreditCost = 3;
+
   /// Must match server `ASSIGN_NUMBER_MIN_ADS_WATCHED` (lifetime `ads_watched_count`).
   static const int assignNumberMinAdsWatched = 50;
 

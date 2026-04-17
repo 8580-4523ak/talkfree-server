@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 /// TalkFree design tokens — single source of truth for colors.
 ///
-/// **TalkFree Pro — Neon-Black Shield:** accent `#00FF9C`, shell `#020814`.
+/// **TalkFree — Neon fintech:** accent `#00FF9C`, shell `#0B0B0F`.
 abstract final class AppColors {
   AppColors._();
 
@@ -24,12 +24,12 @@ abstract final class AppColors {
   static const Color splashStageTop = splashMidnight;
   static const Color splashStageBottom = splashHorizonDeep;
 
-  /// Deep black scaffold / shell (**#020814**).
-  static const Color darkBackground = Color(0xFF020814);
-  static const Color darkBackgroundDeep = Color(0xFF01050C);
-  /// Cards, inputs, elevated surfaces (Master `surfaceCard`).
-  static const Color surfaceDark = Color(0xFF0F1728);
-  static const Color cardDark = Color(0xFF0A1220);
+  /// App scaffold — premium dark (**#0B0B0F**).
+  static const Color darkBackground = Color(0xFF0B0B0F);
+  static const Color darkBackgroundDeep = Color(0xFF050508);
+  /// Glass / elevated surfaces.
+  static const Color surfaceDark = Color(0xFF12121A);
+  static const Color cardDark = Color(0xFF12121A);
 
   static const Color textOnDark = Color(0xFFFFFFFF);
   /// Master muted body / secondary text.

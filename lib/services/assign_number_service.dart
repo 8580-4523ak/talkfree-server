@@ -91,6 +91,8 @@ class AssignNumberService {
   Future<AssignNumberResult> requestAssignNumber({
     required String phoneNumber,
     String planType = 'monthly',
+    /// Server: `vip` (credits) or `premium` (Pro).
+    String numberTier = 'vip',
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -112,6 +114,7 @@ class AssignNumberService {
           body: jsonEncode(<String, String>{
             'phoneNumber': phoneNumber.trim(),
             'planType': planType,
+            'numberTier': numberTier,
           }),
         )
         .timeout(const Duration(seconds: 90));
