@@ -118,10 +118,10 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
                       offset: const Offset(0, 5),
                     ),
                     BoxShadow(
-                      color: premiumDialCallGreen.withValues(alpha: 0.05 + p * 0.35),
-                      blurRadius: 14 + p * 8,
-                      spreadRadius: p * 1.2,
-                      offset: Offset(0, 4 - p * 2),
+                      color: premiumDialCallGreen.withValues(alpha: 0.02 + p * 0.12),
+                      blurRadius: 10 + p * 4,
+                      spreadRadius: p * 0.4,
+                      offset: Offset(0, 3 - p * 1),
                     ),
                   ],
                 ),
@@ -314,22 +314,16 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
       shape: BoxShape.circle,
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.45),
-          blurRadius: 22,
+          color: Colors.black.withValues(alpha: 0.4),
+          blurRadius: 18,
           spreadRadius: 0,
+          offset: const Offset(0, 8),
+        ),
+        BoxShadow(
+          color: premiumDialCallGreen.withValues(alpha: 0.22),
+          blurRadius: 20,
+          spreadRadius: -4,
           offset: const Offset(0, 10),
-        ),
-        BoxShadow(
-          color: premiumDialCallGreen.withValues(alpha: 0.55),
-          blurRadius: 32,
-          spreadRadius: -2,
-          offset: const Offset(0, 12),
-        ),
-        BoxShadow(
-          color: premiumDialCallGreen.withValues(alpha: 0.25),
-          blurRadius: 48,
-          spreadRadius: 4,
-          offset: const Offset(0, 14),
         ),
       ],
     );

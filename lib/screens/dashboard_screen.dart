@@ -5,25 +5,15 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show immutable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:lottie/lottie.dart';
-
 import '../config/credits_policy.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../theme/neon_tokens.dart';
 import '../theme/system_ui.dart';
 import '../services/ad_service.dart';
-import '../utils/call_log_format.dart';
 import '../utils/reward_ad_feedback.dart';
-import '../utils/us_phone_format.dart';
-import '../services/assign_free_number_service.dart';
-import '../services/assign_number_service.dart';
-import '../services/renew_number_service.dart';
-import '../widgets/assign_us_number_flow.dart';
 import '../widgets/engagement_overlays.dart';
-import '../widgets/glass_panel.dart';
-import '../widgets/low_credit_nudge.dart';
-import '../widgets/lease_ring_painter.dart';
+import '../widgets/soft_pulse.dart';
 import '../services/firestore_user_service.dart';
 import '../services/grant_reward_service.dart';
 import '../services/reward_sound_service.dart';
@@ -31,7 +21,6 @@ import 'call_history_screen.dart';
 import 'dialer_screen.dart';
 import 'inbox_screen.dart';
 import 'settings_screen.dart';
-import 'number_selection_screen.dart';
 import 'subscription_screen.dart';
 import 'virtual_number_screen.dart';
 
@@ -73,11 +62,10 @@ class _AdRewardView {
   int get hashCode => Object.hash(adsToday, cooldownRemaining, dailyLimitReached);
 }
 
-String _dashboardTimeGreeting() {
-  final h = DateTime.now().hour;
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
+String _firstName(String displayName) {
+  final t = displayName.trim();
+  if (t.isEmpty) return 'there';
+  return t.split(RegExp(r'\s+')).first;
 }
 
 /// Smooth numeric change for wallet / stats (no logic — display only).
@@ -115,7 +103,7 @@ class _AnimatedIntTextState extends State<_AnimatedIntText> {
   Widget build(BuildContext context) {
     return TweenAnimationBuilder<int>(
       tween: IntTween(begin: _from, end: widget.value),
-      duration: const Duration(milliseconds: 260),
+      duration: const Duration(milliseconds: 420),
       curve: Curves.easeOutCubic,
       builder: (context, v, _) {
         return Text(
@@ -146,8 +134,7 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen>
-    with TickerProviderStateMixin {
+class _DashboardScreenState extends State<DashboardScreen> {
   bool _rewardedAdBusy = false;
   /// True while `POST /grant-reward` is in flight (after ad earned reward).
   bool _grantRewardPending = false;
@@ -163,8 +150,6 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   /// Avoid spamming SnackBars if the user document stream errors repeatedly.
   bool _userDocStreamErrorNotified = false;
-  late final AnimationController _walletGlowController;
-  late final Animation<double> _walletGlowAnim;
 
   final ValueNotifier<int> _credits = ValueNotifier<int>(0);
   /// US line from Firestore (`assigned_number` / mirrors) — updated live from [FirestoreUserService.watchUserDocument]
@@ -283,14 +268,6 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   void initState() {
     super.initState();
-    _walletGlowController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 420),
-    );
-    _walletGlowAnim = CurvedAnimation(
-      parent: _walletGlowController,
-      curve: Curves.easeInOut,
-    );
     applyTalkFreeDarkNavigationChrome();
     _navIndex = widget.initialNavIndex;
     _userDocSub =
@@ -342,7 +319,6 @@ class _DashboardScreenState extends State<DashboardScreen>
     _totalCallTalkSeconds.dispose();
     _adStreakCount.dispose();
     _adView.dispose();
-    _walletGlowController.dispose();
     super.dispose();
   }
 
@@ -410,15 +386,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               creditsAdded: result.creditsAdded,
               streakBonus: result.streakBonus,
               streakDays: result.streakCount,
-            );
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  RewardAdFeedback.successCreditsAdded(result.creditsAdded),
-                ),
-                behavior: SnackBarBehavior.floating,
-                duration: const Duration(seconds: 4),
-              ),
+              welcomeFirstAd: result.firstLifetimeAd,
             );
           } else {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -552,11 +520,14 @@ class _DashboardScreenState extends State<DashboardScreen>
                             onStartCalling: () {
                               setState(() => _navIndex = 1);
                             },
+                            onWatchAd: () => _onWatchRewardedAd(
+                              cooldownRemaining,
+                              dailyLimitReached,
+                            ),
                           ),
                         ),
                       );
                     },
-                    walletGlow: _walletGlowAnim,
                   )
                 : _navIndex == 1
                     ? ValueListenableBuilder<String>(
@@ -611,11 +582,16 @@ class _DashboardScreenState extends State<DashboardScreen>
                       tooltip: 'My US number',
                       icon: const Icon(Icons.contact_phone_outlined),
                       onPressed: () {
-                        Navigator.of(context).pushNamed(
-                          VirtualNumberScreen.routeName,
-                          arguments: VirtualNumberRouteArgs(
-                            userUid: widget.user.uid,
-                            userCredits: credits,
+                        Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(
+                            builder: (_) => VirtualNumberScreen(
+                              userUid: widget.user.uid,
+                              userCredits: credits,
+                              onWatchRewardedAd: () => _onWatchRewardedAd(
+                                cooldownRemaining,
+                                dailyLimitReached,
+                              ),
+                            ),
                           ),
                         );
                       },
@@ -631,6 +607,10 @@ class _DashboardScreenState extends State<DashboardScreen>
                             onStartCalling: () {
                               setState(() => _navIndex = 1);
                             },
+                            onWatchAd: () => _onWatchRewardedAd(
+                              cooldownRemaining,
+                              dailyLimitReached,
+                            ),
                           ),
                         ),
                       );
@@ -645,6 +625,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                           builder: (_) => SettingsScreen(
                             user: widget.user,
                             credits: credits,
+                            isPremium:
+                                _subscriptionTier.value.toLowerCase() == 'pro',
                           ),
                         ),
                       );
@@ -745,18 +727,11 @@ class _ProOfferCountdownStripState extends State<_ProOfferCountdownStrip> {
           onTap: widget.onTap,
           child: Ink(
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
               border: Border.all(
-                color: const Color(0xFFFF7043).withValues(alpha: 0.5),
+                color: Colors.white.withValues(alpha: 0.1),
               ),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  const Color(0xFFFF6B35).withValues(alpha: 0.22),
-                  const Color(0xFFFF4500).withValues(alpha: 0.08),
-                ],
-              ),
+              color: AppColors.cardDark,
             ),
             padding: const EdgeInsets.symmetric(
               horizontal: 14,
@@ -769,7 +744,7 @@ class _ProOfferCountdownStripState extends State<_ProOfferCountdownStrip> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '🔥 Limited time offer on Pro',
+                        'Limited time offer',
                         style: GoogleFonts.inter(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
@@ -782,9 +757,9 @@ class _ProOfferCountdownStripState extends State<_ProOfferCountdownStrip> {
                         'Offer ends in $_mmss',
                         style: GoogleFonts.inter(
                           fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.2,
-                          color: const Color(0xFFFF7043),
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.1,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
                     ],
@@ -792,7 +767,7 @@ class _ProOfferCountdownStripState extends State<_ProOfferCountdownStrip> {
                 ),
                 Icon(
                   Icons.chevron_right_rounded,
-                  color: AppColors.primary.withValues(alpha: 0.95),
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
                   size: 22,
                 ),
               ],
@@ -830,7 +805,6 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.onWatchRewardedAd,
     required this.onGoToDialer,
     required this.onOpenCallHistory,
-    required this.walletGlow,
   });
 
   final User user;
@@ -858,7 +832,6 @@ class _DashboardHomeTab extends StatefulWidget {
   final Future<void> Function() onWatchRewardedAd;
   final VoidCallback onGoToDialer;
   final VoidCallback onOpenCallHistory;
-  final Animation<double> walletGlow;
 
   @override
   State<_DashboardHomeTab> createState() => _DashboardHomeTabState();
@@ -866,223 +839,12 @@ class _DashboardHomeTab extends StatefulWidget {
 
 class _DashboardHomeTabState extends State<_DashboardHomeTab> {
   late Future<void> _ensureFuture;
-  bool _assignNumberBusy = false;
-  bool _renewBusy = false;
 
   @override
   void initState() {
     super.initState();
     _ensureFuture =
         FirestoreUserService.ensureUserDocument(widget.user.uid);
-  }
-
-  Future<void> _onUnlockUsNumber() async {
-    if (_assignNumberBusy) return;
-    final isPro = widget.subscriptionTier.value == 'pro';
-    if (isPro) {
-      await Navigator.of(context).pushNamed<void>(
-        NumberSelectionScreen.routeName,
-        arguments: NumberSelectionRouteArgs(
-          userUid: widget.user.uid,
-          userCredits: widget.credits,
-        ),
-      );
-      return;
-    }
-    final minAds = CreditsPolicy.assignNumberMinAdsWatched;
-    final minCr = CreditsPolicy.assignNumberMinCredits;
-    if (widget.lifetimeAdsWatched.value < minAds &&
-        widget.credits < minCr) {
-      return;
-    }
-    setState(() => _assignNumberBusy = true);
-    try {
-      await runAssignUsNumberFlow(
-        context,
-        autoPickFirstNumber: false,
-        onSuccess: (r) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                r.alreadyAssigned
-                    ? 'Your line: ${r.assignedNumber}'
-                    : 'Your number is ready! ${r.assignedNumber}',
-                style: GoogleFonts.montserrat(fontWeight: FontWeight.w600),
-              ),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        },
-        onError: (msg) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(msg, style: GoogleFonts.montserrat()),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        },
-      );
-    } finally {
-      if (mounted) setState(() => _assignNumberBusy = false);
-    }
-  }
-
-  Future<void> _onGetFreeNumber() async {
-    if (_assignNumberBusy) return;
-    if (widget.subscriptionTier.value == 'pro') return;
-    final minAds = CreditsPolicy.assignNumberMinAdsWatched;
-    final minCr = CreditsPolicy.assignNumberMinCredits;
-    if (widget.lifetimeAdsWatched.value < minAds && widget.credits < minCr) {
-      return;
-    }
-    setState(() => _assignNumberBusy = true);
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => PopScope(
-        canPop: false,
-        child: AlertDialog(
-          content: Row(
-            children: [
-              const SizedBox(
-                width: 28,
-                height: 28,
-                child: CircularProgressIndicator(strokeWidth: 2.5),
-              ),
-              const SizedBox(width: 20),
-              Expanded(
-                child: Text(
-                  'Assigning your number…',
-                  style: GoogleFonts.inter(fontWeight: FontWeight.w600),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    try {
-      final r = await AssignFreeNumberService.instance.requestAssignFreeNumber();
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            r.alreadyAssigned
-                ? 'Your line: ${r.assignedNumber}'
-                : 'Your number is ready! ${r.assignedNumber}',
-            style: GoogleFonts.inter(fontWeight: FontWeight.w600),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } on AssignNumberException catch (e) {
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message, style: GoogleFonts.inter()),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } catch (e) {
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$e', style: GoogleFonts.inter()),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _assignNumberBusy = false);
-    }
-  }
-
-  void _onChangeNumberComingSoon() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Number changes are coming soon.',
-          style: GoogleFonts.inter(fontWeight: FontWeight.w600),
-        ),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
-  Future<void> _onRenewWithAds() async {
-    if (_renewBusy || _assignNumberBusy) return;
-    setState(() => _renewBusy = true);
-    try {
-      await RenewNumberService.instance.renew(mode: 'ads');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Line renewed!',
-            style: GoogleFonts.inter(fontWeight: FontWeight.w700),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } on RenewNumberException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message, style: GoogleFonts.inter()),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$e', style: GoogleFonts.inter()),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _renewBusy = false);
-    }
-  }
-
-  Future<void> _onRenewWithCredits() async {
-    if (_renewBusy || _assignNumberBusy) return;
-    setState(() => _renewBusy = true);
-    try {
-      await RenewNumberService.instance.renew(mode: 'credits');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Line renewed — thank you!',
-            style: GoogleFonts.inter(fontWeight: FontWeight.w700),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } on RenewNumberException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message, style: GoogleFonts.inter()),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$e', style: GoogleFonts.inter()),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _renewBusy = false);
-    }
   }
 
   void _retry() {
@@ -1162,194 +924,44 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
             kDebugMode ? 100 : 28,
           ),
           children: [
-            ValueListenableBuilder<String>(
-              valueListenable: widget.subscriptionTier,
-              builder: (context, tier, _) {
-                final low = tier != 'pro' &&
-                    widget.credits <
-                        CreditsPolicy.lowCreditWarningThreshold;
-                return Padding(
-                  padding: EdgeInsets.only(bottom: low ? 14 : 0),
-                  child: LowCreditNudge(
-                    credits: widget.credits,
-                    isPremium: tier == 'pro',
-                    onWatchAd: widget.onWatchRewardedAd,
-                  ),
-                );
-              },
-            ),
-            GlassPanel(
-              borderRadius: NeonTokens.radiusHero,
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      if (widget.user.photoURL != null)
-                        CircleAvatar(
-                          radius: 28,
-                          backgroundImage: NetworkImage(widget.user.photoURL!),
-                        )
-                      else
-                        CircleAvatar(
-                          radius: 28,
-                          backgroundColor: AppColors.surfaceDark,
-                          foregroundColor: AppColors.primary,
-                          child: Text(
-                            widget.displayName.isNotEmpty
-                                ? widget.displayName[0].toUpperCase()
-                                : '?',
-                            style: GoogleFonts.inter(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 22,
-                            ),
-                          ),
-                        ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _dashboardTimeGreeting(),
-                              style: GoogleFonts.inter(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 1.2,
-                                color: AppColors.primary.withValues(alpha: 0.9),
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              widget.displayName,
-                              style: GoogleFonts.inter(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: -0.3,
-                                color: Theme.of(context).colorScheme.onSurface,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            if (widget.user.email != null &&
-                                widget.user.email!.isNotEmpty) ...[
-                              const SizedBox(height: 2),
-                              Text(
-                                widget.user.email!,
-                                style: GoogleFonts.inter(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ],
+                  if (widget.user.photoURL != null)
+                    CircleAvatar(
+                      radius: 26,
+                      backgroundImage: NetworkImage(widget.user.photoURL!),
+                    )
+                  else
+                    CircleAvatar(
+                      radius: 26,
+                      backgroundColor: AppColors.surfaceDark,
+                      foregroundColor: AppColors.primary,
+                      child: Text(
+                        widget.displayName.isNotEmpty
+                            ? widget.displayName[0].toUpperCase()
+                            : '?',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 20,
                         ),
                       ),
-                      ValueListenableBuilder<String>(
-                        valueListenable: widget.subscriptionTier,
-                        builder: (context, tier, _) {
-                          final isPro = tier.toLowerCase() == 'pro';
-                          return _LightningWalletPill(
-                            credits: widget.credits,
-                            isPro: isPro,
-                            onDebugLongPress: widget.onDebugAddCredits,
-                            walletGlow: widget.walletGlow,
-                          );
-                        },
+                    ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Hey ${_firstName(widget.displayName)}',
+                      style: GoogleFonts.inter(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.35,
+                        color: Theme.of(context).colorScheme.onSurface,
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  ValueListenableBuilder<String>(
-                    valueListenable: widget.subscriptionTier,
-                    builder: (context, tier, _) {
-                      final isPro = tier.toLowerCase() == 'pro';
-                      return Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 7,
-                            ),
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(999),
-                              gradient: isPro
-                                  ? LinearGradient(
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                      colors: [
-                                        AppTheme.neonGreen,
-                                        AppColors.darkBackgroundDeep,
-                                        AppTheme.darkBg,
-                                      ],
-                                      stops: const [0.0, 0.55, 1.0],
-                                    )
-                                  : null,
-                              color: isPro
-                                  ? null
-                                  : (Theme.of(context).cardTheme.color ??
-                                      Theme.of(context).colorScheme.surface),
-                              border: Border.all(
-                                color: isPro
-                                    ? Colors.transparent
-                                    : Theme.of(context)
-                                        .colorScheme
-                                        .onSurfaceVariant
-                                        .withValues(alpha: 0.2),
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  isPro
-                                      ? Icons.verified_rounded
-                                      : Icons.lock_open_rounded,
-                                  size: 16,
-                                  color: isPro
-                                      ? Colors.white.withValues(alpha: 0.95)
-                                      : Theme.of(context)
-                                          .colorScheme
-                                          .onSurfaceVariant,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'Plan: ${isPro ? 'Pro' : 'Free'}',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: isPro
-                                        ? Colors.white
-                                        : Theme.of(context).colorScheme.onSurface,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const Spacer(),
-                          TextButton(
-                            onPressed: () {
-                              Navigator.of(context).push<void>(
-                                SubscriptionScreen.createRoute(),
-                              );
-                            },
-                            child: Text(
-                              'View plans',
-                              style: GoogleFonts.inter(
-                                fontWeight: FontWeight.w800,
-                                fontSize: 14,
-                                color: AppColors.primary,
-                              ),
-                            ),
-                          ),
-                        ],
-                      );
-                    },
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                 ],
               ),
@@ -1357,193 +969,235 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
             ValueListenableBuilder<String>(
               valueListenable: widget.subscriptionTier,
               builder: (context, tier, _) {
-                if (tier == 'pro') return const SizedBox.shrink();
-                return _ProOfferCountdownStrip(
-                  onTap: () {
-                    Navigator.of(context).push<void>(
-                      SubscriptionScreen.createRoute(),
-                    );
-                  },
-                );
-              },
-            ),
-            ValueListenableBuilder<String>(
-              valueListenable: widget.subscriptionTier,
-              builder: (context, tier, _) {
-                final isPro = tier == 'pro';
-                if (isPro) return const SizedBox.shrink();
+                final isPro = tier.toLowerCase() == 'pro';
+                final canTapAd = !widget.rewardedAdBusy &&
+                    !widget.dailyLimitReached &&
+                    widget.cooldownRemaining <= 0;
+                final remaining =
+                    math.max(0, CreditsPolicy.maxRewardedAdsPerDay - widget.adsToday);
                 return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const SizedBox(height: 12),
-                    _GetPremiumHeroButton(
-                      onPressed: () {
-                        Navigator.of(context).push<void>(
-                          SubscriptionScreen.createRoute(),
-                        );
-                      },
+                    _HomeCreditHero(
+                      credits: widget.credits,
+                      isPro: isPro,
+                      onDebugLongPress: widget.onDebugAddCredits,
                     ),
-                    const SizedBox(height: 12),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 12),
-            RepaintBoundary(
-              child: ValueListenableBuilder<String>(
-                valueListenable: widget.subscriptionTier,
-                builder: (context, tier, _) {
-                  final isPro = tier == 'pro';
-                  if (isPro) {
-                    return const _ProBenefitsCard();
-                  }
-                  return ValueListenableBuilder<int>(
-                    valueListenable: widget.adStreakCount,
-                    builder: (context, streak, _) {
-                      return _SimpleAdRewardCard(
-                        rewardedAdBusy: widget.rewardedAdBusy,
-                        grantRewardPending: widget.grantRewardPending,
-                        cooldownRemaining: widget.cooldownRemaining,
-                        dailyLimitReached: widget.dailyLimitReached,
-                        adsToday: widget.adsToday,
-                        credits: widget.credits,
-                        adStreakDays: streak,
-                        onEarn: widget.onWatchRewardedAd,
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 20),
-            RepaintBoundary(
-              child: ValueListenableBuilder<String?>(
-                valueListenable: widget.assignedNumber,
-                builder: (context, assigned, _) {
-                  return ValueListenableBuilder<String?>(
-                    valueListenable: widget.numberLineStatus,
-                    builder: (context, lineStatus, _) {
-                  return ValueListenableBuilder<String?>(
-                    valueListenable: widget.numberTier,
-                    builder: (context, numTier, _) {
-                  return ValueListenableBuilder<int>(
-                    valueListenable: widget.lifetimeAdsWatched,
-                    builder: (context, adsWatched, _) {
-                      return ValueListenableBuilder<DateTime?>(
-                        valueListenable: widget.numberLeaseExpiry,
-                        builder: (context, leaseExp, _) {
-                          return ValueListenableBuilder<String?>(
-                            valueListenable: widget.numberPlanType,
-                            builder: (context, planType, _) {
-                              return ValueListenableBuilder<String>(
-                                valueListenable: widget.subscriptionTier,
-                                builder: (context, tier, _) {
-                                  return ValueListenableBuilder<int>(
-                                    valueListenable: widget.numberRenewAdProgress,
-                                    builder: (context, renewProg, _) {
-                                      return _VirtualNumberCard(
-                                        assignedNumber: assigned,
-                                        numberLineStatus: lineStatus,
-                                        numberTier: numTier,
-                                        leaseExpiry: leaseExp,
-                                        planType: planType,
-                                        adsWatchedCount: adsWatched,
-                                        credits: widget.credits,
-                                        isPremium: tier == 'pro',
-                                        assigning:
-                                            _assignNumberBusy || _renewBusy,
-                                        renewAdProgress: renewProg,
-                                        onUnlock: _onUnlockUsNumber,
-                                        onGetFreeNumber: tier == 'pro'
-                                            ? null
-                                            : _onGetFreeNumber,
-                                        onChangeNumber: tier == 'pro'
-                                            ? _onChangeNumberComingSoon
-                                            : null,
-                                        onRenewWithAds: _onRenewWithAds,
-                                        onRenewWithCredits: _onRenewWithCredits,
-                                        onWatchAdForRenew:
-                                            widget.onWatchRewardedAd,
-                                        onExpiredGetNewNumber: () {
-                                          if (tier == 'pro') {
-                                            unawaited(_onUnlockUsNumber());
-                                          } else {
-                                            unawaited(_onGetFreeNumber());
-                                          }
-                                        },
-                                        onGetPremium: () {
-                                          Navigator.of(context).push<void>(
-                                            SubscriptionScreen.createRoute(),
-                                          );
-                                        },
-                                      );
-                                    },
-                                  );
-                                },
-                              );
-                            },
+                    if (!isPro) ...[
+                      const SizedBox(height: 12),
+                      SoftPulse(
+                        enabled: canTapAd &&
+                            !widget.grantRewardPending &&
+                            !widget.rewardedAdBusy,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: canTapAd && !widget.grantRewardPending
+                                ? NeonTokens.glowPrimary(0.85)
+                                : null,
+                          ),
+                          child: FilledButton(
+                            onPressed: canTapAd && !widget.grantRewardPending
+                                ? widget.onWatchRewardedAd
+                                : null,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: AppColors.primary,
+                              foregroundColor: AppColors.onPrimary,
+                              disabledBackgroundColor: (Theme.of(context)
+                                          .cardTheme
+                                          .color ??
+                                      Theme.of(context).colorScheme.surface)
+                                  .withValues(alpha: 0.65),
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 14,
+                                horizontal: 16,
+                              ),
+                              minimumSize: const Size.fromHeight(56),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              elevation: 0,
+                            ),
+                            child: widget.rewardedAdBusy
+                                ? SizedBox(
+                                    height: 22,
+                                    width: 22,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2.5,
+                                      color: AppColors.onPrimary
+                                          .withValues(alpha: 0.95),
+                                    ),
+                                  )
+                                : Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        '🎁 Get FREE Calling Time',
+                                        textAlign: TextAlign.center,
+                                        style: GoogleFonts.inter(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w800,
+                                          height: 1.2,
+                                          letterSpacing: 0.2,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '+${CreditsPolicy.creditsPerRewardedAd} credits',
+                                        textAlign: TextAlign.center,
+                                        style: GoogleFonts.inter(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.onPrimary
+                                              .withValues(alpha: 0.88),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        '🚀 10,000+ users upgraded today',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          height: 1.35,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurfaceVariant
+                              .withValues(alpha: 0.85),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      _ProOfferCountdownStrip(
+                        onTap: () {
+                          Navigator.of(context).push<void>(
+                            SubscriptionScreen.createRoute(),
                           );
                         },
-                      );
-                    },
-                  );
-                    },
-                  );
-                    },
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 22),
-            ValueListenableBuilder<String>(
-              valueListenable: widget.subscriptionTier,
-              builder: (context, tier, _) {
-                final isPro = tier == 'pro';
-                return ValueListenableBuilder<int>(
-                  valueListenable: widget.outboundCallsTotal,
-                  builder: (context, callsMade, _) {
-                    return ValueListenableBuilder<int>(
-                      valueListenable: widget.totalCallTalkSeconds,
-                      builder: (context, talkSec, _) {
-                        final talkMin = talkSec / 60.0;
-                        return Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                      ),
+                      if (widget.grantRewardPending) ...[
+                        const SizedBox(height: 8),
+                        Row(
                           children: [
-                            Expanded(
-                              child: _DashboardStatCard(
-                                icon: Icons.call_made_rounded,
-                                label: 'Calls made',
-                                value: '$callsMade',
-                                caption: 'All time',
-                                animatedValue: true,
+                            SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.primary.withValues(alpha: 0.9),
                               ),
                             ),
-                            const SizedBox(width: 16),
+                            const SizedBox(width: 8),
                             Expanded(
-                              child: _DashboardStatCard(
-                                icon: Icons.timer_outlined,
-                                label: 'Minutes',
-                                value: isPro
-                                    ? 'Unlimited'
-                                    : talkMin.toStringAsFixed(1),
-                                caption: isPro
-                                    ? 'Unlimited calling (Pro)'
-                                    : 'Talk time (completed)',
-                                animatedValue: !isPro,
+                              child: Text(
+                                RewardAdFeedback.processingReward,
+                                style: GoogleFonts.inter(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant,
+                                ),
                               ),
                             ),
                           ],
-                        );
-                      },
-                    );
-                  },
+                        ),
+                      ],
+                      if (widget.cooldownRemaining > 0 &&
+                          !widget.dailyLimitReached) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          'Wait ${widget.cooldownRemaining}s for next ad',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      OutlinedButton(
+                        onPressed: () {
+                          Navigator.of(context).push<void>(
+                            SubscriptionScreen.createRoute(),
+                          );
+                        },
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor:
+                              Theme.of(context).colorScheme.onSurface,
+                          side: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.2),
+                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                        ),
+                        child: Text(
+                          'GO PRO → UNLIMITED',
+                          style: GoogleFonts.inter(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 15,
+                            letterSpacing: 0.35,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        'You can watch ${CreditsPolicy.maxRewardedAdsPerDay} ads today · $remaining left',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurfaceVariant,
+                        ),
+                      ),
+                      ValueListenableBuilder<int>(
+                        valueListenable: widget.adStreakCount,
+                        builder: (context, streak, _) {
+                          if (streak <= 0) {
+                            return const SizedBox.shrink();
+                          }
+                          final next = CreditsPolicy.nextStreakMilestoneAfter(streak);
+                          final line = next == null
+                              ? '🔥 Day $streak streak'
+                              : '🔥 Day $streak streak → +${next.bonusCredits} bonus at day ${next.day}';
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 10),
+                            child: Text(
+                              line,
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.inter(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                height: 1.35,
+                                color: Theme.of(context).colorScheme.onSurface,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Pro active · unlimited calling',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
                 );
               },
-            ),
-            const SizedBox(height: 22),
-            _RecentActivitySection(
-              user: widget.user,
-              onOpenDialer: widget.onGoToDialer,
-              onSeeAllHistory: widget.onOpenCallHistory,
             ),
           ],
             ),
@@ -1554,1908 +1208,58 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab> {
   }
 }
 
-class _DashboardStatCard extends StatelessWidget {
-  const _DashboardStatCard({
-    required this.icon,
-    required this.label,
-    required this.value,
-    required this.caption,
-    this.animatedValue = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-  final String caption;
-  final bool animatedValue;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassPanel(
-      borderRadius: AppTheme.radiusLg,
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                icon,
-                size: 18,
-                color: AppColors.primary.withValues(alpha: 0.9),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  label,
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          animatedValue
-              ? AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 240),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  transitionBuilder: (child, anim) => FadeTransition(
-                    opacity: anim,
-                    child: SlideTransition(
-                      position: Tween<Offset>(
-                        begin: const Offset(0, 0.06),
-                        end: Offset.zero,
-                      ).animate(anim),
-                      child: child,
-                    ),
-                  ),
-                  child: Text(
-                    value,
-                    key: ValueKey<String>(value),
-                    style: GoogleFonts.poppins(
-                      fontSize: 26,
-                      fontWeight: FontWeight.w700,
-                      height: 1.05,
-                      color: Theme.of(context).colorScheme.onSurface,
-                      letterSpacing: -0.5,
-                    ),
-                  ),
-                )
-              : Text(
-                  value,
-                  style: GoogleFonts.poppins(
-                    fontSize: 26,
-                    fontWeight: FontWeight.w700,
-                    height: 1.05,
-                    color: Theme.of(context).colorScheme.onSurface,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-          const SizedBox(height: 6),
-          Text(
-            caption,
-            style: GoogleFonts.inter(
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-              color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.85),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RecentActivitySection extends StatelessWidget {
-  const _RecentActivitySection({
-    required this.user,
-    required this.onOpenDialer,
-    required this.onSeeAllHistory,
-  });
-
-  final User user;
-  final VoidCallback onOpenDialer;
-  final VoidCallback onSeeAllHistory;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Recent activity',
-              style: GoogleFonts.montserrat(
-                fontSize: 17,
-                fontWeight: FontWeight.w700,
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-            ),
-            TextButton(
-              onPressed: onSeeAllHistory,
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              child: Text(
-                'See all',
-                style: GoogleFonts.montserrat(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.primary,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: FirestoreUserService.watchCallHistory(user.uid, limit: 5),
-          builder: (context, snap) {
-            if (snap.hasError) {
-              return _RecentActivityShell(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(
-                    'Could not load recents.',
-                    style: GoogleFonts.inter(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              );
-            }
-            if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
-              return const _RecentActivityShell(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(
-                    child: SizedBox(
-                      width: 28,
-                      height: 28,
-                      child: CircularProgressIndicator(strokeWidth: 2.5),
-                    ),
-                  ),
-                ),
-              );
-            }
-            final docs = snap.data?.docs ?? [];
-            if (docs.isEmpty) {
-              return _RecentActivityShell(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-                  child: Column(
-                    children: [
-                      Icon(
-                        Icons.history_rounded,
-                        size: 40,
-                        color: Theme.of(context)
-                            .colorScheme
-                            .onSurfaceVariant
-                            .withValues(alpha: 0.45),
-                      ),
-                      const SizedBox(height: 14),
-                      Text(
-                        'No calls yet',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.montserrat(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: Theme.of(context).colorScheme.onSurface,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Completed calls appear here after each call ends.',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.montserrat(
-                          fontSize: 13,
-                          height: 1.4,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      OutlinedButton.icon(
-                        onPressed: onOpenDialer,
-                        icon: Icon(
-                          Icons.dialpad_rounded,
-                          size: 20,
-                          color: AppColors.primary,
-                        ),
-                        label: Text(
-                          'Open dialer',
-                          style: GoogleFonts.montserrat(
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.primary,
-                          ),
-                        ),
-                        style: OutlinedButton.styleFrom(
-                          side: BorderSide(
-                            color: AppColors.primary.withValues(alpha: 0.65),
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 20,
-                            vertical: 12,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(AppTheme.radiusLg),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }
-
-            return _RecentActivityShell(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                child: Column(
-                  children: [
-                    for (var i = 0; i < docs.length; i++) ...[
-                      if (i > 0) const SizedBox(height: 4),
-                      _DashboardRecentCallTile(data: docs[i].data()),
-                    ],
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      ],
-    );
-  }
-}
-
-class _RecentActivityShell extends StatelessWidget {
-  const _RecentActivityShell({required this.child});
-
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface)
-            .withValues(alpha: 0.88),
-        borderRadius: BorderRadius.circular(AppTheme.radiusLg),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.06),
-        ),
-      ),
-      child: child,
-    );
-  }
-}
-
-class _DashboardRecentCallTile extends StatelessWidget {
-  const _DashboardRecentCallTile({required this.data});
-
-  final Map<String, dynamic> data;
-
-  @override
-  Widget build(BuildContext context) {
-    final durationSec = data['durationSeconds'];
-    final sec = durationSec is num ? durationSec.toInt() : 0;
-    final settled = data['settledAt'] is Timestamp
-        ? data['settledAt'] as Timestamp
-        : null;
-    final outgoing = CallLogFormat.isOutgoingFromDocument(data);
-    final labels = CallLogFormat.callHistoryLabels(data, outgoing);
-    final display = CallLogFormat.prettyDisplayNumber(labels.primary);
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-      child: Row(
-        children: [
-          Icon(
-            Icons.call_made_rounded,
-            size: 20,
-            color: AppColors.primary.withValues(alpha: 0.9),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  display,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: Theme.of(context).colorScheme.onSurface,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '${CallLogFormat.formatSettledDate(settled)} · ${CallLogFormat.formatClockTime(settled)}',
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            CallLogFormat.formatDurationMmSs(sec),
-            style: GoogleFonts.jetBrainsMono(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: Theme.of(context).colorScheme.onSurface,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Glowing credits badge — balance (debug long-press adds credits).
-class _LightningWalletPill extends StatelessWidget {
-  const _LightningWalletPill({
+/// Large balance — biggest number on screen; glow reserved for CTAs (debug long-press adds credits).
+class _HomeCreditHero extends StatelessWidget {
+  const _HomeCreditHero({
     required this.credits,
-    this.isPro = false,
+    required this.isPro,
     this.onDebugLongPress,
-    required this.walletGlow,
   });
 
   final int credits;
   final bool isPro;
   final Future<void> Function()? onDebugLongPress;
-  final Animation<double> walletGlow;
 
   @override
   Widget build(BuildContext context) {
-    final neon = AppColors.primary;
-    final creditStyle = GoogleFonts.poppins(
-      fontSize: 18,
+    final valueStyle = GoogleFonts.poppins(
+      fontSize: isPro ? 40 : 64,
       fontWeight: FontWeight.w700,
-      height: 1.05,
-      color: Theme.of(context).colorScheme.onSurface,
-      letterSpacing: -0.4,
-      shadows: [
-        Shadow(
-          color: neon.withValues(alpha: 0.35),
-          blurRadius: 10,
-        ),
-      ],
+      height: 1.0,
+      letterSpacing: -2,
+      color: AppColors.textOnDark,
     );
-    final Widget creditValue = isPro
-        ? Text('Unlimited', style: creditStyle)
-        : _AnimatedIntText(
-            value: credits,
-            style: creditStyle,
-          );
-    return AnimatedBuilder(
-      animation: walletGlow,
-      builder: (context, child) {
-        final g = walletGlow.value.clamp(0.0, 1.0);
-        return Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onLongPress: onDebugLongPress == null
-                ? null
-                : () {
-                    onDebugLongPress!();
-                  },
-            borderRadius: BorderRadius.circular(999),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(999),
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    const Color(0xFF1A1528).withValues(alpha: 0.95),
-                    const Color(0xFF0D0B14).withValues(alpha: 0.98),
-                  ],
-                ),
-                border: Border.all(
-                  color: Color.lerp(
-                        Colors.white.withValues(alpha: 0.22),
-                        AppTheme.neonGreen.withValues(alpha: 0.85),
-                        g,
-                      ) ??
-                      Colors.white.withValues(alpha: 0.22),
-                  width: 0.5 + g * 1.2,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: neon.withValues(alpha: 0.45),
-                    blurRadius: 8,
-                    spreadRadius: 2,
-                    offset: const Offset(0, 2),
-                  ),
-                  BoxShadow(
-                    color: AppTheme.neonGreen.withValues(alpha: 0.35 * g),
-                    blurRadius: 8 + 20 * g,
-                    spreadRadius: 2 * g,
-                  ),
-                ],
-              ),
-              child: child,
-            ),
-          ),
-        );
-      },
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.bolt_rounded,
-            color: neon.withValues(alpha: 0.98),
-            size: 20,
-          ),
-          const SizedBox(width: 6),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                isPro ? 'CALLING' : 'CREDITS',
-                style: GoogleFonts.inter(
-                  fontSize: 9,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 1.2,
-                  color: Theme.of(context)
-                      .colorScheme
-                      .onSurfaceVariant
-                      .withValues(alpha: 0.85),
-                ),
-              ),
-              creditValue,
-            ],
-          ),
-        ],
-      ),
+    final creditsWord = GoogleFonts.inter(
+      fontSize: 17,
+      fontWeight: FontWeight.w600,
+      height: 1.2,
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
     );
-  }
-}
-
-/// Rewarded ads: one tap → server grants [CreditsPolicy.creditsPerRewardedAd] credits each time.
-class _SimpleAdRewardCard extends StatelessWidget {
-  const _SimpleAdRewardCard({
-    required this.rewardedAdBusy,
-    required this.grantRewardPending,
-    required this.cooldownRemaining,
-    required this.dailyLimitReached,
-    required this.adsToday,
-    required this.credits,
-    required this.adStreakDays,
-    required this.onEarn,
-  });
-
-  final bool rewardedAdBusy;
-  final bool grantRewardPending;
-  final int cooldownRemaining;
-  final bool dailyLimitReached;
-  final int adsToday;
-  final int credits;
-  final int adStreakDays;
-  final Future<void> Function() onEarn;
-
-  @override
-  Widget build(BuildContext context) {
-    final maxPerDay = CreditsPolicy.maxRewardedAdsPerDay;
-    final remaining = math.max(0, maxPerDay - adsToday);
-    final canTap =
-        !rewardedAdBusy && !dailyLimitReached && cooldownRemaining <= 0;
-
-    return GlassPanel(
-      accentNeon: true,
-      borderRadius: NeonTokens.radiusCard,
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.auto_awesome_rounded,
-                color: AppColors.primary.withValues(alpha: 0.95),
-                size: 26,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'EARN CREDITS',
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.4,
-                    color: AppColors.primary.withValues(alpha: 0.95),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Each rewarded ad adds +${CreditsPolicy.creditsPerRewardedAd} credits.',
-            style: GoogleFonts.inter(
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              height: 1.35,
-              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.92),
-            ),
-          ),
-          if (adStreakDays > 0) ...[
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: AppColors.primary.withValues(alpha: 0.35),
-                ),
-                gradient: LinearGradient(
-                  colors: [
-                    AppColors.primary.withValues(alpha: 0.12),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.local_fire_department_rounded,
-                    color: Colors.orangeAccent.shade200,
-                    size: 22,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Streak: $adStreakDays days — bonus at ${CreditsPolicy.adStreakMilestoneDays.join(', ')}',
-                      style: GoogleFonts.inter(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        height: 1.35,
-                        color: AppTheme.neonGreen.withValues(alpha: 0.92),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (cooldownRemaining > 0 && !dailyLimitReached) ...[
-            const SizedBox(height: 8),
-            Text(
-              'Wait ${cooldownRemaining}s before the next ad.',
-              style: GoogleFonts.inter(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: AppColors.primary.withValues(alpha: 0.9),
-              ),
-            ),
-          ],
-          if (credits == 0 && canTap) ...[
-            const SizedBox(height: 10),
-            Text(
-              'Start here — your balance is 0',
-              style: GoogleFonts.inter(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: AppTheme.neonGreen.withValues(alpha: 0.95),
-              ),
-            ),
-          ],
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: canTap ? () => onEarn() : null,
-            style: FilledButton.styleFrom(
-              backgroundColor: AppColors.primary,
-              foregroundColor: AppColors.onPrimary,
-              disabledBackgroundColor:
-                  (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface)
-                      .withValues(alpha: 0.7),
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-              ),
-            ),
-            child: rewardedAdBusy
-                ? SizedBox(
-                    height: 22,
-                    width: 22,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: AppColors.onPrimary.withValues(alpha: 0.95),
-                    ),
-                  )
-                : Text(
-                    'Watch Ad → Earn Credits',
-                    style: GoogleFonts.inter(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-          ),
-          const SizedBox(height: 10),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            child: grantRewardPending
-                ? Row(
-                    key: const ValueKey<String>('grant'),
-                    children: [
-                      SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: AppTheme.neonGreen.withValues(alpha: 0.95),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          RewardAdFeedback.processingReward,
-                          style: GoogleFonts.inter(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            height: 1.3,
-                            color: AppTheme.neonGreen.withValues(alpha: 0.95),
-                          ),
-                        ),
-                      ),
-                    ],
-                  )
-                : Text(
-                    key: const ValueKey<String>('remaining'),
-                    RewardAdFeedback.adsRemainingToday(remaining),
-                    style: GoogleFonts.inter(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      height: 1.35,
-                      color: Theme.of(context)
-                          .colorScheme
-                          .onSurfaceVariant
-                          .withValues(alpha: 0.9),
-                    ),
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Full-width CTA — shimmer + gold crown; opens [SubscriptionScreen].
-class _GetPremiumHeroButton extends StatefulWidget {
-  const _GetPremiumHeroButton({required this.onPressed});
-
-  final VoidCallback onPressed;
-
-  @override
-  State<_GetPremiumHeroButton> createState() => _GetPremiumHeroButtonState();
-}
-
-class _GetPremiumHeroButtonState extends State<_GetPremiumHeroButton>
-    with TickerProviderStateMixin {
-  late final AnimationController _shimmer;
-  late final AnimationController _pulse;
-
-  @override
-  void initState() {
-    super.initState();
-    _shimmer = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2600),
-    )..repeat();
-    _pulse = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2200),
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _shimmer.dispose();
-    _pulse.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _pulse,
-      builder: (context, _) {
-        final breathe =
-            1.0 + 0.014 * math.sin(_pulse.value * math.pi * 2);
-        return Transform.scale(
-          scale: breathe,
-          child: Material(
+    return Material(
       color: Colors.transparent,
       child: InkWell(
-        onTap: widget.onPressed,
-        borderRadius: BorderRadius.circular(22),
-        child: Ink(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(18),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                AppTheme.neonGreen.withValues(alpha: 0.92),
-                AppTheme.neonGreen,
-                AppColors.darkBackgroundDeep,
-                AppTheme.darkBg,
-              ],
-              stops: const [0.0, 0.25, 0.55, 1.0],
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: AppTheme.neonGreen.withValues(alpha: 0.4),
-                blurRadius: 22,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: Stack(
-              children: [
-                AnimatedBuilder(
-                  animation: _shimmer,
-                  builder: (context, _) {
-                    final t = _shimmer.value;
-                    return Positioned.fill(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment(-1.2 + 2.4 * t, -0.5),
-                            end: Alignment(0.2 + 2.4 * t, 1),
-                            colors: [
-                              Colors.transparent,
-                              Colors.white.withValues(alpha: 0.22),
-                              Colors.transparent,
-                            ],
-                            stops: const [0.4, 0.5, 0.6],
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-                  child: Row(
-                    children: [
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white.withValues(alpha: 0.2),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.2),
-                              blurRadius: 8,
-                              offset: const Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.all(4),
-                          child: SizedBox(
-                            width: 40,
-                            height: 40,
-                            child: Lottie.asset(
-                              AppTheme.lottieMoney,
-                              fit: BoxFit.contain,
-                              repeat: true,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Go Pro',
-                              style: GoogleFonts.inter(
-                                fontSize: 17,
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white,
-                                letterSpacing: -0.3,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              'Unlimited calling · No ads · US number · Bonus credits',
-                              style: GoogleFonts.inter(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: Colors.white.withValues(alpha: 0.92),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Icon(
-                        Icons.chevron_right_rounded,
-                        color: Colors.white.withValues(alpha: 0.95),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// Replaces the “Earn credits” power card for Pro users.
-class _ProBenefitsCard extends StatelessWidget {
-  const _ProBenefitsCard();
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassPanel(
-      borderRadius: AppTheme.radiusLg,
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.verified_rounded,
-                color: AppTheme.neonGreen.withValues(alpha: 0.95),
-                size: 22,
-              ),
-              const SizedBox(width: 10),
-              Text(
-                'You’re on TalkFree Pro',
-                style: GoogleFonts.inter(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'You are saving ${CreditsPolicy.creditsSavedPerMinuteVsFree} credits per minute',
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              height: 1.35,
-              color: AppTheme.neonGreen.withValues(alpha: 0.95),
-            ),
-          ),
-          const SizedBox(height: 12),
-          _proLine(context, 'Ad-free experience'),
-          _proLine(context, 'Bonus credits & lower call rates'),
-          _proLine(context, 'Priority line quality'),
-        ],
-      ),
-    );
-  }
-
-  static Widget _proLine(BuildContext context, String t) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons.check_circle_rounded,
-            size: 18,
-            color: AppTheme.neonGreen.withValues(alpha: 0.95),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              t,
-              style: GoogleFonts.inter(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                height: 1.35,
-                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.92),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Fraction of lease time remaining (vs plan length from server).
-double _leaseRemainingFraction(
-  DateTime now,
-  DateTime expiry,
-  String? planType,
-) {
-  final leaseMs = CreditsPolicy.leaseDurationMsForPlanType(planType);
-  final leftMs = expiry.difference(now).inMilliseconds;
-  if (leftMs <= 0) return 0;
-  return (leftMs / leaseMs).clamp(0.0, 1.0);
-}
-
-String _leaseShortLabel(DateTime now, DateTime? expiry) {
-  if (expiry == null) return 'No expiry set';
-  final left = expiry.difference(now);
-  if (left.inSeconds <= 0) return 'Expired';
-  if (left.inDays >= 1) {
-    final h = left.inHours % 24;
-    final chunk =
-        h > 0 ? '${left.inDays}d ${h}h' : '${left.inDays}d';
-    return 'Expires in $chunk';
-  }
-  final h = left.inHours;
-  final m = left.inMinutes % 60;
-  final s = left.inSeconds % 60;
-  if (h >= 1) return 'Expires in ${h}h ${m}m';
-  if (m >= 1) return 'Expires in ${m}m ${s}s';
-  return 'Expires in ${s}s';
-}
-
-String _numberTierLabel(String? tier) {
-  switch (tier?.toLowerCase().trim() ?? '') {
-    case 'premium':
-      return 'Pro line';
-    case 'vip':
-      return 'VIP (credits)';
-    case 'normal':
-      return 'Standard (free)';
-    default:
-      return '';
-  }
-}
-
-/// Animated handset for the virtual-number row; lock / ready badges when no line yet.
-class _VirtualNumberLottieBadge extends StatelessWidget {
-  const _VirtualNumberLottieBadge({
-    required this.hasNumber,
-    required this.isPremium,
-  });
-
-  final bool hasNumber;
-  final bool isPremium;
-
-  @override
-  Widget build(BuildContext context) {
-    final locked = !hasNumber && !isPremium;
-    final dim = Theme.of(context)
-        .colorScheme
-        .onSurfaceVariant
-        .withValues(alpha: 0.78);
-
-    return SizedBox(
-      width: 48,
-      height: 48,
-      child: Stack(
-        clipBehavior: Clip.none,
-        alignment: Alignment.center,
-        children: [
-          Opacity(
-            opacity: locked ? 0.48 : 1,
-            child: Lottie.asset(
-              AppTheme.lottiePhoneCall,
-              fit: BoxFit.contain,
-              repeat: true,
-            ),
-          ),
-          if (locked)
-            Positioned(
-              right: -2,
-              bottom: -2,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: AppTheme.darkBg.withValues(alpha: 0.94),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: dim.withValues(alpha: 0.45),
-                  ),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(2),
-                  child: Icon(Icons.lock_rounded, size: 13, color: dim),
-                ),
-              ),
-            )
-          else if (!hasNumber && isPremium)
-            Positioned(
-              right: -2,
-              bottom: -2,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: AppTheme.darkBg.withValues(alpha: 0.94),
-                  shape: BoxShape.circle,
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(2),
-                  child: Icon(
-                    Icons.check_circle_outline_rounded,
-                    size: 14,
-                    color: AppColors.primary,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Glass number block + lease ring; locked state keeps prior card actions.
-class _VirtualNumberCard extends StatefulWidget {
-  const _VirtualNumberCard({
-    required this.assignedNumber,
-    required this.numberLineStatus,
-    required this.numberTier,
-    required this.leaseExpiry,
-    required this.planType,
-    required this.adsWatchedCount,
-    required this.credits,
-    required this.isPremium,
-    required this.assigning,
-    required this.renewAdProgress,
-    required this.onUnlock,
-    this.onGetFreeNumber,
-    this.onChangeNumber,
-    required this.onRenewWithAds,
-    required this.onRenewWithCredits,
-    required this.onWatchAdForRenew,
-    required this.onExpiredGetNewNumber,
-    required this.onGetPremium,
-  });
-
-  final String? assignedNumber;
-  /// Server `numberStatus` / `number_status` (`active` | `expired`).
-  final String? numberLineStatus;
-  /// Server `number_tier`: `normal` | `vip` | `premium`.
-  final String? numberTier;
-  final DateTime? leaseExpiry;
-  final String? planType;
-  final int adsWatchedCount;
-  final int credits;
-  final bool isPremium;
-  final bool assigning;
-  /// Progress toward renew-with-ads (server `number_renew_ad_progress`).
-  final int renewAdProgress;
-  final Future<void> Function() onUnlock;
-  /// Free tier: auto-assign first US number (server POST `/assign-free-number`).
-  final Future<void> Function()? onGetFreeNumber;
-  /// Premium: optional “change number” (stub until server supports swap).
-  final VoidCallback? onChangeNumber;
-  final Future<void> Function() onRenewWithAds;
-  final Future<void> Function() onRenewWithCredits;
-  final Future<void> Function() onWatchAdForRenew;
-  /// Free: `/assign-free-number`; Pro: number picker.
-  final VoidCallback onExpiredGetNewNumber;
-  final VoidCallback onGetPremium;
-
-  @override
-  State<_VirtualNumberCard> createState() => _VirtualNumberCardState();
-}
-
-class _VirtualNumberCardState extends State<_VirtualNumberCard>
-    with SingleTickerProviderStateMixin {
-  /// Drives lease countdown + ring; only runs while a line + expiry exist.
-  Timer? _tick;
-  /// Breathing scale on the “+” in the no-number glass state; stopped when a line exists.
-  late final AnimationController _plusPulse;
-
-  @override
-  void initState() {
-    super.initState();
-    _plusPulse = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1600),
-    );
-    _syncTicker();
-    _syncPlusPulse();
-  }
-
-  @override
-  void didUpdateWidget(covariant _VirtualNumberCard oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _syncTicker();
-    _syncPlusPulse();
-  }
-
-  void _syncTicker() {
-    final st = widget.numberLineStatus?.toLowerCase().trim() ?? '';
-    final lineExpired = st == 'expired';
-    final has =
-        !lineExpired && widget.assignedNumber?.trim().isNotEmpty == true;
-    final exp = widget.leaseExpiry;
-    if (has && exp != null) {
-      _tick ??= Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() {});
-      });
-    } else {
-      _tick?.cancel();
-      _tick = null;
-    }
-  }
-
-  void _syncPlusPulse() {
-    final st = widget.numberLineStatus?.toLowerCase().trim() ?? '';
-    final lineExpired = st == 'expired';
-    final has =
-        !lineExpired && widget.assignedNumber?.trim().isNotEmpty == true;
-    if (has) {
-      _plusPulse.stop();
-    } else {
-      if (!_plusPulse.isAnimating) {
-        _plusPulse.repeat(reverse: true);
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _tick?.cancel();
-    _plusPulse.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final numberRaw = widget.assignedNumber?.trim();
-    final stLine = widget.numberLineStatus?.toLowerCase().trim() ?? '';
-    final lineExpired = stLine == 'expired';
-    final hasNumber =
-        !lineExpired && numberRaw != null && numberRaw.isNotEmpty;
-    final minAds = CreditsPolicy.assignNumberMinAdsWatched;
-    final minCredits = CreditsPolicy.assignNumberMinCredits;
-    final canUnlock = widget.isPremium ||
-        widget.adsWatchedCount >= minAds ||
-        widget.credits >= minCredits;
-
-    final br = BorderRadius.circular(AppTheme.radiusLg);
-
-    if (lineExpired) {
-      return AnimatedContainer(
-        duration: const Duration(milliseconds: 420),
-        curve: Curves.easeOutCubic,
-        width: double.infinity,
-        decoration: BoxDecoration(
-          borderRadius: br,
-          boxShadow: [
-            BoxShadow(
-              color: AppColors.primary.withValues(alpha: 0.22),
-              blurRadius: 28,
-              spreadRadius: 2,
-              offset: const Offset(0, 10),
-            ),
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.4),
-              blurRadius: 22,
-              offset: const Offset(0, 12),
-            ),
-          ],
-        ),
-        child: GlassPanel(
-          borderRadius: AppTheme.radiusLg,
-          padding: const EdgeInsets.all(20),
+        onLongPress:
+            onDebugLongPress == null ? null : () => onDebugLongPress!(),
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.only(top: 4, bottom: 4),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Row(
-                children: [
-                  _VirtualNumberLottieBadge(
-                    hasNumber: false,
-                    isPremium: widget.isPremium,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'VIRTUAL NUMBER',
-                      style: GoogleFonts.inter(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 2,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Your number expired',
-                style: GoogleFonts.inter(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w800,
-                  height: 1.25,
-                  color: Theme.of(context).colorScheme.error,
+              if (isPro)
+                Text('Unlimited', style: valueStyle)
+              else ...[
+                _AnimatedIntText(
+                  value: credits,
+                  style: valueStyle,
                 ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Free numbers are reclaimed after 24 hours. Get a new line or upgrade to Pro.',
-                style: GoogleFonts.inter(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  height: 1.4,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 18),
-              if (!widget.isPremium) ...[
-                Row(
-                  children: [
-                    Expanded(
-                      child: FilledButton(
-                        onPressed: widget.assigning
-                            ? null
-                            : widget.onExpiredGetNewNumber,
-                        child: Text(
-                          'Get new number',
-                          style: GoogleFonts.inter(fontWeight: FontWeight.w800),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed:
-                            widget.assigning ? null : widget.onGetPremium,
-                        child: Text(
-                          'Go Pro',
-                          style: GoogleFonts.inter(fontWeight: FontWeight.w800),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ] else
-                FilledButton(
-                  onPressed: widget.assigning
-                      ? null
-                      : widget.onExpiredGetNewNumber,
-                  child: Text(
-                    'Get new number',
-                    style: GoogleFonts.inter(fontWeight: FontWeight.w800),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    final now = DateTime.now();
-    final expiry = widget.leaseExpiry;
-    final leaseFrac = (hasNumber && expiry != null)
-        ? _leaseRemainingFraction(now, expiry, widget.planType)
-        : 1.0;
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 420),
-      curve: Curves.easeOutCubic,
-      width: double.infinity,
-      decoration: BoxDecoration(
-        borderRadius: br,
-        boxShadow: [
-          if (!hasNumber)
-            BoxShadow(
-              color: AppColors.primary.withValues(alpha: 0.22),
-              blurRadius: 28,
-              spreadRadius: 2,
-              offset: const Offset(0, 10),
-            ),
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.4),
-            blurRadius: 22,
-            offset: const Offset(0, 12),
-          ),
-        ],
-      ),
-      child: GlassPanel(
-        borderRadius: AppTheme.radiusLg,
-        padding: const EdgeInsets.all(20),
-        child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  _VirtualNumberLottieBadge(
-                    hasNumber: hasNumber,
-                    isPremium: widget.isPremium,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'VIRTUAL NUMBER',
-                      style: GoogleFonts.inter(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 2,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              if (hasNumber) ...[
-                Text(
-                  'Your US line',
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                GlassPanel(
-                  borderRadius: 24,
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 20,
-                    horizontal: 12,
-                  ),
-                  child: Column(
-                        children: [
-                          SizedBox(
-                            height: 196,
-                            width: 196,
-                            child: Stack(
-                              alignment: Alignment.center,
-                              children: [
-                                CustomPaint(
-                                  size: const Size(196, 196),
-                                  painter: LeaseRingPainter(
-                                    progress: leaseFrac,
-                                    trackColor: Colors.white.withValues(
-                                      alpha: 0.14,
-                                    ),
-                                    foregroundColor: leaseRingForegroundColor(
-                                      now,
-                                      expiry,
-                                    ),
-                                  ),
-                                ),
-                                Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    SelectableText(
-                                      formatUsPhoneForDisplay(numberRaw),
-                                      textAlign: TextAlign.center,
-                                      style: GoogleFonts.jetBrainsMono(
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.4,
-                                        color: Theme.of(context).colorScheme.onSurface,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      _leaseShortLabel(now, expiry),
-                                      textAlign: TextAlign.center,
-                                      style: GoogleFonts.poppins(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: leaseRingForegroundColor(
-                                          now,
-                                          expiry,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 14),
-                          Wrap(
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            spacing: 10,
-                            runSpacing: 8,
-                            alignment: WrapAlignment.center,
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 5,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: AppColors.primary.withValues(alpha: 0.18),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color:
-                                        AppColors.primary.withValues(alpha: 0.45),
-                                  ),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      Icons.check_circle_rounded,
-                                      size: 15,
-                                      color: AppColors.primary,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      'Active',
-                                      style: GoogleFonts.inter(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w800,
-                                        letterSpacing: 0.3,
-                                        color: AppColors.primary,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              if (_numberTierLabel(widget.numberTier)
-                                  .isNotEmpty)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 5,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withValues(alpha: 0.08),
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                      color: Colors.white.withValues(
-                                        alpha: 0.2,
-                                      ),
-                                    ),
-                                  ),
-                                  child: Text(
-                                    _numberTierLabel(widget.numberTier),
-                                    style: GoogleFonts.inter(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w700,
-                                      letterSpacing: 0.2,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .onSurfaceVariant,
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                          if (widget.onChangeNumber != null) ...[
-                            const SizedBox(height: 10),
-                            Center(
-                              child: TextButton(
-                                onPressed: widget.onChangeNumber,
-                                child: Text(
-                                  'Change Number',
-                                  style: GoogleFonts.inter(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 13,
-                                    color: AppTheme.neonGreen,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                ),
-                if (expiry != null &&
-                    expiry.difference(now).inHours <= 72) ...[
-                  const SizedBox(height: 12),
-                  GlassPanel(
-                    borderRadius: 16,
-                    padding: const EdgeInsets.all(14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Text(
-                          expiry.isBefore(now)
-                              ? 'Your line has expired — renew to keep SMS & calls.'
-                              : 'Your line is expiring soon — renew to stay connected.',
-                          style: GoogleFonts.inter(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            height: 1.35,
-                            color: expiry.isBefore(now)
-                                ? Theme.of(context).colorScheme.error
-                                : AppTheme.neonGreen,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          'Watch rewarded ads (${widget.renewAdProgress}/${CreditsPolicy.numberRenewAdsRequired}) or spend ${CreditsPolicy.numberRenewCredits} credits.',
-                          style: GoogleFonts.inter(
-                            fontSize: 12,
-                            height: 1.35,
-                            color: Theme.of(context).colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Max ${CreditsPolicy.maxRenewalsPerDay} renews per UTC day.',
-                          style: GoogleFonts.inter(
-                            fontSize: 11,
-                            height: 1.35,
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onSurfaceVariant
-                                .withValues(alpha: 0.85),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: LinearProgressIndicator(
-                            value: math.min(
-                              1,
-                              widget.renewAdProgress /
-                                  CreditsPolicy.numberRenewAdsRequired,
-                            ),
-                            minHeight: 6,
-                            backgroundColor:
-                                Colors.white.withValues(alpha: 0.08),
-                            color: AppColors.primary,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton(
-                                onPressed: (!widget.assigning &&
-                                        widget.renewAdProgress >=
-                                            CreditsPolicy.numberRenewAdsRequired)
-                                    ? () => unawaited(widget.onRenewWithAds())
-                                    : null,
-                                child: Text(
-                                  'Renew (ads)',
-                                  style: GoogleFonts.inter(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: FilledButton.tonal(
-                                onPressed: (!widget.assigning &&
-                                        widget.credits >=
-                                            CreditsPolicy.numberRenewCredits)
-                                    ? () =>
-                                        unawaited(widget.onRenewWithCredits())
-                                    : null,
-                                child: Text(
-                                  'Renew (${CreditsPolicy.numberRenewCredits} cr)',
-                                  style: GoogleFonts.inter(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Align(
-                          alignment: Alignment.center,
-                          child: TextButton(
-                            onPressed: widget.assigning
-                                ? null
-                                : () => unawaited(widget.onWatchAdForRenew()),
-                            child: Text(
-                              'Watch ad — builds renew progress',
-                              style: GoogleFonts.inter(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 12,
-                                color: AppTheme.neonGreen,
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (!widget.isPremium && expiry.isAfter(now)) ...[
-                          const SizedBox(height: 10),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton.tonal(
-                              onPressed: widget.assigning
-                                  ? null
-                                  : widget.onGetPremium,
-                              child: Text(
-                                'Upgrade to Pro — longer leases',
-                                style: GoogleFonts.inter(
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 10),
-                Text(
-                  'Each outbound SMS costs ${CreditsPolicy.smsOutboundCreditCost} credits. Calls and messages sync to your Inbox.',
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    height: 1.35,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.88),
-                  ),
-                ),
-              ] else ...[
-                GlassPanel(
-                  borderRadius: 24,
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 22,
-                    horizontal: 16,
-                  ),
-                  child: Column(
-                        children: [
-                          Text(
-                            'Unlock Your Global Identity',
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.inter(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w800,
-                              height: 1.25,
-                              letterSpacing: -0.2,
-                              color: Theme.of(context).colorScheme.onSurface,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Add a dedicated US line — SMS, calls & inbox in one place.',
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                              height: 1.4,
-                              color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(
-                                alpha: 0.92,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 18),
-                          ScaleTransition(
-                            scale: Tween<double>(begin: 0.92, end: 1.0).animate(
-                              CurvedAnimation(
-                                parent: _plusPulse,
-                                curve: Curves.easeInOut,
-                              ),
-                            ),
-                            child: Container(
-                              width: 56,
-                              height: 56,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: AppColors.primary.withValues(alpha: 0.2),
-                                border: Border.all(
-                                  color: AppColors.primary.withValues(
-                                    alpha: 0.55,
-                                  ),
-                                  width: 1.5,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: AppColors.primary.withValues(
-                                      alpha: 0.35,
-                                    ),
-                                    blurRadius: 18,
-                                    spreadRadius: 0,
-                                  ),
-                                ],
-                              ),
-                              child: Icon(
-                                Icons.add_rounded,
-                                size: 32,
-                                color: AppColors.primary.withValues(alpha: 0.98),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                ),
-                const SizedBox(height: 14),
-                Text(
-                  widget.isPremium
-                      ? 'Choose your number below — included with Pro.'
-                      : canUnlock
-                          ? 'Get an auto-picked line free, choose one with credits, or go Pro.'
-                          : 'Watch $minAds ads or reach $minCredits credits — your progress:',
-                  style: GoogleFonts.inter(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    height: 1.45,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                if (!widget.isPremium && !canUnlock) ...[
-                  const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: math.min(1, widget.adsWatchedCount / minAds),
-                      minHeight: 8,
-                      backgroundColor: Colors.white.withValues(alpha: 0.08),
-                      color: AppColors.primary,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '${widget.adsWatchedCount.clamp(0, minAds)} / $minAds ads',
-                          style: GoogleFonts.poppins(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                            color: AppTheme.neonGreen.withValues(alpha: 0.95),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: math.min(1, widget.credits / minCredits),
-                      minHeight: 8,
-                      backgroundColor: Colors.white.withValues(alpha: 0.08),
-                      color: AppTheme.neonGreen.withValues(alpha: 0.55),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '${widget.credits.clamp(0, minCredits)} / $minCredits credits',
-                    style: GoogleFonts.poppins(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: AppTheme.neonGreen.withValues(alpha: 0.85),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton(
-                      onPressed: widget.onGetPremium,
-                      child: Text(
-                        'Don’t want to wait? Get Premium to unlock instantly!',
-                        style: GoogleFonts.inter(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                          color: AppTheme.neonGreen,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 16),
-                if (!widget.isPremium &&
-                    canUnlock &&
-                    widget.onGetFreeNumber != null) ...[
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton(
-                      onPressed: widget.assigning
-                          ? null
-                          : () => unawaited(widget.onGetFreeNumber!()),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.primary,
-                        side: BorderSide(
-                          color: AppColors.primary.withValues(alpha: 0.65),
-                        ),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                      ),
-                      child: Text(
-                        '🎁 Get Free Number',
-                        style: GoogleFonts.inter(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                ],
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: (!canUnlock || widget.assigning)
-                        ? null
-                        : () => unawaited(widget.onUnlock()),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.primary,
-                      disabledBackgroundColor:
-                          (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface).withValues(alpha: 0.65),
-                      foregroundColor: AppColors.onPrimary,
-                      disabledForegroundColor:
-                          Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.55),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                    child: widget.assigning
-                        ? Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2.5,
-                                  color: AppColors.onPrimary.withValues(
-                                    alpha: 0.95,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Text(
-                                'Please wait…',
-                                style: GoogleFonts.inter(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                            ],
-                          )
-                        : Text(
-                            widget.isPremium
-                                ? 'Choose your number'
-                                : 'Choose number (credits)',
-                            style: GoogleFonts.inter(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                  ),
-                ),
-                if (!widget.isPremium && canUnlock) ...[
-                  const SizedBox(height: 6),
-                  Align(
-                    alignment: Alignment.center,
-                    child: TextButton(
-                      onPressed: widget.onGetPremium,
-                      child: Text(
-                        'Get Premium — instant number',
-                        style: GoogleFonts.inter(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                          color: AppTheme.neonGreen,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                const SizedBox(height: 4),
+                Text('credits', style: creditsWord),
               ],
             ],
           ),
         ),
+      ),
     );
   }
 }

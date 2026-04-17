@@ -23,12 +23,12 @@ class GlassPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final borderColor = accentNeon
-        ? AppColors.primary.withValues(alpha: 0.42)
-        : Colors.white.withValues(alpha: 0.22);
+        ? AppColors.primary.withValues(alpha: 0.22)
+        : Colors.white.withValues(alpha: 0.08);
     return ClipRRect(
       borderRadius: BorderRadius.circular(borderRadius),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
         child: Container(
           padding: padding,
           decoration: BoxDecoration(
@@ -37,22 +37,11 @@ class GlassPanel extends StatelessWidget {
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                Colors.white.withValues(alpha: accentNeon ? 0.1 : 0.07),
-                Colors.white.withValues(alpha: 0.02),
-                AppColors.primary.withValues(alpha: accentNeon ? 0.06 : 0.02),
+                AppColors.cardDark.withValues(alpha: 0.98),
+                AppColors.darkBackgroundDeep.withValues(alpha: 0.98),
               ],
             ),
-            border: Border.all(color: borderColor, width: accentNeon ? 1 : 0.5),
-            boxShadow: accentNeon
-                ? [
-                    BoxShadow(
-                      color: AppColors.primary.withValues(alpha: 0.18),
-                      blurRadius: 24,
-                      spreadRadius: -4,
-                      offset: const Offset(0, 12),
-                    ),
-                  ]
-                : null,
+            border: Border.all(color: borderColor, width: accentNeon ? 0.5 : 0.5),
           ),
           child: child,
         ),

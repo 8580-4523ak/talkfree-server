@@ -12,7 +12,8 @@ abstract final class CreditsPolicy {
   /// Default usable balance for a **new** Firestore `users/{uid}` document (strict zero — earn via ads / purchase).
   static const int initialCreditsForNewUser = 0;
 
-  /// Credits added per rewarded ad (must match server `REWARD_GRANT_CREDITS`, default 2).
+  /// Credits added per rewarded ad after the welcome grant (must match server `REWARD_GRANT_CREDITS`, default 2).
+  /// First lifetime ad uses server `FIRST_AD_GRANT_CREDITS` (default 10).
   static const int creditsPerRewardedAd = 2;
 
   /// In-call UI: [CallingScreen] uses this balance value to show "Unlimited calling (Pro)" (not a real balance).
@@ -70,6 +71,33 @@ abstract final class CreditsPolicy {
 
   /// Consecutive calendar days with ≥1 rewarded ad — milestone bonuses (server `POST /grant-reward`).
   static const List<int> adStreakMilestoneDays = [3, 7, 14, 30];
+
+  /// UI copy for next milestone bonus (align with server streak grants).
+  static int streakBonusCreditsAtMilestoneDay(int day) {
+    switch (day) {
+      case 3:
+        return 5;
+      case 7:
+        return 10;
+      case 14:
+        return 25;
+      case 30:
+        return 50;
+      default:
+        return 0;
+    }
+  }
+
+  /// Next streak milestone strictly after [currentStreakDays], or `null` if none left.
+  static ({int day, int bonusCredits})? nextStreakMilestoneAfter(int currentStreakDays) {
+    for (final d in adStreakMilestoneDays) {
+      if (currentStreakDays < d) {
+        final b = streakBonusCreditsAtMilestoneDay(d);
+        if (b > 0) return (day: d, bonusCredits: b);
+      }
+    }
+    return null;
+  }
 
   /// Must match server `ASSIGN_NUMBER_MIN_CREDITS` (POST `/assign-number`).
   static const int assignNumberMinCredits = 100;

@@ -2,11 +2,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:lottie/lottie.dart';
-
 import '../services/firestore_user_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
+import '../utils/rewarded_ad_grant_flow.dart';
 import '../utils/call_log_format.dart';
 
 /// Neon-black call log list (`users/{uid}/call_history`).
@@ -15,12 +14,16 @@ class CallHistoryScreen extends StatelessWidget {
     super.key,
     required this.user,
     this.onStartCalling,
+    this.onWatchAd,
   });
 
   final User user;
 
   /// When set (e.g. from [DashboardScreen]), closes this route then switches to the Dialer tab.
   final VoidCallback? onStartCalling;
+
+  /// Free tier: runs rewarded-ad flow from empty state.
+  final Future<void> Function()? onWatchAd;
 
   @override
   Widget build(BuildContext context) {
@@ -31,10 +34,10 @@ class CallHistoryScreen extends StatelessWidget {
         elevation: 0,
         scrolledUnderElevation: 0,
         title: Text(
-          'Recents',
-          style: GoogleFonts.poppins(
-            fontWeight: FontWeight.w700,
-            fontSize: 20,
+          'Recent Calls',
+          style: GoogleFonts.inter(
+            fontWeight: FontWeight.w800,
+            fontSize: 18,
             color: AppColors.textOnDark,
           ),
         ),
@@ -69,7 +72,10 @@ class CallHistoryScreen extends StatelessWidget {
 
           final docs = snap.data?.docs ?? [];
           if (docs.isEmpty) {
-            return _EmptyRecentsState(onStartCalling: onStartCalling);
+            return _EmptyRecentsState(
+              onStartCalling: onStartCalling,
+              onWatchAd: onWatchAd,
+            );
           }
 
           return ListView.separated(
@@ -108,9 +114,10 @@ class CallHistoryScreen extends StatelessWidget {
 }
 
 class _EmptyRecentsState extends StatelessWidget {
-  const _EmptyRecentsState({this.onStartCalling});
+  const _EmptyRecentsState({this.onStartCalling, this.onWatchAd});
 
   final VoidCallback? onStartCalling;
+  final Future<void> Function()? onWatchAd;
 
   @override
   Widget build(BuildContext context) {
@@ -120,18 +127,15 @@ class _EmptyRecentsState extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              height: 180,
-              width: 220,
-              child: Lottie.asset(
-                AppTheme.lottieOnboardingNeon,
-                fit: BoxFit.contain,
-                repeat: true,
-              ),
+            Icon(
+              Icons.call_outlined,
+              size: 56,
+              color: AppColors.textMutedOnDark.withValues(alpha: 0.45),
             ),
             const SizedBox(height: 20),
             Text(
-              'No calls yet',
+              'Make your first call 🚀',
+              textAlign: TextAlign.center,
               style: GoogleFonts.poppins(
                 fontSize: 22,
                 fontWeight: FontWeight.w600,
@@ -140,40 +144,95 @@ class _EmptyRecentsState extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Your completed calls appear here with time and duration.',
+              'Earn credits with ads, then call any number from the dialer.',
               textAlign: TextAlign.center,
               style: GoogleFonts.inter(
-                fontSize: 15,
+                fontSize: 14,
                 height: 1.5,
                 color: AppColors.textMutedOnDark,
               ),
             ),
             const SizedBox(height: 28),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                  onStartCalling?.call();
-                },
-                style: FilledButton.styleFrom(
-                  backgroundColor: AppTheme.neonGreen,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
+            if (onWatchAd != null) ...[
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () async {
+                    await runRewardedAdGrantFlow(context);
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: AppColors.onPrimary,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    elevation: 0,
                   ),
-                  elevation: 0,
-                ),
-                child: Text(
-                  'Start Calling',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
+                  child: Text(
+                    'WATCH AD TO START',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.35,
+                    ),
                   ),
                 ),
               ),
-            ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    onStartCalling?.call();
+                  },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textOnDark,
+                    side: BorderSide(
+                      color: Colors.white.withValues(alpha: 0.2),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: Text(
+                    'Open dialer',
+                    style: GoogleFonts.inter(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ] else
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    onStartCalling?.call();
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: AppColors.onPrimary,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    elevation: 0,
+                    shadowColor: Colors.transparent,
+                  ),
+                  child: Text(
+                    'Start calling',
+                    style: GoogleFonts.inter(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -235,15 +294,15 @@ class _CallHistoryCard extends StatelessWidget {
               width: 44,
               height: 44,
               decoration: BoxDecoration(
-                color: AppTheme.neonGreen.withValues(alpha: 0.12),
+                color: Colors.white.withValues(alpha: 0.06),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
-                  color: AppTheme.neonGreen.withValues(alpha: 0.35),
+                  color: Colors.white.withValues(alpha: 0.08),
                 ),
               ),
               child: Icon(
                 _kindIcon,
-                color: AppTheme.neonGreen,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
                 size: 22,
               ),
             ),

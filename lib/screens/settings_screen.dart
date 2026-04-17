@@ -19,10 +19,12 @@ class SettingsScreen extends StatelessWidget {
     super.key,
     required this.user,
     required this.credits,
+    this.isPremium = false,
   });
 
   final User user;
   final int credits;
+  final bool isPremium;
 
   Future<void> _openUrl(BuildContext context, String url) async {
     final uri = Uri.parse(url);
@@ -99,9 +101,9 @@ class SettingsScreen extends StatelessWidget {
         elevation: 0,
         foregroundColor: Colors.white,
         title: Text(
-          'Settings',
-          style: GoogleFonts.poppins(
-            fontWeight: FontWeight.w600,
+          'Profile',
+          style: GoogleFonts.inter(
+            fontWeight: FontWeight.w800,
             fontSize: 18,
             letterSpacing: 0.2,
           ),
@@ -114,9 +116,14 @@ class SettingsScreen extends StatelessWidget {
         ),
         padding: EdgeInsets.fromLTRB(16, 8, 16, 24 + bottom),
         children: [
-          _AccountCard(displayName: displayName, subtitle: _accountLine),
-          const SizedBox(height: 8),
-          _SectionLabel('Plans & line'),
+          _ProfileHeaderCard(
+            displayName: displayName,
+            credits: credits,
+            isPremium: isPremium,
+            subtitle: _accountLine,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Account'),
           _SettingsCard(
             children: [
               _tile(
@@ -149,7 +156,7 @@ class SettingsScreen extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 20),
-          _SectionLabel('Calling & messages'),
+          _SectionLabel('Calling'),
           _SettingsCard(
             children: [
               _tile(
@@ -262,7 +269,7 @@ class SettingsScreen extends StatelessWidget {
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       leading: Icon(
         icon,
-        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.9),
+        color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.75),
       ),
       title: Text(
         title,
@@ -329,18 +336,11 @@ class _SettingsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface).withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(16),
+        color: AppColors.cardDark,
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: AppColors.primary.withValues(alpha: 0.12),
+          color: Colors.white.withValues(alpha: 0.06),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.35),
-            blurRadius: 20,
-            offset: const Offset(0, 10),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -350,78 +350,98 @@ class _SettingsCard extends StatelessWidget {
   }
 }
 
-class _AccountCard extends StatelessWidget {
-  const _AccountCard({
+class _ProfileHeaderCard extends StatelessWidget {
+  const _ProfileHeaderCard({
     required this.displayName,
+    required this.credits,
+    required this.isPremium,
     required this.subtitle,
   });
 
   final String displayName;
+  final int credits;
+  final bool isPremium;
   final String subtitle;
 
   @override
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            AppColors.primary.withValues(alpha: 0.12),
-            (Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface).withValues(alpha: 0.95),
-          ],
-        ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: AppColors.primary.withValues(alpha: 0.22),
-        ),
+        color: AppColors.cardDark,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
       child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        padding: const EdgeInsets.fromLTRB(18, 20, 18, 18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Container(
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: AppColors.primary.withValues(alpha: 0.15),
-                border: Border.all(
-                  color: AppColors.primary.withValues(alpha: 0.35),
+            Text(
+              displayName,
+              style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w700,
+                fontSize: 22,
+                letterSpacing: -0.3,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              isPremium ? 'TalkFree Pro · unlimited calling' : 'Credits: $credits',
+              style: GoogleFonts.inter(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              style: GoogleFonts.inter(
+                fontSize: 12,
+                height: 1.35,
+                color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.85),
+              ),
+            ),
+            if (!isPremium) ...[
+              const SizedBox(height: 16),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.primary.withValues(alpha: 0.22),
+                      blurRadius: 16,
+                      spreadRadius: -2,
+                      offset: const Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: FilledButton(
+                  onPressed: () {
+                    Navigator.of(context).push<void>(
+                      SubscriptionScreen.createRoute(),
+                    );
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: AppColors.onPrimary,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: Text(
+                    'GO PRO',
+                    style: GoogleFonts.inter(
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
                 ),
               ),
-              child: Icon(
-                Icons.person_rounded,
-                color: AppColors.primary.withValues(alpha: 0.95),
-                size: 26,
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    displayName,
-                    style: GoogleFonts.poppins(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 17,
-                      color: Theme.of(context).colorScheme.onSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    subtitle,
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      height: 1.4,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.92),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            ],
           ],
         ),
       ),

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../config/credits_policy.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 
@@ -36,17 +37,22 @@ abstract final class EngagementOverlays {
     required int creditsAdded,
     int streakBonus = 0,
     int streakDays = 0,
-    Duration total = const Duration(milliseconds: 2600),
+    bool welcomeFirstAd = false,
+    Duration total = const Duration(milliseconds: 400),
   }) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
+    final duration = welcomeFirstAd
+        ? const Duration(milliseconds: 520)
+        : total;
     entry = OverlayEntry(
       builder: (ctx) => _AdFanfareLayer(
         creditsAdded: creditsAdded,
         streakBonus: streakBonus,
         streakDays: streakDays,
+        welcomeFirstAd: welcomeFirstAd,
         onDone: () => entry.remove(),
-        total: total,
+        introDuration: duration,
       ),
     );
     overlay.insert(entry);
@@ -160,15 +166,17 @@ class _AdFanfareLayer extends StatefulWidget {
     required this.creditsAdded,
     required this.streakBonus,
     required this.streakDays,
+    required this.welcomeFirstAd,
     required this.onDone,
-    required this.total,
+    required this.introDuration,
   });
 
   final int creditsAdded;
   final int streakBonus;
   final int streakDays;
+  final bool welcomeFirstAd;
   final VoidCallback onDone;
-  final Duration total;
+  final Duration introDuration;
 
   @override
   State<_AdFanfareLayer> createState() => _AdFanfareLayerState();
@@ -178,18 +186,13 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: widget.total,
+    duration: widget.introDuration,
   );
 
   @override
   void initState() {
     super.initState();
     _c.forward();
-    _c.addStatusListener((s) {
-      if (s == AnimationStatus.completed) {
-        widget.onDone();
-      }
-    });
   }
 
   @override
@@ -198,137 +201,183 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
     super.dispose();
   }
 
+  void _dismiss() => widget.onDone();
+
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final rnd = math.Random(42);
-    const n = 36;
+    const n = 9;
     final particles = List.generate(n, (i) {
       final ang = rnd.nextDouble() * math.pi * 2;
-      final dist = 40.0 + rnd.nextDouble() * 120;
+      final dist = 40.0 + rnd.nextDouble() * 100;
       return (dx: math.cos(ang) * dist, dy: math.sin(ang) * dist, c: i);
     });
+
+    final streakLine = widget.streakDays > 0
+        ? '🔥 Streak Day ${widget.streakDays}'
+        : '🔥 Keep your streak';
+    final bonusLine = widget.streakBonus > 0
+        ? '+${widget.streakBonus} bonus'
+        : 'Next milestone: day ${CreditsPolicy.adStreakMilestoneDays.first}';
 
     return Material(
       color: Colors.transparent,
       child: SizedBox.expand(
         child: Stack(
-        children: [
-          Positioned.fill(
-            child: IgnorePointer(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.14),
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _dismiss,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.45),
+                  ),
                 ),
               ),
             ),
-          ),
-          Center(
-            child: AnimatedBuilder(
-              animation: _c,
-              builder: (context, _) {
-                final t = _c.value;
-                final pop = Curves.elasticOut.transform(
-                  (t * 1.4).clamp(0.0, 1.0),
-                );
-                return Transform.scale(
-                  scale: 0.85 + 0.2 * pop,
-                  child: Opacity(
-                    opacity: (1.0 - (t - 0.85).clamp(0.0, 0.15) / 0.15)
-                        .clamp(0.0, 1.0),
+            Center(
+              child: AnimatedBuilder(
+                animation: _c,
+                builder: (context, _) {
+                  final t = _c.value;
+                  final pop = Curves.elasticOut.transform((t * 1.2).clamp(0.0, 1.0));
+                  return Transform.scale(
+                    scale: 0.92 + 0.08 * pop,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 28,
-                        vertical: 20,
-                      ),
+                      margin: const EdgeInsets.symmetric(horizontal: 28),
+                      padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
                       decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(22),
-                        gradient: LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            AppTheme.neonGreen.withValues(alpha: 0.35),
-                            AppColors.darkBackgroundDeep.withValues(alpha: 0.92),
-                          ],
-                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        color: AppColors.cardDark,
                         border: Border.all(
-                          color: AppTheme.neonGreen.withValues(alpha: 0.5),
+                          color: Colors.white.withValues(alpha: 0.06),
                         ),
                         boxShadow: [
                           BoxShadow(
-                            color: AppTheme.neonGreen.withValues(alpha: 0.45),
-                            blurRadius: 28,
-                            spreadRadius: 2,
+                            color: Colors.black.withValues(alpha: 0.35),
+                            blurRadius: 24,
+                            offset: const Offset(0, 12),
                           ),
                         ],
                       ),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            '+${widget.creditsAdded} credits 🎉',
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.poppins(
-                              fontSize: 24,
-                              fontWeight: FontWeight.w800,
-                              color: Colors.white,
-                              letterSpacing: -0.5,
-                            ),
-                          ),
-                          if (widget.streakBonus > 0 && widget.streakDays > 0) ...[
-                            const SizedBox(height: 8),
+                          if (widget.welcomeFirstAd) ...[
                             Text(
-                              'Streak day ${widget.streakDays} · +${widget.streakBonus} bonus',
+                              '🎉 Welcome!',
                               textAlign: TextAlign.center,
-                              style: GoogleFonts.inter(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.amber.shade200,
+                              style: GoogleFonts.poppins(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white,
+                                letterSpacing: -0.3,
                               ),
                             ),
-                          ],
+                            const SizedBox(height: 8),
+                            Text(
+                              '+${widget.creditsAdded} FREE Credits',
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.poppins(
+                                fontSize: 28,
+                                fontWeight: FontWeight.w800,
+                                color: AppColors.primary,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
+                          ] else
+                            Text(
+                              '+${widget.creditsAdded} Credits 🎉',
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.poppins(
+                                fontSize: 26,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
+                          const SizedBox(height: 12),
+                          Text(
+                            streakLine,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.inter(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white.withValues(alpha: 0.95),
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            bonusLine,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              height: 1.35,
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton(
+                              onPressed: _dismiss,
+                              style: FilledButton.styleFrom(
+                                backgroundColor: AppColors.primary,
+                                foregroundColor: AppColors.onPrimary,
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                elevation: 0,
+                              ),
+                              child: Text(
+                                'CONTINUE',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 14,
+                                  letterSpacing: 0.8,
+                                ),
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-          ),
-          ...particles.map((p) {
-            return Positioned(
-              left: size.width / 2 +
-                  p.dx * _c.value -
-                  4 +
-                  (p.c % 3) * 2.0 * (1 - _c.value),
-              top: size.height / 2 + p.dy * _c.value - 4,
-              child: IgnorePointer(
-                child: Opacity(
-                  opacity: (1.0 - _c.value).clamp(0.0, 1.0),
-                  child: Container(
-                    width: 6 + (p.c % 4).toDouble(),
-                    height: 6 + (p.c % 3).toDouble(),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: [
-                        AppTheme.neonGreen,
-                        AppColors.primary,
-                        Colors.amber.shade300,
-                      ][p.c % 3].withValues(alpha: 0.85),
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppTheme.neonGreen.withValues(alpha: 0.6),
-                          blurRadius: 6,
-                        ),
-                      ],
+            ...particles.map((p) {
+              return Positioned(
+                left: size.width / 2 +
+                    p.dx * _c.value -
+                    4 +
+                    (p.c % 3) * 2.0 * (1 - _c.value),
+                top: size.height / 2 + p.dy * _c.value - 4,
+                child: IgnorePointer(
+                  child: Opacity(
+                    opacity: (1.0 - _c.value).clamp(0.0, 1.0),
+                    child: Container(
+                      width: 5 + (p.c % 3).toDouble(),
+                      height: 5 + (p.c % 2).toDouble(),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: [
+                          AppColors.primary,
+                          AppColors.primary,
+                          Colors.amber.shade200,
+                        ][p.c % 3].withValues(alpha: 0.65),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            );
-          }),
-        ],
-      ),
+              );
+            }),
+          ],
+        ),
       ),
     );
   }

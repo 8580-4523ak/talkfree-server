@@ -10,20 +10,15 @@ abstract final class NeonTokens {
   static const double radiusHero = 24;
 
   /// Primary neon — use behind glass cards & CTAs.
+  /// Soft glow for primary CTAs only (avoid stacking on cards).
   static List<BoxShadow> glowPrimary([double intensity = 1]) {
-    final a = 0.28 * intensity;
+    final a = 0.14 * intensity;
     return [
       BoxShadow(
         color: AppColors.primary.withValues(alpha: a),
-        blurRadius: 28,
-        spreadRadius: -4,
-        offset: const Offset(0, 10),
-      ),
-      BoxShadow(
-        color: AppColors.primary.withValues(alpha: 0.12 * intensity),
-        blurRadius: 48,
-        spreadRadius: 2,
-        offset: const Offset(0, 16),
+        blurRadius: 18,
+        spreadRadius: -2,
+        offset: const Offset(0, 8),
       ),
     ];
   }
@@ -44,7 +39,7 @@ abstract final class NeonTokens {
         center: const Alignment(0, -0.85),
         radius: 1.15,
         colors: [
-          AppColors.primary.withValues(alpha: 0.07),
+          AppColors.primary.withValues(alpha: 0.025),
           Colors.transparent,
         ],
         stops: const [0.0, 0.55],

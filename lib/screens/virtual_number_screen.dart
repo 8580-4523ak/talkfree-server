@@ -7,6 +7,7 @@ import 'package:lottie/lottie.dart';
 
 import '../config/credits_policy.dart';
 import '../services/firestore_user_service.dart';
+import '../utils/rewarded_ad_grant_flow.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../utils/us_phone_format.dart';
@@ -24,10 +25,12 @@ class VirtualNumberRouteArgs {
   const VirtualNumberRouteArgs({
     required this.userUid,
     required this.userCredits,
+    this.onWatchRewardedAd,
   });
 
   final String userUid;
   final int userCredits;
+  final Future<void> Function()? onWatchRewardedAd;
 }
 
 /// "The Store" — unlock 2nd line, ad progress, subscription plans (buy = UI only).
@@ -39,6 +42,7 @@ class VirtualNumberScreen extends StatefulWidget {
     super.key,
     required this.userUid,
     required this.userCredits,
+    this.onWatchRewardedAd,
   });
 
   static const String routeName = '/virtual-number';
@@ -47,17 +51,21 @@ class VirtualNumberScreen extends StatefulWidget {
     final args = settings.arguments;
     final uid = args is VirtualNumberRouteArgs ? args.userUid : '';
     final credits = args is VirtualNumberRouteArgs ? args.userCredits : 0;
+    final onWatch = args is VirtualNumberRouteArgs ? args.onWatchRewardedAd : null;
     return MaterialPageRoute<void>(
       settings: settings,
       builder: (_) => VirtualNumberScreen(
         userUid: uid,
         userCredits: credits,
+        onWatchRewardedAd: onWatch,
       ),
     );
   }
 
   final String userUid;
   final int userCredits;
+  /// When set (e.g. from dashboard), wires the same rewarded-ad pipeline as Home.
+  final Future<void> Function()? onWatchRewardedAd;
 
   @override
   State<VirtualNumberScreen> createState() => _VirtualNumberScreenState();
@@ -84,95 +92,9 @@ class VirtualNumberScreen extends StatefulWidget {
   }
 }
 
-/// Animated handset + copy — “My Number” screen header.
-class _MyNumberHeroBanner extends StatelessWidget {
-  const _MyNumberHeroBanner();
-
-  @override
-  Widget build(BuildContext context) {
-    final onSurface = Theme.of(context).colorScheme.onSurface;
-    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
-    return Container(
-      height: 120,
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        gradient: LinearGradient(
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-          colors: [
-            AppColors.primary.withValues(alpha: 0.55),
-            AppTheme.neonGreen.withValues(alpha: 0.22),
-            AppColors.primary.withValues(alpha: 0.38),
-          ],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.primary.withValues(alpha: 0.22),
-            blurRadius: 22,
-            offset: const Offset(0, 10),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(19),
-        child: ColoredBox(
-          color: AppTheme.darkBg.withValues(alpha: 0.93),
-          child: Row(
-            children: [
-              Expanded(
-                flex: 5,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 4, 4, 4),
-                  child: Lottie.asset(
-                    AppTheme.lottiePhoneCall,
-                    fit: BoxFit.contain,
-                    repeat: true,
-                  ),
-                ),
-              ),
-              Expanded(
-                flex: 6,
-                child: Padding(
-                  padding:
-                      const EdgeInsets.only(right: 14, top: 10, bottom: 10),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Your second line',
-                        style: GoogleFonts.inter(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w800,
-                          color: onSurface,
-                          height: 1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        'US number · SMS, calls & inbox',
-                        style: GoogleFonts.inter(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          height: 1.35,
-                          color: muted,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
   bool _claiming = false;
+  bool _watchAdBusy = false;
   Timer? _leaseTicker;
 
   void _syncLeaseTicker(String? assigned, DateTime? leaseExp) {
@@ -318,11 +240,9 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
               ),
               SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
-            child: Column(
+              child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const _MyNumberHeroBanner(),
-                const SizedBox(height: 14),
                 if (assigned != null) ...[
                   _AssignedLineGlassCard(
                     number: assigned,
@@ -361,8 +281,75 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                   if (!isPremium) ...[
                     const SizedBox(height: 24),
                     _ProgressTaskCard(adsWatched: adsWatched),
-                  ] else
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.center,
+                      child: TextButton(
+                        onPressed: () {
+                          Navigator.of(context).push<void>(
+                            SubscriptionScreen.createRoute(),
+                          );
+                        },
+                        child: Text(
+                          '⚡ Unlock faster with Pro',
+                          style: GoogleFonts.inter(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 14,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: _watchAdBusy
+                            ? null
+                            : () async {
+                                setState(() => _watchAdBusy = true);
+                                try {
+                                  if (widget.onWatchRewardedAd != null) {
+                                    await widget.onWatchRewardedAd!();
+                                  } else {
+                                    await runRewardedAdGrantFlow(context);
+                                  }
+                                } finally {
+                                  if (mounted) {
+                                    setState(() => _watchAdBusy = false);
+                                  }
+                                }
+                              },
+                        style: FilledButton.styleFrom(
+                          backgroundColor: AppColors.primary,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        child: _watchAdBusy
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : Text(
+                                'WATCH AD',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 14,
+                                  letterSpacing: 0.4,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ] else ...[
                     const SizedBox(height: 20),
+                  ],
                   const SizedBox(height: 20),
                   FilledButton.icon(
                     onPressed: (!canClaim || _claiming)
@@ -387,11 +374,12 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                       _claiming
                           ? 'Provisioning…'
                           : isPremium
-                              ? 'Choose your number'
-                              : 'Choose number (credits)',
+                              ? 'ACTIVATE'
+                              : 'Claim your US number',
                       style: GoogleFonts.inter(
                         fontWeight: FontWeight.w800,
                         fontSize: 15,
+                        letterSpacing: isPremium ? 0.45 : 0,
                       ),
                     ),
                     style: FilledButton.styleFrom(
@@ -410,9 +398,8 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                     Padding(
                       padding: const EdgeInsets.only(top: 10),
                       child: Text(
-                        'Watch ${CreditsPolicy.assignNumberMinAdsWatched} rewarded '
-                        'ads (lifetime) or reach ${CreditsPolicy.assignNumberMinCredits} '
-                        'credits to unlock a US number.',
+                        'Watch ${CreditsPolicy.assignNumberMinAdsWatched} ads to unlock '
+                        '— or go Pro for instant access.',
                         textAlign: TextAlign.center,
                         style: GoogleFonts.inter(
                           fontSize: 12,
@@ -443,13 +430,13 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                         style: GoogleFonts.inter(
                           fontWeight: FontWeight.w700,
                           fontSize: 14,
-                          color: AppColors.primary,
+                          color: Theme.of(context).colorScheme.onSurface,
                         ),
                       ),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 14),
                         side: BorderSide(
-                          color: AppColors.primary.withValues(alpha: 0.65),
+                          color: Colors.white.withValues(alpha: 0.14),
                         ),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14),
@@ -640,10 +627,10 @@ class _UnlockHeroCard extends StatelessWidget {
                 const SizedBox(width: 16),
                 Expanded(
                   child: Text(
-                    'Unlock Your Private 2nd Line',
+                    'Unlock your number',
                     style: GoogleFonts.inter(
                       fontWeight: FontWeight.w800,
-                      fontSize: 21,
+                      fontSize: 20,
                       height: 1.2,
                       color: Theme.of(context).colorScheme.onSurface,
                       letterSpacing: -0.3,
@@ -652,9 +639,9 @@ class _UnlockHeroCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             Text(
-              'A dedicated US number for calls & texts — separate from your personal SIM.',
+              'Watch $kAdsRequiredForFreeUsNumber ads to unlock',
               style: GoogleFonts.inter(
                 fontSize: 14,
                 height: 1.45,
@@ -668,14 +655,51 @@ class _UnlockHeroCard extends StatelessWidget {
   }
 }
 
-class _ProgressTaskCard extends StatelessWidget {
+class _ProgressTaskCard extends StatefulWidget {
   const _ProgressTaskCard({required this.adsWatched});
 
   final int adsWatched;
 
   @override
+  State<_ProgressTaskCard> createState() => _ProgressTaskCardState();
+}
+
+class _ProgressTaskCardState extends State<_ProgressTaskCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _barAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _barAnim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _barAnim.forward();
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _ProgressTaskCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.adsWatched != widget.adsWatched) {
+      _barAnim
+        ..duration = const Duration(milliseconds: 700)
+        ..forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _barAnim.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final progress = (adsWatched / kAdsRequiredForFreeUsNumber).clamp(0.0, 1.0);
+    final target =
+        (widget.adsWatched / kAdsRequiredForFreeUsNumber).clamp(0.0, 1.0);
 
     return GlassPanel(
       borderRadius: 18,
@@ -683,50 +707,37 @@ class _ProgressTaskCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(
-                Icons.task_alt_rounded,
-                color: AppColors.primary.withValues(alpha: 0.9),
-                size: 22,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'Progress task',
-                style: GoogleFonts.inter(
-                  fontWeight: FontWeight.w800,
-                  fontSize: 15,
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
           Text(
-            'Watch $kAdsRequiredForFreeUsNumber ads to get a free US number',
+            'Progress',
             style: GoogleFonts.inter(
-              fontSize: 14,
-              height: 1.4,
+              fontWeight: FontWeight.w800,
+              fontSize: 13,
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: LinearProgressIndicator(
-              value: progress,
-              minHeight: 10,
-              backgroundColor: Colors.white.withValues(alpha: 0.08),
-              color: AppColors.primary,
+            child: AnimatedBuilder(
+              animation: _barAnim,
+              builder: (context, _) {
+                final v = Curves.easeOutCubic.transform(_barAnim.value) * target;
+                return LinearProgressIndicator(
+                  value: v.clamp(0.0, 1.0),
+                  minHeight: 10,
+                  backgroundColor: Colors.white.withValues(alpha: 0.08),
+                  color: AppColors.primary,
+                );
+              },
             ),
           ),
           const SizedBox(height: 10),
           Text(
-            '$adsWatched / $kAdsRequiredForFreeUsNumber ads watched',
-            style: GoogleFonts.poppins(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: AppTheme.neonGreen.withValues(alpha: 0.95),
+            '${widget.adsWatched} / $kAdsRequiredForFreeUsNumber ads',
+            style: GoogleFonts.inter(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: Theme.of(context).colorScheme.onSurface,
             ),
           ),
         ],

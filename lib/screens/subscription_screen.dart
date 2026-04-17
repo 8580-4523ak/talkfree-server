@@ -1,13 +1,13 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:lottie/lottie.dart';
 import 'package:razorpay_flutter/razorpay_flutter.dart';
 
 import '../config/razorpay_config.dart';
 import '../services/subscription_payment_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
+import '../theme/neon_tokens.dart';
 import '../widgets/glass_panel.dart';
 
 /// Premium subscription plans + Razorpay Checkout (see also `premium_screen.dart`).
@@ -267,48 +267,90 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final yearly = _planCheckouts.firstWhere((p) => p.planKey == 'yearly');
+    final others =
+        _planCheckouts.where((p) => p.planKey != 'yearly').toList(growable: false);
+
     return Scaffold(
       backgroundColor: AppTheme.darkBg,
       appBar: AppBar(
         title: Text(
-          'TalkFree Pro',
-          style: GoogleFonts.inter(fontWeight: FontWeight.w700),
+          'Go Pro',
+          style: GoogleFonts.inter(fontWeight: FontWeight.w800),
         ),
       ),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
         children: [
-          const _SubscriptionHero(),
+          _ProBullet('Unlimited calling'),
+          _ProBullet('No ads'),
+          _ProBullet('Private number'),
+          const SizedBox(height: 22),
+          Text(
+            '🔥 Best Value',
+            style: GoogleFonts.inter(
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.2,
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
           const SizedBox(height: 8),
           Text(
-            'Unlock ad-free calling, bonus credits, and a private number.',
+            _yearlyHeroPriceLine(yearly),
+            style: GoogleFonts.poppins(
+              fontSize: 28,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.5,
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+          const SizedBox(height: 14),
+          _PlanGlassCard(
+            plan: yearly.ui,
+            highlight: true,
+            ctaLabel: 'BUY YEARLY',
+            onTap: _checkoutOpen ? null : () => _startCheckout(yearly),
+          ),
+          const SizedBox(height: 28),
+          Text(
+            'Other plans',
             style: GoogleFonts.inter(
-              fontSize: 15,
-              height: 1.45,
-              fontWeight: FontWeight.w500,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+              color: Theme.of(context)
+                  .colorScheme
+                  .onSurfaceVariant
+                  .withValues(alpha: 0.55),
+            ),
+          ),
+          const SizedBox(height: 10),
+          ...others.map(
+            (p) => Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Opacity(
+                opacity: 0.52,
+                child: _PlanGlassCard(
+                  plan: p.ui,
+                  highlight: false,
+                  onTap: _checkoutOpen ? null : () => _startCheckout(p),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 8),
           Text(
             RazorpayConfig.hasKeyId
-                ? 'Choose your plan below. Secure checkout with Razorpay (${RazorpayConfig.currency}).'
-                : 'Add RAZORPAY_KEY_ID in project settings to enable checkout (${RazorpayConfig.currency}).',
+                ? 'Secure checkout · ${RazorpayConfig.currency}'
+                : 'Add RAZORPAY_KEY_ID to enable checkout (${RazorpayConfig.currency}).',
             style: GoogleFonts.inter(
-              fontSize: 12,
+              fontSize: 11,
               height: 1.35,
-              color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.75),
-            ),
-          ),
-          const SizedBox(height: 16),
-          ..._planCheckouts.map(
-            (p) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: _PlanGlassCard(
-                plan: p.ui,
-                highlight: p.planKey == 'yearly',
-                onTap: _checkoutOpen ? null : () => _startCheckout(p),
-              ),
+              color: Theme.of(context)
+                  .colorScheme
+                  .onSurfaceVariant
+                  .withValues(alpha: 0.65),
             ),
           ),
         ],
@@ -317,104 +359,32 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   }
 }
 
-/// Money hero + glow frame; corner handset ties Pro to calling.
-class _SubscriptionHero extends StatelessWidget {
-  const _SubscriptionHero();
+class _ProBullet extends StatelessWidget {
+  const _ProBullet(this.text);
+
+  final String text;
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 168,
-      width: double.infinity,
-      child: Stack(
-        alignment: Alignment.center,
-        clipBehavior: Clip.none,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Positioned(
-            width: 220,
-            height: 220,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(
-                  colors: [
-                    AppColors.primary.withValues(alpha: 0.28),
-                    AppColors.primary.withValues(alpha: 0.06),
-                    Colors.transparent,
-                  ],
-                  stops: const [0.0, 0.45, 1.0],
-                ),
-              ),
-            ),
+          Icon(
+            Icons.check_circle_rounded,
+            size: 18,
+            color: AppColors.primary.withValues(alpha: 0.85),
           ),
-          Container(
-            constraints: const BoxConstraints(maxWidth: 260, maxHeight: 150),
-            padding: const EdgeInsets.all(3),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(28),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  AppColors.primary.withValues(alpha: 0.85),
-                  AppTheme.neonGreen.withValues(alpha: 0.35),
-                  AppColors.primary.withValues(alpha: 0.25),
-                ],
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.primary.withValues(alpha: 0.35),
-                  blurRadius: 28,
-                  offset: const Offset(0, 12),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(25),
-              child: ColoredBox(
-                color: AppTheme.darkBg.withValues(alpha: 0.94),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  child: Lottie.asset(
-                    AppTheme.lottieSubscriptionHero,
-                    fit: BoxFit.contain,
-                    repeat: true,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          Positioned(
-            right: 8,
-            bottom: 10,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.45),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: ClipOval(
-                child: ColoredBox(
-                  color: AppTheme.surfaceCard.withValues(alpha: 0.92),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: SizedBox(
-                      width: 56,
-                      height: 56,
-                      child: Lottie.asset(
-                        AppTheme.lottiePhoneCall,
-                        fit: BoxFit.contain,
-                        repeat: true,
-                      ),
-                    ),
-                  ),
-                ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: GoogleFonts.inter(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                height: 1.3,
+                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.95),
               ),
             ),
           ),
@@ -511,130 +481,198 @@ const _planCheckouts = <_PlanCheckout>[
   ),
 ];
 
+String _yearlyHeroPriceLine(_PlanCheckout plan) {
+  switch (RazorpayConfig.currency.toUpperCase()) {
+    case 'INR':
+      final r = (plan.amountInrPaise / 100).round();
+      return '₹$r/year';
+    case 'USD':
+    default:
+      return '${plan.ui.price}/year';
+  }
+}
+
 /// Same glass + green accent pattern as [VirtualNumberScreen] subscription rows.
 class _PlanGlassCard extends StatelessWidget {
   const _PlanGlassCard({
     required this.plan,
     required this.onTap,
     this.highlight = false,
+    this.ctaLabel,
   });
 
   final _PlanData plan;
   final VoidCallback? onTap;
   final bool highlight;
+  /// Primary plan CTA (e.g. yearly); defaults to "Buy Now" / "Choose".
+  final String? ctaLabel;
 
   @override
   Widget build(BuildContext context) {
+    final row = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                plan.name,
+                style: GoogleFonts.inter(
+                  fontWeight: highlight ? FontWeight.w800 : FontWeight.w600,
+                  fontSize: highlight ? 16 : 15,
+                  color: Theme.of(context).colorScheme.onSurface.withValues(
+                        alpha: highlight ? 1 : 0.88,
+                      ),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                plan.periodLabel,
+                style: GoogleFonts.inter(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              if (plan.benefits.length > 3) ...[
+                const SizedBox(height: 6),
+                Text(
+                  plan.benefits.last,
+                  style: GoogleFonts.inter(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: highlight
+                        ? AppColors.primary.withValues(alpha: 0.9)
+                        : Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(
+              plan.price,
+              style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w700,
+                fontSize: highlight ? 16 : 15,
+                color: highlight
+                    ? AppColors.primary
+                    : Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 8),
+            highlight
+                ? Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      boxShadow: NeonTokens.glowPrimary(0.5),
+                    ),
+                    child: FilledButton(
+                      onPressed: onTap,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
+                        ),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        elevation: 0,
+                      ),
+                      child: Text(
+                        ctaLabel ?? 'Buy Now',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  )
+                : OutlinedButton(
+                    onPressed: onTap,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor:
+                          Theme.of(context).colorScheme.onSurfaceVariant,
+                      side: BorderSide(
+                        color: Colors.white.withValues(alpha: 0.12),
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    child: Text(
+                      'Choose',
+                      style: GoogleFonts.inter(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+          ],
+        ),
+      ],
+    );
+
     final panel = GlassPanel(
       borderRadius: 16,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  plan.name,
-                  style: GoogleFonts.inter(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 16,
-                    color: Theme.of(context).colorScheme.onSurface,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  plan.periodLabel,
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                if (plan.benefits.length > 3) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    plan.benefits.last,
-                    style: GoogleFonts.inter(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.primary.withValues(alpha: 0.95),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                plan.price,
-                style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 16,
-                  color: AppColors.primary,
-                ),
-              ),
-              const SizedBox(height: 8),
-              FilledButton(
-                onPressed: onTap,
-                style: FilledButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
-                  ),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-                child: Text(
-                  'Buy Now',
-                  style: GoogleFonts.inter(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+      accentNeon: false,
+      child: row,
     );
 
     if (highlight) {
       return Container(
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(22),
+          borderRadius: BorderRadius.circular(20),
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [
-              AppColors.primary.withValues(alpha: 0.65),
-              AppColors.primary.withValues(alpha: 0.15),
               AppColors.primary.withValues(alpha: 0.35),
+              AppColors.primary.withValues(alpha: 0.08),
+              AppColors.primary.withValues(alpha: 0.2),
             ],
           ),
           boxShadow: [
             BoxShadow(
-              color: AppColors.primary.withValues(alpha: 0.35),
-              blurRadius: 28,
+              color: AppColors.primary.withValues(alpha: 0.18),
+              blurRadius: 20,
               spreadRadius: -2,
-              offset: const Offset(0, 12),
+              offset: const Offset(0, 10),
             ),
           ],
         ),
-        padding: const EdgeInsets.all(1.5),
+        padding: const EdgeInsets.all(1),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(20.5),
+          borderRadius: BorderRadius.circular(19),
           child: panel,
         ),
       );
     }
-    return panel;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: AppColors.cardDark,
+          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: row,
+      ),
+    );
   }
 }

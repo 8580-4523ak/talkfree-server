@@ -15,6 +15,7 @@ class GrantRewardResult {
     required this.streakCount,
     required this.adSubCounter,
     required this.adsWatchedToday,
+    this.firstLifetimeAd = false,
   });
 
   /// Total credits added this grant (base + optional streak milestone).
@@ -25,6 +26,8 @@ class GrantRewardResult {
   /// Legacy field; server keeps this at 0 (no multi-ad cycle).
   final int adSubCounter;
   final int adsWatchedToday;
+  /// True when this was the user’s first lifetime rewarded ad (`POST /grant-reward`).
+  final bool firstLifetimeAd;
 }
 
 class GrantRewardException implements Exception {
@@ -100,6 +103,7 @@ class GrantRewardService {
     final base = (j?['baseCredits'] as num?)?.toInt();
     final streakB = (j?['streakBonus'] as num?)?.toInt() ?? 0;
     final streakC = (j?['streakCount'] as num?)?.toInt() ?? 0;
+    final firstAd = j?['firstLifetimeAd'] == true;
     final result = GrantRewardResult(
       creditsAdded: total,
       baseCredits: base ?? (total - streakB).clamp(0, total),
@@ -107,6 +111,7 @@ class GrantRewardService {
       streakCount: streakC,
       adSubCounter: (j?['adSubCounter'] as num?)?.toInt() ?? 0,
       adsWatchedToday: (j?['adsWatchedToday'] as num?)?.toInt() ?? 0,
+      firstLifetimeAd: firstAd,
     );
     // Server (Admin SDK) updates Firestore; client must not write credits — listeners refresh UI.
     return result;

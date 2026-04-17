@@ -304,6 +304,8 @@ app.post("/call", async (req, res) => {
 });
 
 const REWARD_GRANT_CREDITS = Number(process.env.REWARD_GRANT_CREDITS || 2);
+/** First lifetime rewarded ad (`ads_watched_count` was 0) — welcome hook (default 10). */
+const FIRST_AD_GRANT_CREDITS = Number(process.env.FIRST_AD_GRANT_CREDITS || 10);
 const MAX_ADS_PER_DAY = 24;
 const AD_GAP_SECONDS = 20;
 
@@ -425,7 +427,10 @@ app.post("/grant-reward", async (req, res) => {
     streakCount: 0,
     adSubCounter: 0,
     adsWatchedToday: 0,
+    firstLifetimeAd: false,
   };
+
+  let grantFirstLifetimeAd = false;
 
   try {
     await db.runTransaction(async (t) => {
@@ -435,6 +440,9 @@ app.post("/grant-reward", async (req, res) => {
       const dayKey = utcDayKey(now);
 
       const d = doc.exists ? doc.data() : {};
+
+      const lifetimeAdsBefore = Number(d.ads_watched_count ?? 0);
+      grantFirstLifetimeAd = lifetimeAdsBefore === 0;
 
       let adsToday = readAdsWatchedToday(d, dayKey);
       let storedDay = d.last_reset_date || d.adRewardsDayKey || "";
@@ -456,7 +464,7 @@ app.post("/grant-reward", async (req, res) => {
         }
       }
 
-      const baseCredits = REWARD_GRANT_CREDITS;
+      const baseCredits = grantFirstLifetimeAd ? FIRST_AD_GRANT_CREDITS : REWARD_GRANT_CREDITS;
 
       const lastStreakDay = String(d.ad_streak_last_day || "");
       let streakCount = Number(d.ad_streak_count || 0);
@@ -559,6 +567,7 @@ app.post("/grant-reward", async (req, res) => {
         streakCount,
         adSubCounter: 0,
         adsWatchedToday: adsTodayNew,
+        firstLifetimeAd: grantFirstLifetimeAd,
       };
     });
   } catch (e) {

@@ -27,9 +27,9 @@ abstract final class AppColors {
   /// App scaffold — premium dark (**#0B0B0F**).
   static const Color darkBackground = Color(0xFF0B0B0F);
   static const Color darkBackgroundDeep = Color(0xFF050508);
-  /// Glass / elevated surfaces.
-  static const Color surfaceDark = Color(0xFF12121A);
-  static const Color cardDark = Color(0xFF12121A);
+  /// Glass / elevated surfaces — **#121218** (design system cards).
+  static const Color surfaceDark = Color(0xFF121218);
+  static const Color cardDark = Color(0xFF121218);
 
   static const Color textOnDark = Color(0xFFFFFFFF);
   /// Master muted body / secondary text.
