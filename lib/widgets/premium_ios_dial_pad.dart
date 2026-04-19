@@ -5,7 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 
-/// Elite dark shell + neon accent (TalkFree premium dialer).
+/// Dark fintech dial shell — keys align to [AppColors.cardDark] family.
 const Color premiumDialBackground = AppTheme.darkBg;
 const Color premiumDialKeyFill = AppColors.cardDark;
 Color get premiumDialCallGreen => AppColors.primary;
@@ -22,7 +22,7 @@ TextStyle eliteDialLettersStyle(double fontSize) => GoogleFonts.inter(
       fontSize: fontSize,
       fontWeight: FontWeight.w600,
       letterSpacing: 1.15,
-      color: Colors.white.withValues(alpha: 0.42),
+      color: Colors.white.withValues(alpha: 0.38),
       height: 1.0,
     );
 
@@ -54,10 +54,16 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 100),
+    duration: const Duration(milliseconds: 105),
   );
-  late final Animation<double> _scale = Tween<double>(begin: 1.0, end: 0.94)
-      .animate(CurvedAnimation(parent: _c, curve: Curves.easeOutCubic));
+  late final Animation<double> _scale = Tween<double>(begin: 1.0, end: 0.936)
+      .animate(
+        CurvedAnimation(
+          parent: _c,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeOutCubic,
+        ),
+      );
 
   @override
   void dispose() {
@@ -92,36 +98,58 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
           onLongPress:
               widget.onLongPress == null ? null : () => _longPress(),
           borderRadius: BorderRadius.circular(r),
-          splashColor: premiumDialCallGreen.withValues(alpha: 0.18),
-          highlightColor: premiumDialCallGreen.withValues(alpha: 0.08),
+          splashColor: Colors.white.withValues(alpha: 0.12),
+          highlightColor: Colors.white.withValues(alpha: 0.07),
           child: AnimatedBuilder(
             animation: _c,
             builder: (context, child) {
               final p = CurvedAnimation(
                 parent: _c,
                 curve: Curves.easeOutCubic,
+                reverseCurve: Curves.easeOutCubic,
               ).value;
-              final innerA = 0.035 + p * 0.38;
-              final borderA = 0.06 + p * 0.42;
               return Ink(
                 height: widget.height,
                 decoration: BoxDecoration(
-                  color: premiumDialKeyFill,
                   borderRadius: BorderRadius.circular(r),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color.lerp(
+                            const Color(0xFF1A1C24),
+                            const Color(0xFF22252E),
+                            Curves.easeOutCubic.transform(p),
+                          ) ??
+                          const Color(0xFF1D1F27),
+                      const Color(0xFF12141C),
+                      Color.lerp(
+                            const Color(0xFF0E1016),
+                            const Color(0xFF14161E),
+                            Curves.easeOutCubic.transform(p),
+                          ) ??
+                          const Color(0xFF0E1016),
+                    ],
+                    stops: const [0.0, 0.48, 1.0],
+                  ),
                   border: Border.all(
-                    color: premiumDialCallGreen.withValues(alpha: borderA),
+                    color: Color.lerp(
+                      AppColors.cardBorderSubtle,
+                      Colors.white.withValues(alpha: 0.11),
+                      p,
+                    )!,
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.42),
-                      blurRadius: 10,
-                      offset: const Offset(0, 5),
+                      color: Colors.black.withValues(alpha: 0.55),
+                      blurRadius: 12,
+                      offset: const Offset(0, 6),
+                      spreadRadius: -2,
                     ),
                     BoxShadow(
-                      color: premiumDialCallGreen.withValues(alpha: 0.02 + p * 0.12),
-                      blurRadius: 10 + p * 4,
-                      spreadRadius: p * 0.4,
-                      offset: Offset(0, 3 - p * 1),
+                      color: Colors.black.withValues(alpha: 0.35),
+                      blurRadius: 2,
+                      offset: const Offset(0, 1),
                     ),
                   ],
                 ),
@@ -130,30 +158,34 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: RadialGradient(
-                            center: const Alignment(-0.35, -0.45),
-                            radius: 1.05,
-                            colors: [
-                              premiumDialCallGreen.withValues(alpha: innerA),
-                              premiumDialCallGreen.withValues(alpha: innerA * 0.25),
-                              Colors.transparent,
-                            ],
-                            stops: const [0.0, 0.42, 1.0],
+                      Align(
+                        alignment: Alignment.topCenter,
+                        child: FractionallySizedBox(
+                          heightFactor: 0.5,
+                          widthFactor: 1,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Colors.white.withValues(alpha: 0.04 + p * 0.03),
+                                  Colors.transparent,
+                                ],
+                              ),
+                            ),
                           ),
                         ),
                       ),
                       DecoratedBox(
                         decoration: BoxDecoration(
-                          gradient: RadialGradient(
-                            center: Alignment.bottomRight,
-                            radius: 1.2,
+                          gradient: LinearGradient(
+                            begin: Alignment.bottomCenter,
+                            end: Alignment.topCenter,
                             colors: [
-                              Colors.white.withValues(alpha: 0.03 + p * 0.06),
+                              Colors.black.withValues(alpha: 0.13),
                               Colors.transparent,
                             ],
-                            stops: const [0.0, 0.55],
                           ),
                         ),
                       ),
@@ -164,16 +196,22 @@ class _PremiumIosDialKeyState extends State<PremiumIosDialKey>
                           children: [
                             Text(
                               widget.data.digit,
-                              style: eliteDialDigitStyle(30),
+                              style: eliteDialDigitStyle(
+                                (widget.height * 0.48).clamp(22.0, 30.0),
+                              ),
                             ),
                             if (widget.data.letters.isNotEmpty) ...[
                               const SizedBox(height: 2),
                               Text(
                                 widget.data.letters,
-                                style: eliteDialLettersStyle(9),
+                                style: eliteDialLettersStyle(
+                                  (widget.height * 0.17).clamp(7.0, 9.0),
+                                ),
                               ),
                             ] else
-                              const SizedBox(height: 11),
+                              SizedBox(
+                                height: (widget.height * 0.2).clamp(7.0, 11.0),
+                              ),
                           ],
                         ),
                       ),
@@ -273,11 +311,13 @@ class PremiumIosCallButton extends StatefulWidget {
     required this.onPressed,
     this.busy = false,
     this.horizontalMargin = 24,
+    this.diameter = 94,
   });
 
   final VoidCallback? onPressed;
   final bool busy;
   final double horizontalMargin;
+  final double diameter;
 
   @override
   State<PremiumIosCallButton> createState() => _PremiumIosCallButtonState();
@@ -287,10 +327,16 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 100),
+    duration: const Duration(milliseconds: 105),
   );
-  late final Animation<double> _scale = Tween<double>(begin: 1.0, end: 0.97)
-      .animate(CurvedAnimation(parent: _c, curve: Curves.easeOutCubic));
+  late final Animation<double> _scale = Tween<double>(begin: 1.0, end: 0.956)
+      .animate(
+        CurvedAnimation(
+          parent: _c,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeOutCubic,
+        ),
+      );
 
   @override
   void dispose() {
@@ -309,21 +355,24 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
   @override
   Widget build(BuildContext context) {
     final enabled = !widget.busy && widget.onPressed != null;
-    const diameter = 86.0;
+    final diameter = widget.diameter;
+    final iconSize = (diameter * (40 / 94)).clamp(28.0, 40.0);
+    final topSheenH = (diameter * (34 / 94)).clamp(24.0, 34.0);
+    final busySize = (diameter * (28 / 94)).clamp(22.0, 28.0);
     final outerShadow = BoxDecoration(
       shape: BoxShape.circle,
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.4),
+          color: premiumDialCallGreen.withValues(alpha: 0.14),
           blurRadius: 18,
-          spreadRadius: 0,
-          offset: const Offset(0, 8),
+          spreadRadius: -2,
+          offset: const Offset(0, 7),
         ),
         BoxShadow(
-          color: premiumDialCallGreen.withValues(alpha: 0.22),
-          blurRadius: 20,
+          color: Colors.black.withValues(alpha: 0.5),
+          blurRadius: 22,
           spreadRadius: -4,
-          offset: const Offset(0, 10),
+          offset: const Offset(0, 12),
         ),
       ],
     );
@@ -340,45 +389,74 @@ class _PremiumIosCallButtonState extends State<PremiumIosCallButton>
             child: InkWell(
               onTap: enabled ? _tap : null,
               customBorder: const CircleBorder(),
-              splashColor: Colors.white.withValues(alpha: 0.28),
-              highlightColor: Colors.white.withValues(alpha: 0.12),
+              splashColor: Colors.white.withValues(alpha: 0.18),
+              highlightColor: Colors.white.withValues(alpha: 0.07),
               child: Container(
                 width: diameter,
                 height: diameter,
                 decoration: outerShadow,
                 child: ClipOval(
-                  child: Ink(
-                    width: diameter,
-                    height: diameter,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          Color(0xFF34D399),
-                          premiumDialCallGreen,
-                          Color(0xFF059669),
-                        ],
-                        stops: [0.0, 0.45, 1.0],
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Color.lerp(
+                                    premiumDialCallGreen,
+                                    Colors.white,
+                                    0.06,
+                                  ) ??
+                                  premiumDialCallGreen,
+                              premiumDialCallGreen,
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
-                    child: Center(
-                      child: widget.busy
-                          ? const SizedBox(
-                              width: 28,
-                              height: 28,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.5,
-                                color: Colors.white,
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        height: topSheenH,
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Colors.white.withValues(alpha: 0.065),
+                                  Colors.transparent,
+                                ],
                               ),
-                            )
-                          : Icon(
-                              Icons.call_rounded,
-                              color: Colors.white.withValues(alpha: 0.98),
-                              size: 38,
                             ),
-                    ),
+                          ),
+                        ),
+                      ),
+                      Material(
+                        color: Colors.transparent,
+                        child: Center(
+                          child: widget.busy
+                              ? SizedBox(
+                                  width: busySize,
+                                  height: busySize,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Icon(
+                                  Icons.call_rounded,
+                                  color: Colors.white.withValues(alpha: 0.98),
+                                  size: iconSize,
+                                ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),

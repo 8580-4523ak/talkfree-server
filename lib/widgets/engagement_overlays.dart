@@ -3,9 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../config/credits_policy.dart';
 import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
 
 /// Short-lived monetization visuals: floating +N and ad-reward fanfare (no new packages).
 abstract final class EngagementOverlays {
@@ -38,13 +36,9 @@ abstract final class EngagementOverlays {
     int streakBonus = 0,
     int streakDays = 0,
     bool welcomeFirstAd = false,
-    Duration total = const Duration(milliseconds: 400),
   }) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
-    final duration = welcomeFirstAd
-        ? const Duration(milliseconds: 520)
-        : total;
     entry = OverlayEntry(
       builder: (ctx) => _AdFanfareLayer(
         creditsAdded: creditsAdded,
@@ -52,7 +46,6 @@ abstract final class EngagementOverlays {
         streakDays: streakDays,
         welcomeFirstAd: welcomeFirstAd,
         onDone: () => entry.remove(),
-        introDuration: duration,
       ),
     );
     overlay.insert(entry);
@@ -128,13 +121,13 @@ class _FloatingDeltaLayerState extends State<_FloatingDeltaLayer>
                       ),
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(999),
-                        color: AppTheme.neonGreen.withValues(alpha: 0.22),
+                        color: AppColors.primary.withValues(alpha: 0.22),
                         border: Border.all(
-                          color: AppTheme.neonGreen.withValues(alpha: 0.55),
+                          color: AppColors.primary.withValues(alpha: 0.55),
                         ),
                         boxShadow: [
                           BoxShadow(
-                            color: AppTheme.neonGreen.withValues(alpha: 0.35),
+                            color: AppColors.primary.withValues(alpha: 0.35),
                             blurRadius: 18,
                             spreadRadius: 0,
                           ),
@@ -168,7 +161,6 @@ class _AdFanfareLayer extends StatefulWidget {
     required this.streakDays,
     required this.welcomeFirstAd,
     required this.onDone,
-    required this.introDuration,
   });
 
   final int creditsAdded;
@@ -176,7 +168,6 @@ class _AdFanfareLayer extends StatefulWidget {
   final int streakDays;
   final bool welcomeFirstAd;
   final VoidCallback onDone;
-  final Duration introDuration;
 
   @override
   State<_AdFanfareLayer> createState() => _AdFanfareLayerState();
@@ -184,14 +175,57 @@ class _AdFanfareLayer extends StatefulWidget {
 
 class _AdFanfareLayerState extends State<_AdFanfareLayer>
     with SingleTickerProviderStateMixin {
+  /// Card scale + credit “pop” + streak stagger (~200ms) + Continue scale-in.
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: widget.introDuration,
+    duration: const Duration(milliseconds: 880),
   );
+  late final Animation<double> _cardScale;
+  late final Animation<double> _creditPop;
+  late final Animation<double> _streakReveal;
+  late final Animation<double> _continuePop;
+  /// ~250ms after start — does not change other curve timings.
+  late final Animation<double> _welcomeHintOpacity;
 
   @override
   void initState() {
     super.initState();
+    _cardScale = Tween<double>(begin: 0.95, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _c,
+        curve: const Interval(0.0, 0.40, curve: Curves.easeOutCubic),
+      ),
+    );
+    _creditPop = TweenSequence<double>([
+      TweenSequenceItem(
+        tween: Tween<double>(begin: 1.0, end: 1.08)
+            .chain(CurveTween(curve: Curves.easeOut)),
+        weight: 28,
+      ),
+      TweenSequenceItem(
+        tween: Tween<double>(begin: 1.08, end: 1.0)
+            .chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 22,
+      ),
+      TweenSequenceItem(
+        tween: ConstantTween<double>(1.0),
+        weight: 50,
+      ),
+    ]).animate(_c);
+    _streakReveal = CurvedAnimation(
+      parent: _c,
+      curve: const Interval(0.227, 1.0, curve: Curves.easeOut),
+    );
+    _continuePop = Tween<double>(begin: 0.95, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _c,
+        curve: const Interval(0.40, 1.0, curve: Curves.easeOutCubic),
+      ),
+    );
+    _welcomeHintOpacity = CurvedAnimation(
+      parent: _c,
+      curve: const Interval(0.284, 1.0, curve: Curves.easeOut),
+    );
     _c.forward();
   }
 
@@ -207,19 +241,21 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final rnd = math.Random(42);
-    const n = 9;
+    const n = 16;
     final particles = List.generate(n, (i) {
       final ang = rnd.nextDouble() * math.pi * 2;
-      final dist = 40.0 + rnd.nextDouble() * 100;
+      final dist = 36.0 + rnd.nextDouble() * 118;
       return (dx: math.cos(ang) * dist, dy: math.sin(ang) * dist, c: i);
     });
 
-    final streakLine = widget.streakDays > 0
-        ? '🔥 Streak Day ${widget.streakDays}'
-        : '🔥 Keep your streak';
+    final streakLine = widget.streakBonus > 0 && widget.streakDays > 0
+        ? '🔥 Streak Day ${widget.streakDays} → +${widget.streakBonus} BONUS'
+        : (widget.streakDays > 0
+            ? '🔥 Streak Day ${widget.streakDays} — keep going!'
+            : '🔥 Start your streak today');
     final bonusLine = widget.streakBonus > 0
-        ? '+${widget.streakBonus} bonus'
-        : 'Next milestone: day ${CreditsPolicy.adStreakMilestoneDays.first}';
+        ? 'Bonus credits added to your balance.'
+        : 'Next milestone unlocks more bonus credits.';
 
     return Material(
       color: Colors.transparent,
@@ -232,7 +268,7 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
                 onTap: _dismiss,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.45),
+                    color: Colors.black.withValues(alpha: 0.62),
                   ),
                 ),
               ),
@@ -241,10 +277,8 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
               child: AnimatedBuilder(
                 animation: _c,
                 builder: (context, _) {
-                  final t = _c.value;
-                  final pop = Curves.elasticOut.transform((t * 1.2).clamp(0.0, 1.0));
                   return Transform.scale(
-                    scale: 0.92 + 0.08 * pop,
+                    scale: _cardScale.value,
                     child: Container(
                       margin: const EdgeInsets.symmetric(horizontal: 28),
                       padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
@@ -277,68 +311,100 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
                               ),
                             ),
                             const SizedBox(height: 8),
-                            Text(
-                              '+${widget.creditsAdded} FREE Credits',
+                          ],
+                          Transform.scale(
+                            alignment: Alignment.center,
+                            scale: _creditPop.value,
+                            child: Text(
+                              widget.welcomeFirstAd
+                                  ? '+${widget.creditsAdded} FREE Credits'
+                                  : '+${widget.creditsAdded} Credits 🎉',
                               textAlign: TextAlign.center,
                               style: GoogleFonts.poppins(
-                                fontSize: 28,
+                                fontSize: 34,
                                 fontWeight: FontWeight.w800,
                                 color: AppColors.primary,
-                                letterSpacing: -0.5,
+                                letterSpacing: -0.8,
+                                height: 1.05,
                               ),
                             ),
-                          ] else
-                            Text(
-                              '+${widget.creditsAdded} Credits 🎉',
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.poppins(
-                                fontSize: 26,
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white,
-                                letterSpacing: -0.5,
-                              ),
-                            ),
-                          const SizedBox(height: 12),
-                          Text(
-                            streakLine,
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.inter(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.white.withValues(alpha: 0.95),
-                            ),
                           ),
-                          const SizedBox(height: 6),
-                          Text(
-                            bonusLine,
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              height: 1.35,
-                              color: Theme.of(context).colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                          const SizedBox(height: 18),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton(
-                              onPressed: _dismiss,
-                              style: FilledButton.styleFrom(
-                                backgroundColor: AppColors.primary,
-                                foregroundColor: AppColors.onPrimary,
-                                padding: const EdgeInsets.symmetric(vertical: 14),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
+                          Opacity(
+                            opacity: _streakReveal.value,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const SizedBox(height: 12),
+                                Text(
+                                  streakLine,
+                                  textAlign: TextAlign.center,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white.withValues(alpha: 0.98),
+                                    height: 1.25,
+                                  ),
                                 ),
-                                elevation: 0,
+                                const SizedBox(height: 6),
+                                Text(
+                                  bonusLine,
+                                  textAlign: TextAlign.center,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.35,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (widget.welcomeFirstAd)
+                            Opacity(
+                              opacity: _welcomeHintOpacity.value,
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 10),
+                                child: Text(
+                                  'Keep going to unlock bigger bonuses 🔥',
+                                  textAlign: TextAlign.center,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.3,
+                                    color:
+                                        Colors.white.withValues(alpha: 0.72),
+                                  ),
+                                ),
                               ),
-                              child: Text(
-                                'CONTINUE',
-                                style: GoogleFonts.inter(
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 14,
-                                  letterSpacing: 0.8,
+                            ),
+                          const SizedBox(height: 18),
+                          Transform.scale(
+                            alignment: Alignment.center,
+                            scale: _continuePop.value,
+                            child: SizedBox(
+                              width: double.infinity,
+                              child: FilledButton(
+                                onPressed: _dismiss,
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: AppColors.primary,
+                                  foregroundColor: AppColors.onPrimaryButton,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  elevation: 0,
+                                ),
+                                child: Text(
+                                  'Continue',
+                                  style: GoogleFonts.inter(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 15,
+                                    letterSpacing: 0.2,
+                                  ),
                                 ),
                               ),
                             ),
@@ -361,8 +427,8 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
                   child: Opacity(
                     opacity: (1.0 - _c.value).clamp(0.0, 1.0),
                     child: Container(
-                      width: 5 + (p.c % 3).toDouble(),
-                      height: 5 + (p.c % 2).toDouble(),
+                      width: 5 + (p.c % 4).toDouble(),
+                      height: 5 + (p.c % 3).toDouble(),
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: [

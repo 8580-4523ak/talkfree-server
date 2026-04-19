@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../config/credits_policy.dart';
 import '../theme/app_colors.dart';
+import '../utils/monetization_copy.dart';
 import '../screens/subscription_screen.dart';
 
 /// When balance is critically low on the free tier — watch ad or upgrade.
@@ -20,7 +21,7 @@ class LowCreditNudge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (isPremium || credits >= CreditsPolicy.lowCreditWarningThreshold) {
+    if (credits >= CreditsPolicy.lowCreditWarningThreshold) {
       return const SizedBox.shrink();
     }
     return Material(
@@ -46,10 +47,12 @@ class LowCreditNudge extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'You need credits to call',
+                    credits <= 0
+                        ? MonetizationCopy.outOfCreditsTitle
+                        : 'Almost out of credits',
                     style: GoogleFonts.inter(
                       fontSize: 14,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: FontWeight.w800,
                       height: 1.3,
                       color: Theme.of(context).colorScheme.onSurface,
                     ),
@@ -60,54 +63,82 @@ class LowCreditNudge extends StatelessWidget {
             const SizedBox(height: 10),
             Row(
               children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: onWatchAd,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Theme.of(context).colorScheme.onSurface,
-                      side: BorderSide(
-                        color: Colors.white.withValues(alpha: 0.18),
+                if (!isPremium) ...[
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: onWatchAd,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: AppColors.onPrimaryButton,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        elevation: 0,
+                        shadowColor: Colors.transparent,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: Text(
-                      'WATCH AD',
-                      style: GoogleFonts.inter(
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.4,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: () {
-                      Navigator.of(context).push<void>(
-                        SubscriptionScreen.createRoute(),
-                      );
-                    },
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.primary,
-                      foregroundColor: AppColors.onPrimary,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      elevation: 0,
-                      shadowColor: Colors.transparent,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: Text(
-                      'GO PRO',
-                      style: GoogleFonts.inter(
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.45,
+                      child: Text(
+                        'Watch Ad',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.15,
+                        ),
                       ),
                     ),
                   ),
+                  const SizedBox(width: 10),
+                ],
+                Expanded(
+                  child: isPremium
+                      ? FilledButton(
+                          onPressed: () {
+                            Navigator.of(context).push<void>(
+                              SubscriptionScreen.createRoute(),
+                            );
+                          },
+                          style: FilledButton.styleFrom(
+                            backgroundColor: AppColors.primary,
+                            foregroundColor: AppColors.onPrimaryButton,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            elevation: 0,
+                            shadowColor: Colors.transparent,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            'Get credits ⚡',
+                            style: GoogleFonts.inter(
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.2,
+                            ),
+                          ),
+                        )
+                      : OutlinedButton(
+                          onPressed: () {
+                            Navigator.of(context).push<void>(
+                              SubscriptionScreen.createRoute(),
+                            );
+                          },
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor:
+                                Theme.of(context).colorScheme.onSurface,
+                            side: BorderSide(
+                              color: Colors.white.withValues(alpha: 0.18),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            'Go Pro ⚡',
+                            style: GoogleFonts.inter(
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.2,
+                            ),
+                          ),
+                        ),
                 ),
               ],
             ),

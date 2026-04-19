@@ -5,6 +5,7 @@ import 'package:lottie/lottie.dart';
 import '../services/provision_number_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
+import '../utils/app_snackbar.dart';
 import '../utils/user_facing_service_error.dart';
 
 /// Confirmation + premium server provision after picking a number in [NumberSelectionScreen].
@@ -85,13 +86,15 @@ abstract final class VirtualNumberClaimFlow {
         Navigator.of(context, rootNavigator: true).pop();
       }
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        AppSnackBar.show(
+          context,
           SnackBar(
             content: Text(
               userFacingServiceError(e.message),
               style: GoogleFonts.inter(),
             ),
             behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
             duration: const Duration(seconds: 8),
           ),
         );
@@ -102,13 +105,15 @@ abstract final class VirtualNumberClaimFlow {
         Navigator.of(context, rootNavigator: true).pop();
       }
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        AppSnackBar.show(
+          context,
           SnackBar(
             content: Text(
               userFacingServiceError(e.toString()),
               style: GoogleFonts.inter(),
             ),
             behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
             duration: const Duration(seconds: 8),
           ),
         );

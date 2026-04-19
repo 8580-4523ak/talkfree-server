@@ -30,6 +30,21 @@ class SubscriptionPaymentException implements Exception {
   String toString() => 'SubscriptionPaymentException($statusCode): $message';
 }
 
+/// Parsed JSON from `POST /verify-payment`.
+class VerifyPaymentResult {
+  const VerifyPaymentResult({
+    this.plan,
+    this.welcomeBonusCredits = 0,
+    this.starterCreditsAdded = 0,
+    this.idempotent = false,
+  });
+
+  final String? plan;
+  final int welcomeBonusCredits;
+  final int starterCreditsAdded;
+  final bool idempotent;
+}
+
 /// Razorpay Checkout → server verification only (no client Firestore premium writes).
 class SubscriptionPaymentService {
   SubscriptionPaymentService._();
@@ -78,7 +93,7 @@ class SubscriptionPaymentService {
   }
 
   /// After Razorpay success callback — server verifies HMAC and sets Pro in Firestore (Admin only).
-  Future<void> verifyPayment({
+  Future<VerifyPaymentResult> verifyPayment({
     required String razorpayPaymentId,
     required String razorpayOrderId,
     required String razorpaySignature,
@@ -111,6 +126,44 @@ class SubscriptionPaymentService {
         response.statusCode,
         _parseError(response.body) ?? 'Verification failed',
       );
+    }
+    final j = jsonDecode(response.body);
+    if (j is! Map<String, dynamic>) {
+      return const VerifyPaymentResult();
+    }
+    final plan = j['plan'] as String?;
+    final welcome = (j['welcomeBonus'] as num?)?.toInt() ?? 0;
+    final starter = (j['starterCreditsAdded'] as num?)?.toInt() ?? 0;
+    final idem = j['idempotent'] == true;
+    return VerifyPaymentResult(
+      plan: plan,
+      welcomeBonusCredits: welcome,
+      starterCreditsAdded: starter,
+      idempotent: idem,
+    );
+  }
+
+  /// Best-effort monthly premium credit grant (server enforces cadence).
+  Future<void> tryClaimPremiumMonthlyBonus() async {
+    final token = await _bearer();
+    if (token == null || token.isEmpty) return;
+    try {
+      final r = await http
+          .post(
+            VoiceBackendConfig.claimPremiumMonthlyBonusUri(),
+            headers: <String, String>{
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+          )
+          .timeout(const Duration(seconds: 20));
+      if (kDebugMode && r.statusCode != 200) {
+        debugPrint('claim-premium-monthly-bonus: ${r.statusCode} ${r.body}');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('tryClaimPremiumMonthlyBonus: $e');
+      }
     }
   }
 

@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 
-import '../config/credits_policy.dart';
+import 'monetization_copy.dart';
 import '../services/grant_reward_service.dart';
 
 /// User-facing copy for rewarded-ad flows — keep messages consistent app-wide.
@@ -13,10 +13,11 @@ abstract final class RewardAdFeedback {
   static const String processingReward = 'Processing reward...';
   static const String network = 'Check your internet connection';
   static const String serverIssue = 'Server issue. Try again later';
-  static const String dailyLimit = 'Daily limit reached. Come back tomorrow';
+  static String dailyLimit =
+      '${MonetizationCopy.dailyLimitTitle}. ${MonetizationCopy.dailyLimitBody}';
 
   static String cooldownBeforeNextAd() =>
-      'Please wait ${CreditsPolicy.adRewardCooldownSeconds} seconds before next ad';
+      'Please wait before the next ad (cooldown active).';
 
   static String successCreditsAdded(int credits) =>
       '+$credits credits added 🎉';

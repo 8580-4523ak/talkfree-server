@@ -1,7 +1,6 @@
 import 'dart:async' show unawaited;
 
-import 'dart:math' show min;
-import 'dart:ui' show ImageFilter;
+import 'dart:ui' show FontFeature, ImageFilter;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_picker/country_picker.dart';
@@ -10,19 +9,30 @@ import 'package:flutter/foundation.dart' show ValueNotifier, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:lottie/lottie.dart';
 import '../config/credits_policy.dart';
+import '../utils/app_snackbar.dart';
+import '../utils/monetization_copy.dart';
 import '../services/ad_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../services/call_service.dart';
 import '../services/firestore_user_service.dart';
+import '../utils/reward_ad_cta_copy.dart';
+import '../widgets/cooldown_reward_progress_bar.dart';
+import '../widgets/reward_cta_animated_label.dart';
 import '../utils/voip_runtime_permissions.dart';
 import '../widgets/premium_ios_dial_pad.dart';
+import '../widgets/scale_on_press.dart';
 import '../widgets/soft_pulse.dart';
 import 'call_success_screen.dart';
 import 'calling_screen.dart';
 import 'subscription_screen.dart';
+
+/// Mock-aligned dial canvas (deep navy).
+const Color _dialerCanvasBg = Color(0xFF080C14);
+
+/// Pro badge purple (dialer country card).
+const Color _dialerProPurple = Color(0xFF6B46C1);
 
 class DialerScreen extends StatefulWidget {
   const DialerScreen({
@@ -34,9 +44,15 @@ class DialerScreen extends StatefulWidget {
     this.cooldownRemaining = 0,
     this.rewardDailyLimitReached = false,
     required this.outboundCallsTotal,
+    this.onOpenHistory,
+    this.embedInShell = false,
   });
 
   final User user;
+  /// Opens call history (e.g. top-left “History” when embedded in shell).
+  final VoidCallback? onOpenHistory;
+  /// Hides the large credits card when [onOpenHistory] shows credits in the header row.
+  final bool embedInShell;
   /// Pro subscribers get unlimited outbound calling (no per-minute credit UI).
   final bool isPremium;
   final Future<void> Function()? onEarnMinutes;
@@ -53,125 +69,102 @@ class DialerScreen extends StatefulWidget {
 
 class _DialerScreenState extends State<DialerScreen>
     with TickerProviderStateMixin {
-  final StringBuffer _digits = StringBuffer();
+  /// Raw dial payload (digits / DTMF / optional leading +); country code prefix is separate UI.
+  final TextEditingController _dialController = TextEditingController();
+  final FocusNode _dialFocusNode = FocusNode();
+
+  void _onDialTextChanged() {
+    if (mounted) setState(() {});
+  }
+
   bool _callBusy = false;
   /// True while opening / showing the in-call screen — neon pulsing overlay.
   bool _apiConnecting = false;
   late Country _country;
-
-  late final AnimationController _digitFadeIn = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 220),
-  );
-  late final Animation<double> _digitFadeInCurve = CurvedAnimation(
-    parent: _digitFadeIn,
-    curve: Curves.easeOutCubic,
-  );
 
   late final AnimationController _connectPulse = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1400),
   );
 
-  String get _display => _digits.toString();
+  String get _display => _dialController.text;
 
   @override
   void initState() {
     super.initState();
     _country = Country.parse('IN');
+    _dialController.addListener(_onDialTextChanged);
   }
 
   @override
   void dispose() {
-    _digitFadeIn.dispose();
+    _dialController.removeListener(_onDialTextChanged);
+    _dialController.dispose();
+    _dialFocusNode.dispose();
     _connectPulse.dispose();
     super.dispose();
   }
 
   void _append(String ch) {
     HapticFeedback.lightImpact();
-    _digitFadeIn.reset();
-    setState(() => _digits.write(ch));
-    _digitFadeIn.forward();
+    final v = _dialController.value;
+    final t = v.text;
+    final s = v.selection;
+    final start = s.isValid ? s.start.clamp(0, t.length) : t.length;
+    final end = s.isValid ? s.end.clamp(0, t.length) : t.length;
+    final newText = t.replaceRange(start, end, ch);
+    final newOffset = start + ch.length;
+    _dialController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newOffset),
+    );
+    _dialFocusNode.requestFocus();
   }
 
   void _backspace() {
     HapticFeedback.selectionClick();
-    final s = _display;
-    if (s.isEmpty) return;
-    _digitFadeIn.reset();
-    setState(() {
-      _digits.clear();
-      if (s.length > 1) _digits.write(s.substring(0, s.length - 1));
-    });
-    if (_display.isNotEmpty) {
-      _digitFadeIn.forward();
+    final v = _dialController.value;
+    final t = v.text;
+    if (t.isEmpty) return;
+    final s = v.selection;
+    if (s.isValid && s.start != s.end) {
+      final a = s.start.clamp(0, t.length);
+      final b = s.end.clamp(0, t.length);
+      final newText = t.replaceRange(a, b, '');
+      _dialController.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: a),
+      );
+    } else {
+      final i = (s.isValid ? s.start : t.length).clamp(0, t.length);
+      if (i <= 0) return;
+      final newText = t.replaceRange(i - 1, i, '');
+      _dialController.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: i - 1),
+      );
     }
+    _dialFocusNode.requestFocus();
   }
 
   void _clearNumber() {
-    if (_display.isEmpty) return;
+    if (_dialController.text.isEmpty) return;
     HapticFeedback.mediumImpact();
-    setState(_digits.clear);
-  }
-
-  static String _spaceDigitRun(String digits) {
-    if (digits.length <= 2) return digits;
-    final b = StringBuffer(digits.substring(0, 2));
-    var i = 2;
-    while (i < digits.length) {
-      b.write(' ');
-      final take = min(3, digits.length - i);
-      b.write(digits.substring(i, i + take));
-      i += take;
-    }
-    return b.toString();
-  }
-
-  static String _prettyDial(String s) {
-    if (s.isEmpty) {
-      return '';
-    }
-    final out = StringBuffer();
-    final digitRun = StringBuffer();
-
-    void flushDigits() {
-      if (digitRun.isEmpty) return;
-      out.write(_spaceDigitRun(digitRun.toString()));
-      digitRun.clear();
-    }
-
-    for (var i = 0; i < s.length; i++) {
-      final ch = s[i];
-      final isSpecial = ch == '+' || ch == '*' || ch == '#';
-      final isDigit = ch.compareTo('0') >= 0 && ch.compareTo('9') <= 0;
-
-      if (isSpecial) {
-        flushDigits();
-        if (out.isNotEmpty) {
-          final str = out.toString();
-          final last = str[str.length - 1];
-          final lastIsDigit = last.compareTo('0') >= 0 && last.compareTo('9') <= 0;
-          if (lastIsDigit) out.write(' ');
-        }
-        out.write(ch);
-      } else if (isDigit) {
-        digitRun.write(ch);
-      } else {
-        flushDigits();
-        out.write(ch);
-      }
-    }
-    flushDigits();
-    return out.toString();
+    _dialController.clear();
+    _dialFocusNode.requestFocus();
   }
 
   /// Microphone + (Android) Phone — system prompts first; app Settings only if permanently denied.
   Future<bool> _ensureCallPermissionsForVoip() async {
     if (kIsWeb) {
       if (!mounted) return false;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('VoIP calls are not supported in this browser.')),
+      AppSnackBar.show(context,
+        SnackBar(
+          content: const Text('VoIP calls are not supported in this browser.'),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
       return false;
     }
@@ -198,19 +191,19 @@ class _DialerScreenState extends State<DialerScreen>
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Not enough credits',
+                MonetizationCopy.outOfCreditsTitle,
                 textAlign: TextAlign.center,
                 style: GoogleFonts.inter(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
                   color: Colors.white,
                 ),
               ),
               const SizedBox(height: 10),
               Text(
                 widget.onEarnMinutes != null
-                    ? 'Watch a short ad to earn credits, then try your call again.'
-                    : 'Add credits or keep your Pro benefits to continue calling.',
+                    ? 'Watch an ad for credits — or go Pro for faster, cheaper minutes.'
+                    : 'Add credits in Premium to keep calling.',
                 textAlign: TextAlign.center,
                 style: GoogleFonts.inter(
                   fontSize: 14,
@@ -219,30 +212,59 @@ class _DialerScreenState extends State<DialerScreen>
                 ),
               ),
               const SizedBox(height: 22),
-              if (widget.onEarnMinutes != null)
+              if (widget.onEarnMinutes != null) ...[
                 FilledButton(
                   onPressed: () {
                     Navigator.of(ctx).pop();
                     widget.onEarnMinutes!();
                   },
                   style: FilledButton.styleFrom(
-                    backgroundColor: AppTheme.neonGreen,
-                    foregroundColor: Colors.white,
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: AppColors.onPrimaryButton,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    minimumSize: const Size.fromHeight(52),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: Text(
+                    '🎁 Get Credits',
+                    style: GoogleFonts.inter(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton(
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    Navigator.of(context).push<void>(
+                      SubscriptionScreen.createRoute(),
+                    );
+                  },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textOnDark,
+                    side: BorderSide(
+                      color: Colors.white.withValues(alpha: 0.2),
+                    ),
                     padding: const EdgeInsets.symmetric(vertical: 14),
+                    minimumSize: const Size.fromHeight(48),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
                     ),
                   ),
                   child: Text(
-                    'WATCH AD',
+                    'Go Pro',
                     style: GoogleFonts.inter(
                       fontSize: 15,
                       fontWeight: FontWeight.w800,
-                      letterSpacing: 0.35,
                     ),
                   ),
-                )
-              else ...[
+                ),
+              ] else ...[
                 FilledButton(
                   onPressed: () {
                     Navigator.of(ctx).pop();
@@ -251,12 +273,13 @@ class _DialerScreenState extends State<DialerScreen>
                     );
                   },
                   style: FilledButton.styleFrom(
-                    backgroundColor: AppTheme.neonGreen,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: AppColors.onPrimaryButton,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
                     ),
+                    elevation: 0,
                   ),
                   child: Text(
                     'View plans',
@@ -284,8 +307,13 @@ class _DialerScreenState extends State<DialerScreen>
       defaultCallingCode: _country.phoneCode,
     );
     if (to.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a phone number')),
+      AppSnackBar.show(context,
+        SnackBar(
+          content: const Text('Enter a phone number'),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
       return;
     }
@@ -297,9 +325,14 @@ class _DialerScreenState extends State<DialerScreen>
         ? allDigits.length < 11
         : rawDigits.length < 10;
     if (tooShort) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Enter a complete number for the selected country.'),
+      AppSnackBar.show(context,
+        SnackBar(
+          content: const Text(
+            'Enter a complete number for the selected country.',
+          ),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
       return;
@@ -330,7 +363,7 @@ class _DialerScreenState extends State<DialerScreen>
       final result = await Navigator.of(context).push<CallingScreenResult?>(
         PageRouteBuilder<CallingScreenResult?>(
           opaque: true,
-          transitionDuration: const Duration(milliseconds: 380),
+          transitionDuration: const Duration(milliseconds: 260),
           pageBuilder: (_, animation, secondaryAnimation) => CallingScreen(
             user: widget.user,
             dialE164: to,
@@ -372,18 +405,21 @@ class _DialerScreenState extends State<DialerScreen>
       }
       if (!mounted) return;
       if (r.exitReason == CallingScreenExitReason.voipFailure) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
+        AppSnackBar.show(context,
+          SnackBar(
+            content: const Text(
               'Call failed. Check internet or permissions',
             ),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
           ),
         );
       } else if (r.exitReason == CallingScreenExitReason.insufficientCredits) {
         await _showLowCreditsForCall();
       } else if (r.serverBillingPending) {
         final b = r.syncedBalance;
-        ScaffoldMessenger.of(context).showSnackBar(
+        AppSnackBar.show(context,
           SnackBar(
             content: Text(
               b != null
@@ -391,14 +427,25 @@ class _DialerScreenState extends State<DialerScreen>
                       'If it looks wrong, try again in a little while.'
                   : 'Credits usually update shortly after the call. If not, try again later.',
             ),
-            duration: const Duration(seconds: 7),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
           ),
         );
       } else if (r.syncedBalance != null &&
           !(r.exitReason == CallingScreenExitReason.ok && !widget.isPremium)) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        AppSnackBar.show(context,
           SnackBar(
-            content: Text('Balance: ${r.syncedBalance} credits'),
+            content: Text(
+              'Balance: ${r.syncedBalance} credits',
+              style: GoogleFonts.inter(
+                letterSpacing: 0,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
           ),
         );
       }
@@ -470,6 +517,81 @@ class _DialerScreenState extends State<DialerScreen>
     );
   }
 
+  Widget _rewardedAdButtonLabelColumn(Map<String, dynamic>? userData) {
+    if (widget.rewardedAdBusy) {
+      return SizedBox(
+        height: 22,
+        width: 22,
+        child: CircularProgressIndicator(
+          strokeWidth: 2.5,
+          color: AppColors.onPrimaryButton.withValues(alpha: 0.95),
+        ),
+      );
+    }
+    if (widget.rewardDailyLimitReached) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Daily limit reached',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.inter(
+              fontWeight: FontWeight.w800,
+              fontSize: 14,
+              height: 1.2,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            'Back tomorrow',
+            style: GoogleFonts.inter(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: AppColors.onPrimaryButton.withValues(alpha: 0.78),
+            ),
+          ),
+        ],
+      );
+    }
+    if (widget.cooldownRemaining > 0) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '⏳ Next reward in ${widget.cooldownRemaining}s',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.inter(
+              fontWeight: FontWeight.w800,
+              fontSize: 14,
+              height: 1.2,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            'Rewards stack fast',
+            style: GoogleFonts.inter(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: AppColors.onPrimaryButton.withValues(alpha: 0.78),
+            ),
+          ),
+        ],
+      );
+    }
+    final cta = RewardAdCtaCopy.homeOrDialer(
+      lifetimeAdsWatched:
+          FirestoreUserService.lifetimeAdsWatchedFromUserData(userData),
+      streakDays: FirestoreUserService.adStreakCountFromUserData(userData),
+    );
+    return RewardCtaAnimatedLabel(
+      title: cta.title,
+      subtitle: cta.subtitle,
+      titleFontSize: 15,
+      subtitleFontSize: 11,
+      gap: 3,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final compactDial = MediaQuery.sizeOf(context).height < 700;
@@ -478,12 +600,18 @@ class _DialerScreenState extends State<DialerScreen>
       clipBehavior: Clip.none,
       children: [
         Scaffold(
-              backgroundColor: AppTheme.darkBg,
+              backgroundColor: _dialerCanvasBg,
               body: SafeArea(
                 bottom: false,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    Expanded(
+                      child: SingleChildScrollView(
+                        physics: const ClampingScrollPhysics(),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                       child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -496,14 +624,254 @@ class _DialerScreenState extends State<DialerScreen>
                                   creditSnap.data!,
                                 )
                               : 0;
+                          final userData = creditSnap.data?.data();
                           return Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              _GlassCreditsCard(
-                                credits: c,
-                                isPremium: widget.isPremium,
+                              if (widget.embedInShell) ...[
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Dialer',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 28,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: -0.6,
+                                            height: 1.1,
+                                            color: AppColors.textOnDark,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'Call anyone, anywhere.',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: AppColors.textMutedOnDark,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              if (widget.embedInShell &&
+                                  widget.onOpenHistory != null)
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.fromLTRB(0, 0, 0, 12),
+                                  child: Row(
+                                    children: [
+                                      Material(
+                                        color: Colors.transparent,
+                                        child: InkWell(
+                                          onTap: widget.onOpenHistory,
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                          child: Ink(
+                                            decoration: BoxDecoration(
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                              color: AppColors.cardDark,
+                                              border: Border.all(
+                                                color: Colors.white
+                                                    .withValues(alpha: 0.1),
+                                              ),
+                                            ),
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 14,
+                                              vertical: 10,
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(
+                                                  Icons.history_rounded,
+                                                  size: 18,
+                                                  color: AppColors.textMutedOnDark,
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Text(
+                                                  'History',
+                                                  style: GoogleFonts.inter(
+                                                    fontWeight: FontWeight.w700,
+                                                    fontSize: 14,
+                                                    color: AppColors.textOnDark,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 14,
+                                          vertical: 8,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(999),
+                                          color: AppColors.cardDark,
+                                          border: Border.all(
+                                            color: AppColors.primary
+                                                .withValues(alpha: 0.35),
+                                          ),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              Icons.savings_rounded,
+                                              size: 18,
+                                              color: AppColors.primary,
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              'Credits: $c',
+                                              style: GoogleFonts.inter(
+                                                fontWeight: FontWeight.w800,
+                                                fontSize: 13,
+                                                color: AppColors.textOnDark,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                ),
                               ),
-                              if (!widget.isPremium &&
+                              if (widget.embedInShell &&
+                                  !widget.isPremium &&
+                                  widget.onEarnMinutes != null) ...[
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.fromLTRB(0, 4, 0, 2),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      Text(
+                                        '⚡ ${MonetizationCopy.needCreditsToCall}',
+                                        textAlign: TextAlign.center,
+                                        style: GoogleFonts.inter(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                          color: AppColors.textOnDark
+                                              .withValues(alpha: 0.92),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      ScaleOnPress(
+                                        child: SizedBox(
+                                          width: double.infinity,
+                                          child: FilledButton(
+                                            onPressed: widget.rewardedAdBusy ||
+                                                    widget
+                                                        .rewardDailyLimitReached ||
+                                                    widget.cooldownRemaining > 0
+                                                ? null
+                                                : () => unawaited(
+                                                      widget.onEarnMinutes!(),
+                                                    ),
+                                            style: FilledButton.styleFrom(
+                                              backgroundColor: AppColors.primary,
+                                              foregroundColor:
+                                                  AppColors.onPrimaryButton,
+                                              disabledForegroundColor:
+                                                  AppColors.onPrimaryButton
+                                                      .withValues(alpha: 0.88),
+                                              disabledBackgroundColor:
+                                                  widget.cooldownRemaining > 0 &&
+                                                          !widget
+                                                              .rewardDailyLimitReached
+                                                      ? AppColors.primary
+                                                          .withValues(
+                                                              alpha: 0.42)
+                                                      : (Theme.of(context)
+                                                                  .cardTheme
+                                                                  .color ??
+                                                              Theme.of(context)
+                                                                  .colorScheme
+                                                                  .surface)
+                                                          .withValues(
+                                                              alpha: 0.65),
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                vertical: 12,
+                                              ),
+                                              minimumSize: const Size(
+                                                double.infinity,
+                                                48,
+                                              ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(14),
+                                              ),
+                                              elevation: 0,
+                                            ),
+                                            child: _rewardedAdButtonLabelColumn(
+                                              userData,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      if (widget.cooldownRemaining > 0 &&
+                                          !widget.rewardDailyLimitReached) ...[
+                                        const SizedBox(height: 8),
+                                        CooldownRewardProgressBar(
+                                          remainingSeconds:
+                                              widget.cooldownRemaining,
+                                        ),
+                                      ],
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 4),
+                                        child: Center(
+                                          child: TextButton(
+                                            onPressed: widget.rewardedAdBusy ||
+                                                    widget
+                                                        .rewardDailyLimitReached ||
+                                                    widget.cooldownRemaining > 0
+                                                ? null
+                                                : () => unawaited(
+                                                      widget.onEarnMinutes!(),
+                                                    ),
+                                            style: TextButton.styleFrom(
+                                              foregroundColor: AppColors.primary,
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 12,
+                                                vertical: 4,
+                                              ),
+                                            ),
+                                            child: Text(
+                                              'Get credits',
+                                              style: GoogleFonts.inter(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w800,
+                                                letterSpacing: 0.2,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                              if (!widget.embedInShell)
+                                _GlassCreditsCard(
+                                  credits: c,
+                                  isPremium: widget.isPremium,
+                                ),
+                              if (!widget.embedInShell &&
+                                  !widget.isPremium &&
                                   widget.onEarnMinutes != null) ...[
                                 const SizedBox(height: 12),
                                 SoftPulse(
@@ -512,7 +880,7 @@ class _DialerScreenState extends State<DialerScreen>
                                       widget.cooldownRemaining <= 0,
                                   child: SizedBox(
                                     width: double.infinity,
-                                    child: FilledButton(
+                                      child: FilledButton(
                                       onPressed: widget.rewardedAdBusy ||
                                               widget.rewardDailyLimitReached ||
                                               widget.cooldownRemaining > 0
@@ -522,7 +890,21 @@ class _DialerScreenState extends State<DialerScreen>
                                               ),
                                       style: FilledButton.styleFrom(
                                         backgroundColor: AppColors.primary,
-                                        foregroundColor: AppColors.onPrimary,
+                                        foregroundColor: AppColors.onPrimaryButton,
+                                        disabledForegroundColor:
+                                            AppColors.onPrimaryButton
+                                                .withValues(alpha: 0.88),
+                                        disabledBackgroundColor:
+                                            widget.cooldownRemaining > 0 &&
+                                                    !widget.rewardDailyLimitReached
+                                                ? AppColors.primary
+                                                    .withValues(alpha: 0.42)
+                                                : (Theme.of(context)
+                                                            .cardTheme.color ??
+                                                        Theme.of(context)
+                                                            .colorScheme
+                                                            .surface)
+                                                    .withValues(alpha: 0.65),
                                         padding: const EdgeInsets.symmetric(
                                           vertical: 12,
                                           horizontal: 14,
@@ -535,41 +917,45 @@ class _DialerScreenState extends State<DialerScreen>
                                         ),
                                         elevation: 0,
                                       ),
-                                      child: widget.rewardedAdBusy
-                                          ? SizedBox(
-                                              height: 22,
-                                              width: 22,
-                                              child: CircularProgressIndicator(
-                                                strokeWidth: 2.5,
-                                                color: AppColors.onPrimary
-                                                    .withValues(alpha: 0.95),
+                                      child: _rewardedAdButtonLabelColumn(
+                                        userData,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (widget.cooldownRemaining > 0 &&
+                                    !widget.rewardDailyLimitReached) ...[
+                                  const SizedBox(height: 8),
+                                  CooldownRewardProgressBar(
+                                    remainingSeconds: widget.cooldownRemaining,
+                                  ),
+                                ],
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 4),
+                                  child: Center(
+                                    child: TextButton(
+                                      onPressed: widget.rewardedAdBusy ||
+                                              widget.rewardDailyLimitReached ||
+                                              widget.cooldownRemaining > 0
+                                          ? null
+                                          : () => unawaited(
+                                                widget.onEarnMinutes!(),
                                               ),
-                                            )
-                                          : Column(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                Text(
-                                                  '🎁 Get FREE Calling Time',
-                                                  textAlign: TextAlign.center,
-                                                  style: GoogleFonts.inter(
-                                                    fontWeight: FontWeight.w800,
-                                                    fontSize: 15,
-                                                    height: 1.2,
-                                                  ),
-                                                ),
-                                                const SizedBox(height: 3),
-                                                Text(
-                                                  '+${CreditsPolicy.creditsPerRewardedAd} credits',
-                                                  style: GoogleFonts.inter(
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.w600,
-                                                    color: AppColors.onPrimary
-                                                        .withValues(
-                                                            alpha: 0.88),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: AppColors.primary,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 4,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        'Get credits',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: 0.2,
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -579,69 +965,99 @@ class _DialerScreenState extends State<DialerScreen>
                         },
                       ),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 10),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       child: _CountryPickerTile(
                         country: _country,
+                        isPremium: widget.isPremium,
                         rateLine: widget.isPremium
-                            ? 'Unlimited calling (Pro)'
-                            : 'Rate: ${CreditsPolicy.creditsPerMinuteForUser(false)} ⚡/min',
+                            ? 'Pro: ${CreditsPolicy.creditsPerMinuteForUser(true)} credits/min · ⚡ faster routing'
+                            : 'Rate: ${CreditsPolicy.creditsPerMinuteForUser(false)} credits/min',
                         onOpen: _openCountryPicker,
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                       child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Expanded(
                             child: _DialerNumberLine(
                               phoneCode: _country.phoneCode,
-                              prettyDigits: _prettyDial(_display),
-                              hasDigits: _display.isNotEmpty,
+                              controller: _dialController,
+                              focusNode: _dialFocusNode,
                               compactDial: compactDial,
-                              digitFade: _digitFadeInCurve,
                             ),
                           ),
                           const SizedBox(width: 8),
-                          _DialerDeleteIconButton(
-                            enabled: _display.isNotEmpty,
-                            compact: compactDial,
-                            onTap: _backspace,
-                            onLongPress: _clearNumber,
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: _DialerDeleteIconButton(
+                              enabled: _display.isNotEmpty,
+                              compact: compactDial,
+                              onTap: _backspace,
+                              onLongPress: _clearNumber,
+                            ),
                           ),
                         ],
                       ),
                     ),
-                    Expanded(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          return SingleChildScrollView(
-                            physics: const AlwaysScrollableScrollPhysics(),
-                            child: ConstrainedBox(
-                              constraints: BoxConstraints(
-                                minHeight: constraints.maxHeight,
+                    const SizedBox(height: 20),
+                          ],
+                        ),
+                      ),
+                    ),
+                    ColoredBox(
+                      color: _dialerCanvasBg,
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          12,
+                          10,
+                          12,
+                          6 + MediaQuery.viewPaddingOf(context).bottom,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Container(
+                              height: 1,
+                              margin: const EdgeInsets.only(bottom: 12),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(1),
+                                gradient: LinearGradient(
+                                  colors: [
+                                    Colors.transparent,
+                                    Colors.white.withValues(alpha: 0.12),
+                                    Colors.transparent,
+                                  ],
+                                ),
                               ),
+                            ),
+                            ClipRect(
                               child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
                                   PremiumIosDialPad(
                                     onDigit: _append,
-                                    gap: compactDial ? 14 : 16,
-                                    keyHeight: compactDial ? 58 : 68,
+                                    horizontalPadding: compactDial ? 14 : 16,
+                                    gap: compactDial ? 8 : 10,
+                                    keyHeight: compactDial ? 44 : 52,
                                   ),
-                                  SizedBox(height: compactDial ? 24 : 32),
-                                  PremiumIosCallButton(
+                                  SizedBox(height: compactDial ? 12 : 16),
+                                  _DialerCallWithFlankDots(
                                     busy: _callBusy,
                                     onPressed: _onCall,
+                                    callButtonDiameter:
+                                        compactDial ? 76.0 : 82.0,
                                   ),
-                                  SizedBox(height: compactDial ? 28 : 32),
                                 ],
                               ),
                             ),
-                          );
-                        },
+                          ],
+                        ),
                       ),
                     ),
                   ],
@@ -657,6 +1073,62 @@ class _DialerScreenState extends State<DialerScreen>
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Call button flanked by subtle dot rows (mockup).
+class _DialerCallWithFlankDots extends StatelessWidget {
+  const _DialerCallWithFlankDots({
+    required this.busy,
+    required this.onPressed,
+    this.callButtonDiameter = 94,
+  });
+
+  final bool busy;
+  final VoidCallback? onPressed;
+  final double callButtonDiameter;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(child: _dialerFlankDots()),
+          PremiumIosCallButton(
+            busy: busy,
+            onPressed: onPressed,
+            horizontalMargin: 10,
+            diameter: callButtonDiameter,
+          ),
+          Expanded(child: _dialerFlankDots()),
+        ],
+      ),
+    );
+  }
+
+  Widget _dialerFlankDots() {
+    return LayoutBuilder(
+      builder: (context, c) {
+        final n = 14;
+        final dotW = (c.maxWidth / n).clamp(2.0, 5.0);
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: List.generate(
+            n,
+            (i) => Container(
+              width: dotW,
+              height: dotW,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withValues(alpha: 0.12 + (i % 3) * 0.04),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -694,14 +1166,13 @@ class _DialerConnectingOverlay extends StatelessWidget {
                           height: 56,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: premiumDialCallGreen.withValues(alpha: 0.18),
+                            color: premiumDialCallGreen.withValues(alpha: 0.16),
                             boxShadow: [
                               BoxShadow(
-                                color: premiumDialCallGreen.withValues(
-                                  alpha: 0.45,
-                                ),
-                                blurRadius: 20,
-                                spreadRadius: 2,
+                                color: Colors.black.withValues(alpha: 0.55),
+                                blurRadius: 22,
+                                spreadRadius: -2,
+                                offset: const Offset(0, 10),
                               ),
                             ],
                           ),
@@ -724,10 +1195,11 @@ class _DialerConnectingOverlay extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                   letterSpacing: 0.4,
                   color: premiumDialCallGreen.withValues(alpha: 0.95),
-                  shadows: [
+                  shadows: const [
                     Shadow(
-                      color: premiumDialCallGreen.withValues(alpha: 0.55),
-                      blurRadius: 12,
+                      color: Color(0x66000000),
+                      blurRadius: 10,
+                      offset: Offset(0, 2),
                     ),
                   ],
                 ),
@@ -761,14 +1233,15 @@ class _DialerConnectingOverlay extends StatelessWidget {
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             border: Border.all(
-              color: premiumDialCallGreen.withValues(alpha: 0.65),
+              color: premiumDialCallGreen.withValues(alpha: 0.5),
               width: 2,
             ),
             boxShadow: [
               BoxShadow(
-                color: premiumDialCallGreen.withValues(alpha: 0.35),
-                blurRadius: 18,
-                spreadRadius: 0,
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 16,
+                spreadRadius: -2,
+                offset: const Offset(0, 8),
               ),
             ],
           ),
@@ -838,11 +1311,13 @@ class _GlassCreditsCard extends StatelessWidget {
 class _CountryPickerTile extends StatelessWidget {
   const _CountryPickerTile({
     required this.country,
+    required this.isPremium,
     required this.rateLine,
     required this.onOpen,
   });
 
   final Country country;
+  final bool isPremium;
   final String rateLine;
   final VoidCallback onOpen;
 
@@ -852,36 +1327,45 @@ class _CountryPickerTile extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(16),
-        splashColor: premiumDialCallGreen.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(18),
+        splashColor: Colors.white.withValues(alpha: 0.08),
         highlightColor: Colors.white.withValues(alpha: 0.05),
         child: Ink(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(18),
             border: Border.all(
-              color: Colors.white.withValues(alpha: 0.1),
+              color: AppColors.primary.withValues(alpha: 0.45),
+              width: 1.2,
             ),
-            color: AppColors.cardDark,
+            color: const Color(0xFF121A26).withValues(alpha: 0.95),
+            boxShadow: AppTheme.fintechCardShadow,
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 country.flagEmoji,
-                style: const TextStyle(fontSize: 28),
+                style: const TextStyle(fontSize: 30),
               ),
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 36,
-                height: 36,
-                child: Lottie.asset(
-                  AppTheme.lottiePhoneCall,
-                  fit: BoxFit.contain,
-                  repeat: true,
+              const SizedBox(width: 10),
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AppColors.primary.withValues(alpha: 0.18),
+                  border: Border.all(
+                    color: AppColors.primary.withValues(alpha: 0.45),
+                  ),
+                ),
+                child: Icon(
+                  Icons.phone_in_talk_rounded,
+                  color: AppColors.primary,
+                  size: 22,
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -891,9 +1375,10 @@ class _CountryPickerTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white.withValues(alpha: 0.95),
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.textOnDark,
+                        letterSpacing: -0.2,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -901,31 +1386,68 @@ class _CountryPickerTile extends StatelessWidget {
                       '+${country.phoneCode}',
                       style: GoogleFonts.inter(
                         fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      rateLine,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.inter(
-                        fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        letterSpacing: 0.2,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        color: AppColors.textMutedOnDark,
                       ),
                     ),
+                    const SizedBox(height: 8),
+                    if (isPremium)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          color: _dialerProPurple.withValues(alpha: 0.22),
+                          border: Border.all(
+                            color: _dialerProPurple.withValues(alpha: 0.45),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.workspace_premium_rounded,
+                              size: 14,
+                              color: _dialerProPurple,
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                rateLine,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.inter(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0.1,
+                                  color: const Color(0xFFE9D5FF),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      Text(
+                        rateLine,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          height: 1.3,
+                          color: AppColors.textMutedOnDark.withValues(alpha: 0.92),
+                        ),
+                      ),
                   ],
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Icon(
-                  Icons.keyboard_arrow_down_rounded,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+              Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: AppColors.textMutedOnDark,
+                size: 26,
               ),
             ],
           ),
@@ -935,21 +1457,19 @@ class _CountryPickerTile extends StatelessWidget {
   }
 }
 
-/// Country code + blinking caret when empty; dialed digits fade in subtly.
+/// Country code prefix + editable dial field (cursor & selection; keypad inserts at caret).
 class _DialerNumberLine extends StatelessWidget {
   const _DialerNumberLine({
     required this.phoneCode,
-    required this.prettyDigits,
-    required this.hasDigits,
+    required this.controller,
+    required this.focusNode,
     required this.compactDial,
-    required this.digitFade,
   });
 
   final String phoneCode;
-  final String prettyDigits;
-  final bool hasDigits;
+  final TextEditingController controller;
+  final FocusNode focusNode;
   final bool compactDial;
-  final Animation<double> digitFade;
 
   @override
   Widget build(BuildContext context) {
@@ -969,89 +1489,119 @@ class _DialerNumberLine extends StatelessWidget {
       ],
     );
 
-    return Align(
-      alignment: Alignment.center,
-      child: FittedBox(
-        fit: BoxFit.scaleDown,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              '+$phoneCode',
-              style: style,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(width: 6),
-            if (!hasDigits)
-              _DialerBlinkingCaret(
-                height: fontSize * 1.08,
-                color: premiumDialCallGreen.withValues(alpha: 0.92),
-              )
-            else
-              FadeTransition(
-                opacity: digitFade,
-                child: Text(
-                  prettyDigits,
-                  style: style,
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Align(
+          alignment: Alignment.center,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.center,
+                child: SizedBox(
+                  width: constraints.maxWidth,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        '+$phoneCode',
+                        style: style,
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: TextField(
+                          controller: controller,
+                          focusNode: focusNode,
+                          keyboardType: TextInputType.none,
+                          textInputAction: TextInputAction.done,
+                          minLines: 1,
+                          maxLines: 2,
+                          style: style,
+                          strutStyle: StrutStyle(
+                            fontSize: fontSize,
+                            height: 1.2,
+                            forceStrutHeight: true,
+                          ),
+                          cursorColor: premiumDialCallGreen,
+                          cursorWidth: 2,
+                          cursorHeight: fontSize * 1.08,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            disabledBorder: InputBorder.none,
+                            errorBorder: InputBorder.none,
+                            focusedErrorBorder: InputBorder.none,
+                            contentPadding: EdgeInsets.zero,
+                            filled: false,
+                            isCollapsed: true,
+                          ),
+                          inputFormatters: const <TextInputFormatter>[
+                            _DialerNationalInputFormatter(),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-          ],
+              );
+            },
+          ),
         ),
-      ),
+        const SizedBox(height: 6),
+        Text(
+          'Enter number to call',
+          style: GoogleFonts.inter(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: AppColors.textMutedOnDark.withValues(alpha: 0.85),
+          ),
+        ),
+      ],
     );
   }
 }
 
-class _DialerBlinkingCaret extends StatefulWidget {
-  const _DialerBlinkingCaret({
-    required this.height,
-    required this.color,
-  });
-
-  final double height;
-  final Color color;
+/// Digits + DTMF `*` / `#`; optional leading `+` for full international entry.
+class _DialerNationalInputFormatter extends TextInputFormatter {
+  const _DialerNationalInputFormatter();
 
   @override
-  State<_DialerBlinkingCaret> createState() => _DialerBlinkingCaretState();
-}
-
-class _DialerBlinkingCaretState extends State<_DialerBlinkingCaret>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 530),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: Tween<double>(begin: 0.35, end: 1.0).animate(
-        CurvedAnimation(parent: _c, curve: Curves.easeInOut),
-      ),
-      child: Container(
-        width: 2,
-        height: widget.height,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(1),
-          color: widget.color,
-          boxShadow: [
-            BoxShadow(
-              color: widget.color.withValues(alpha: 0.45),
-              blurRadius: 4,
-            ),
-          ],
-        ),
-      ),
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final sb = StringBuffer();
+    final t = newValue.text;
+    for (var i = 0; i < t.length; i++) {
+      final ch = t[i];
+      if (ch == '+' && i == 0) {
+        sb.write(ch);
+      } else if (RegExp(r'[0-9*#]').hasMatch(ch)) {
+        sb.write(ch);
+      }
+    }
+    final cleaned = sb.toString();
+    if (cleaned == newValue.text) return newValue;
+    var sel = newValue.selection;
+    if (!sel.isValid) {
+      return TextEditingValue(
+        text: cleaned,
+        selection: TextSelection.collapsed(offset: cleaned.length),
+      );
+    }
+    var c = sel.extentOffset;
+    final delta = newValue.text.length - cleaned.length;
+    c -= delta;
+    if (c < 0) c = 0;
+    if (c > cleaned.length) c = cleaned.length;
+    return TextEditingValue(
+      text: cleaned,
+      selection: TextSelection.collapsed(offset: c),
     );
   }
 }
@@ -1081,21 +1631,34 @@ class _DialerDeleteIconButtonState extends State<_DialerDeleteIconButton>
 
   late final AnimationController _tapCtrl = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 120),
+    duration: const Duration(milliseconds: 240),
   );
   late final Animation<double> _tapScale = Tween<double>(begin: 1.0, end: 0.88)
-      .animate(CurvedAnimation(parent: _tapCtrl, curve: Curves.easeOutCubic));
+      .animate(
+        CurvedAnimation(
+          parent: _tapCtrl,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeOutCubic,
+        ),
+      );
 
   /// Fluid pulse when long-press clears all digits.
   late final AnimationController _burstCtrl = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 420),
+    duration: const Duration(milliseconds: 260),
   );
   late final Animation<double> _burstScale = Tween<double>(begin: 1.0, end: 1.12)
-      .animate(CurvedAnimation(parent: _burstCtrl, curve: Curves.easeOutCubic));
+      .animate(
+        CurvedAnimation(
+          parent: _burstCtrl,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeOutCubic,
+        ),
+      );
   late final Animation<double> _glowT = CurvedAnimation(
     parent: _burstCtrl,
-    curve: const Interval(0.0, 0.55, curve: Curves.easeOut),
+    curve: const Interval(0.0, 0.55, curve: Curves.easeOutCubic),
+    reverseCurve: const Interval(0.0, 0.55, curve: Curves.easeOutCubic),
   );
 
   @override
@@ -1135,20 +1698,22 @@ class _DialerDeleteIconButtonState extends State<_DialerDeleteIconButton>
 
     Widget buildButton(double tapS, double burstS, double glow) {
       final scale = tapS * burstS;
+      const r = 12.0;
       return Transform.scale(
         scale: scale,
-        child: ClipOval(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(r),
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
             child: Container(
               width: _size,
               height: _size,
               decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(r),
+                color: const Color(0xFF141A22).withValues(alpha: 0.95),
                 border: Border.all(
                   color: _accent.withValues(
-                    alpha: enabled ? 0.14 + glow * 0.28 : 0.08,
+                    alpha: enabled ? 0.35 + glow * 0.2 : 0.12,
                   ),
                 ),
               ),
@@ -1156,20 +1721,19 @@ class _DialerDeleteIconButtonState extends State<_DialerDeleteIconButton>
                 type: MaterialType.transparency,
                 clipBehavior: Clip.antiAlias,
                 child: InkWell(
-                  customBorder: const CircleBorder(),
+                  borderRadius: BorderRadius.circular(r),
                   onTap: enabled ? _handleTap : null,
                   onLongPress: enabled ? _handleLongPress : null,
                   splashFactory: InkRipple.splashFactory,
-                  splashColor: _accent.withValues(alpha: 0.38),
-                  highlightColor: _accent.withValues(alpha: 0.14),
-                  radius: _size / 2,
+                  splashColor: _accent.withValues(alpha: 0.28),
+                  highlightColor: _accent.withValues(alpha: 0.1),
                   child: SizedBox(
                     width: _size,
                     height: _size,
                     child: Center(
                       child: Icon(
-                        Icons.backspace_rounded,
-                        size: iconSize,
+                        Icons.close_rounded,
+                        size: iconSize + 2,
                         color: _accent.withValues(alpha: enabled ? 0.95 : 0.28),
                       ),
                     ),

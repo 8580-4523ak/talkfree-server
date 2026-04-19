@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import '../services/ad_service.dart';
 import '../services/grant_reward_service.dart' show GrantRewardException, GrantRewardService;
 import '../services/reward_sound_service.dart';
+import '../theme/app_theme.dart';
+import 'app_snackbar.dart';
 import '../widgets/engagement_overlays.dart';
 
 /// Plays a rewarded ad then POSTs `/grant-reward`. Use from any screen (server enforces limits).
@@ -25,30 +27,36 @@ Future<bool> runRewardedAdGrantFlow(BuildContext context) async {
         welcomeFirstAd: result.firstLifetimeAd,
       );
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Reward recorded — credits will sync shortly.'),
+      AppSnackBar.show(context,
+        SnackBar(
+          content: const Text('Reward recorded — credits will sync shortly.'),
           behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
     }
     return true;
   } on GrantRewardException catch (e) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      AppSnackBar.show(context,
         SnackBar(
           content: Text(e.message),
           behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
     }
     return false;
   } catch (e) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      AppSnackBar.show(context,
         SnackBar(
           content: Text('Could not apply reward: $e'),
           behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
     }

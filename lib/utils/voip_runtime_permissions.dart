@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../theme/app_theme.dart';
+import 'app_snackbar.dart';
 import '../widgets/voip_gate_dialog.dart';
 
 bool _isGranted(PermissionStatus s) =>
@@ -73,10 +75,13 @@ Future<bool> _requestOne(
     return false;
   }
 
-  ScaffoldMessenger.of(context).showSnackBar(
+  AppSnackBar.show(
+    context,
     SnackBar(
       content: Text(rationale),
-      duration: const Duration(seconds: 4),
+      behavior: SnackBarBehavior.floating,
+      margin: AppTheme.snackBarFloatingMargin(context),
+      duration: AppTheme.snackBarCalmDuration,
     ),
   );
   return false;

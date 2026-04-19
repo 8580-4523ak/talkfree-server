@@ -4,6 +4,7 @@ class VirtualNumber {
     required this.e164,
     required this.phoneNumber,
     required this.country,
+    this.isoCountryCode = 'US',
     this.price = defaultPrice,
   });
 
@@ -15,6 +16,10 @@ class VirtualNumber {
   /// Human-friendly string shown in the list.
   final String phoneNumber;
 
+  /// City / region line (e.g. `Ericsburg, MN · US`).
   final String country;
+
+  /// Inventory region from the API (`US` or `CA`).
+  final String isoCountryCode;
   final int price;
 }

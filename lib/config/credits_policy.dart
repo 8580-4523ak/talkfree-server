@@ -1,35 +1,50 @@
 /// TalkFree credit / ad reward rules (single source of truth).
 ///
-/// **Outbound call billing (VoIP)** — two-tier sync (see `calling_screen` + server `settleOutboundCallBill`):
-/// - **Base:** 10 credits = 1 full minute (60s), same as server `CALL_CREDITS_PER_MINUTE`.
-/// - **Micro-pulse:** 1 credit every 6s while connected (`/call-live-tick`).
-/// - **Minimum on connect (T≈0):** 10 credits (`creditsPerCallTick`).
-/// - **Final settlement:** `ceil(durationSeconds / 60) × 10`, min 10, minus prepaid from live ticks;
-///   over-deduction is refunded to `paidCredits` on the server.
+/// **Outbound call billing (VoIP)** — server `POST /call-live-tick` + `settleOutboundCallBill`:
+/// - **Free:** 1 credit every 6s while connected (10 credits / billed minute).
+/// - **Premium:** 1 credit every ~8571ms (7 credits / billed minute).
+/// - **Settlement** reconciles Twilio duration vs prepaid live ticks (see `server/index.js`).
 abstract final class CreditsPolicy {
   CreditsPolicy._();
 
-  /// Default usable balance for a **new** Firestore `users/{uid}` document (strict zero — earn via ads / purchase).
+  /// Default usable balance for a **new** Firestore `users/{uid}` document.
   static const int initialCreditsForNewUser = 0;
 
-  /// Credits added per rewarded ad after the welcome grant (must match server `REWARD_GRANT_CREDITS`, default 2).
-  /// First lifetime ad uses server `FIRST_AD_GRANT_CREDITS` (default 10).
-  static const int creditsPerRewardedAd = 2;
+  /// Credits per rewarded ad (after first lifetime ad on server).
+  static int creditsPerRewardedAdForUser(bool isPremium) =>
+      isPremium ? 20 : 10;
 
-  /// In-call UI: [CallingScreen] uses this balance value to show "Unlimited calling (Pro)" (not a real balance).
-  static const int unlimitedBalanceUiSentinel = -900001;
+  /// Max rewarded ad grants per UTC day (server-enforced).
+  static int maxRewardedAdsForUser(bool isPremium) =>
+      isPremium ? 25 : 10;
 
-  /// Credits charged per **full minute** of billed talk — **free** users (matches server default).
+  /// Minimum seconds between ad grants (server + UI cooldown).
+  static int adRewardCooldownSecondsForUser(bool isPremium) =>
+      isPremium ? 10 : 45;
+
+  /// Legacy single-tier constant (free tier cap) — prefer [maxRewardedAdsForUser].
+  static const int maxRewardedAdsPerDay = 10;
+
+  /// Legacy free-tier cooldown — prefer [adRewardCooldownSecondsForUser].
+  static const int adRewardCooldownSeconds = 45;
+
+  /// Credits charged per **full minute** of billed talk — **free** users.
   static const int creditsPerMinute = 10;
 
-  /// Per-minute rate for **premium** subscribers (matches server `CALL_CREDITS_PER_MINUTE_PREMIUM`).
+  /// Per-minute rate for **premium** (server `CALL_CREDITS_PER_MINUTE_PREMIUM`).
   static const int creditsPerMinutePremium = 7;
 
-  /// One-time credits when `isPremium` becomes true (client transaction; payment backend should set `isPremium`).
-  static const int premiumWelcomeBonusCredits = 1000;
+  /// One-time welcome credits when premium is first activated (server `PREMIUM_WELCOME_BONUS`).
+  static const int premiumWelcomeBonusCredits = 500;
 
-  /// Optional monthly bundle copy / server cron (not auto-applied in app yet).
-  static const int premiumMonthlyBundleCredits = 2000;
+  /// Monthly bonus range midpoint (server `POST /claim-premium-monthly-bonus`).
+  static const int premiumMonthlyBundleCredits = 400;
+
+  /// After balance hits 0 on a premium call, keep the line open this many seconds (once per call; UI + no extra ticks).
+  static const int premiumCallGraceSeconds = 20;
+
+  /// Starter pack: credits added on successful `starter_credits` purchase.
+  static const int starterPackCredits = 135;
 
   static int creditsPerMinuteForUser(bool isPremium) =>
       isPremium ? creditsPerMinutePremium : creditsPerMinute;
@@ -38,41 +53,44 @@ abstract final class CreditsPolicy {
   static int get creditsSavedPerMinuteVsFree =>
       creditsPerMinute - creditsPerMinutePremium;
 
-  /// First server pulse when the call becomes **Connected** (minimum charge bucket).
+  /// Legacy: first connect bucket in older docs; live ticks use [connectedLiveCreditPerTick].
   static const int creditsPerCallTick = 10;
 
-  /// Each `/call-live-tick` pulse while in call (every [connectedLiveCreditIntervalSec]).
+  /// Each `/call-live-tick` pulse while in call (**free:** every [connectedLiveCreditIntervalSec]).
   static const int connectedLiveCreditPerTick = 1;
 
   static const int connectedLiveCreditIntervalSec = 6;
 
-  /// Must match server `CALL_CREDITS_PER_MINUTE` — settlement: max(10, ceil(durationMin) × 10) minus prepaid ticks.
+  /// Premium live tick period (ms): ~`60000 / creditsPerMinutePremium` → 7 credits / minute.
+  static const int premiumLiveTickPeriodMs =
+      8571; // round(60000 / 7); keep in sync with server settlement
+
+  static Duration get premiumLiveTickPeriod =>
+      const Duration(milliseconds: premiumLiveTickPeriodMs);
+
+  /// Settlement alignment for free tier (ceil(seconds / 6) tick units).
   static const int callCreditsPerBilledMinute = 10;
 
-  /// In-call balance check vs estimated charge (ceil(elapsed/60) × [callCreditsPerBilledMinute]).
+  static const int callCreditsPerBilledMinutePremium = 7;
+
+  static int callCreditsPerBilledMinuteForUser(bool isPremium) =>
+      isPremium ? callCreditsPerBilledMinutePremium : callCreditsPerBilledMinute;
+
   static const Duration callBalanceCheckInterval = Duration(seconds: 4);
-
-  /// Max rewarded ad **views** per calendar day (Firestore `adRewardsCount`).
-  static const int maxRewardedAdsPerDay = 24;
-
-  /// Minimum seconds between watching rewarded ads.
-  static const int adRewardCooldownSeconds = 20;
 
   static const Duration freeRewardCreditTtl = Duration(hours: 24);
 
+  /// Minimum balance to start a call (both tiers — credit-based calling).
   static const int minCreditsToStartCall = callCreditsPerBilledMinute;
 
-  /// Minimum balance to start a call — **Pro** users have unlimited calling (no minimum).
-  static int minCreditsToStartCallFor(bool isPremium) =>
-      isPremium ? 0 : minCreditsToStartCall;
+  static int minCreditsToStartCallFor(bool isPremium) => minCreditsToStartCall;
 
-  /// Show low-balance nudges when usable credits fall below this (free tier).
-  static const int lowCreditWarningThreshold = 5;
+  /// Show low-balance nudges when usable credits fall below this.
+  static const int lowCreditWarningThreshold = 10;
 
-  /// Consecutive calendar days with ≥1 rewarded ad — milestone bonuses (server `POST /grant-reward`).
+  /// Consecutive UTC days with ≥1 rewarded ad — milestone bonuses (server `POST /grant-reward`).
   static const List<int> adStreakMilestoneDays = [3, 7, 14, 30];
 
-  /// UI copy for next milestone bonus (align with server streak grants).
   static int streakBonusCreditsAtMilestoneDay(int day) {
     switch (day) {
       case 3:
@@ -88,7 +106,6 @@ abstract final class CreditsPolicy {
     }
   }
 
-  /// Next streak milestone strictly after [currentStreakDays], or `null` if none left.
   static ({int day, int bonusCredits})? nextStreakMilestoneAfter(int currentStreakDays) {
     for (final d in adStreakMilestoneDays) {
       if (currentStreakDays < d) {
@@ -99,25 +116,13 @@ abstract final class CreditsPolicy {
     return null;
   }
 
-  /// Must match server `ASSIGN_NUMBER_MIN_CREDITS` (POST `/assign-number`).
   static const int assignNumberMinCredits = 100;
-
-  /// Must match server `NUMBER_RENEW_ADS_REQUIRED` (POST `/renew-number` mode `ads`).
   static const int numberRenewAdsRequired = 5;
-
-  /// Must match server `NUMBER_RENEW_CREDITS` (POST `/renew-number` mode `credits`).
   static const int numberRenewCredits = 100;
-
-  /// Must match server `MAX_RENEWALS_PER_DAY` (POST `/renew-number`).
   static const int maxRenewalsPerDay = 2;
-
-  /// Must match server `SMS_OUTBOUND_CREDIT_COST` (POST `/send-sms`).
   static const int smsOutboundCreditCost = 3;
-
-  /// Must match server `ASSIGN_NUMBER_MIN_ADS_WATCHED` (lifetime `ads_watched_count`).
   static const int assignNumberMinAdsWatched = 50;
 
-  /// Must match server `PLAN_*_MS` defaults in `server/index.js` (assign-number lease).
   static int leaseDurationMsForPlanType(String? planType) {
     switch (planType?.toLowerCase().trim()) {
       case 'daily':
@@ -125,9 +130,9 @@ abstract final class CreditsPolicy {
       case 'weekly':
         return const Duration(days: 7).inMilliseconds;
       case 'monthly':
-        return 2592000000; // 30d — server PLAN_MONTHLY_MS default
+        return 2592000000;
       case 'yearly':
-        return 31536000000; // 365d — server PLAN_YEARLY_MS default
+        return 31536000000;
       default:
         return 2592000000;
     }

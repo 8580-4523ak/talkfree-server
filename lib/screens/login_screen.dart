@@ -12,6 +12,7 @@ import '../config/legal_urls.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../theme/system_ui.dart';
+import '../utils/app_snackbar.dart';
 import '../utils/app_strings.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -21,8 +22,10 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
+enum _LoginPending { none, google, guest }
+
 class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin {
-  bool _busy = false;
+  _LoginPending _pending = _LoginPending.none;
 
   late final AnimationController _drift = AnimationController(
     vsync: this,
@@ -64,7 +67,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   }
 
   Future<void> _onGoogleSignIn() async {
-    setState(() => _busy = true);
+    if (_pending != _LoginPending.none) return;
+    setState(() => _pending = _LoginPending.google);
     try {
       await AuthService().signInWithGoogle();
     } on FirebaseAuthException catch (e) {
@@ -72,44 +76,67 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       final msg = e.code == 'credential-already-in-use'
           ? 'This Google account is already registered. Sign out, then use Sign in with Google, or pick another Google account.'
           : 'Sign-in failed: ${e.message ?? e.code}';
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg)),
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: Text(msg),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Sign-in failed: $e')),
+        AppSnackBar.show(
+          context,
+          SnackBar(
+            content: Text('Sign-in failed: $e'),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
+          ),
         );
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _pending = _LoginPending.none);
     }
   }
 
   Future<void> _continueWithoutSignIn() async {
-    setState(() => _busy = true);
+    if (_pending != _LoginPending.none) return;
+    setState(() => _pending = _LoginPending.guest);
     try {
       await AuthService().signInAnonymously();
     } on FirebaseAuthException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        AppSnackBar.show(
+          context,
           SnackBar(
             content: Text(
               e.message?.contains('administrator') == true
                   ? 'Enable Anonymous sign-in in Firebase Console.'
                   : 'Guest sign-in failed: ${e.message ?? e.code}',
             ),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
           ),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Guest sign-in failed: $e')),
+        AppSnackBar.show(
+          context,
+          SnackBar(
+            content: Text('Guest sign-in failed: $e'),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
+          ),
         );
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _pending = _LoginPending.none);
     }
   }
 
@@ -191,7 +218,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                       children: [
                         const SizedBox(height: 32),
                         _LoginGlassCard(
-                          busy: _busy,
+                          pending: _pending,
                           textStagger: _textStagger,
                           onGoogle: _onGoogleSignIn,
                           onAnonymous: _continueWithoutSignIn,
@@ -214,7 +241,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
 class _LoginGlassCard extends StatelessWidget {
   const _LoginGlassCard({
-    required this.busy,
+    required this.pending,
     required this.textStagger,
     required this.onGoogle,
     required this.onAnonymous,
@@ -222,7 +249,7 @@ class _LoginGlassCard extends StatelessWidget {
     required this.onOpenPrivacy,
   });
 
-  final bool busy;
+  final _LoginPending pending;
   final Animation<double> textStagger;
   final VoidCallback onGoogle;
   final VoidCallback onAnonymous;
@@ -343,9 +370,10 @@ class _LoginGlassCard extends StatelessWidget {
               Material(
                 color: Colors.transparent,
                 child: InkWell(
-                  onTap: busy ? null : onGoogle,
+                  onTap: pending != _LoginPending.none ? null : onGoogle,
                   borderRadius: BorderRadius.circular(18),
                   splashColor: Colors.white.withValues(alpha: 0.15),
+                  splashFactory: InkRipple.splashFactory,
                   child: Ink(
                     height: 56,
                     decoration: BoxDecoration(
@@ -371,7 +399,7 @@ class _LoginGlassCard extends StatelessWidget {
                       ],
                     ),
                     child: Center(
-                      child: busy
+                      child: pending == _LoginPending.google
                           ? SizedBox(
                               width: 24,
                               height: 24,
@@ -408,9 +436,10 @@ class _LoginGlassCard extends StatelessWidget {
               Material(
                 color: Colors.transparent,
                 child: InkWell(
-                  onTap: busy ? null : onAnonymous,
+                  onTap: pending != _LoginPending.none ? null : onAnonymous,
                   borderRadius: BorderRadius.circular(18),
                   splashColor: AppColors.splashAccent.withValues(alpha: 0.12),
+                  splashFactory: InkRipple.splashFactory,
                   child: Ink(
                     height: 52,
                     decoration: BoxDecoration(
@@ -421,16 +450,25 @@ class _LoginGlassCard extends StatelessWidget {
                       color: Colors.white.withValues(alpha: 0.04),
                     ),
                     child: Center(
-                      child: Text(
-                        'Continue without signing in',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.inter(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.15,
-                          color: Colors.white.withValues(alpha: 0.88),
-                        ),
-                      ),
+                      child: pending == _LoginPending.guest
+                          ? SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.2,
+                                color: AppColors.splashAccent.withValues(alpha: 0.9),
+                              ),
+                            )
+                          : Text(
+                              'Continue without signing in',
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.inter(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.15,
+                                color: Colors.white.withValues(alpha: 0.88),
+                              ),
+                            ),
                     ),
                   ),
                 ),

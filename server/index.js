@@ -303,11 +303,18 @@ app.post("/call", async (req, res) => {
   res.send(voiceResponseDialPstn(to).toString());
 });
 
-const REWARD_GRANT_CREDITS = Number(process.env.REWARD_GRANT_CREDITS || 2);
+/** Free tier credits per ad after first lifetime (env override: `REWARD_GRANT_CREDITS_FREE`). */
+const REWARD_GRANT_CREDITS_FREE = Number(
+  process.env.REWARD_GRANT_CREDITS_FREE ?? process.env.REWARD_GRANT_CREDITS ?? 10,
+);
+/** Premium tier credits per ad after first lifetime. */
+const REWARD_GRANT_CREDITS_PREMIUM = Number(process.env.REWARD_GRANT_CREDITS_PREMIUM || 20);
 /** First lifetime rewarded ad (`ads_watched_count` was 0) — welcome hook (default 10). */
 const FIRST_AD_GRANT_CREDITS = Number(process.env.FIRST_AD_GRANT_CREDITS || 10);
-const MAX_ADS_PER_DAY = 24;
-const AD_GAP_SECONDS = 20;
+const MAX_ADS_PER_DAY_FREE = Number(process.env.MAX_ADS_PER_DAY_FREE || 10);
+const MAX_ADS_PER_DAY_PREMIUM = Number(process.env.MAX_ADS_PER_DAY_PREMIUM || 25);
+const AD_GAP_SECONDS_FREE = Number(process.env.AD_GAP_SECONDS_FREE || 45);
+const AD_GAP_SECONDS_PREMIUM = Number(process.env.AD_GAP_SECONDS_PREMIUM || 10);
 
 function utcDayKey(d = new Date()) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
@@ -361,11 +368,15 @@ function readAdSubCounter(d) {
 }
 
 function readLastAdTimestamp(d) {
-  const a = d.last_ad_timestamp;
-  if (a && typeof a.toDate === "function") return a.toDate();
-  const b = d.lastAdRewardAt;
-  if (b && typeof b.toDate === "function") return b.toDate();
-  return null;
+  let best = null;
+  for (const k of ["last_ad_timestamp", "lastAdWatchTime", "lastAdRewardAt"]) {
+    const v = d[k];
+    if (v && typeof v.toDate === "function") {
+      const t = v.toDate();
+      if (!best || t > best) best = t;
+    }
+  }
+  return best;
 }
 
 function readFirestoreDate(d, keys) {
@@ -390,9 +401,9 @@ app.get("/grant-reward", (_req, res) => {
  * - Verifies Firebase ID token → uid.
  * - Each successful request adds REWARD_GRANT_CREDITS (default 2) to reward credits — **1 ad = 1 grant**.
  * - Legacy cycle fields (`ad_sub_counter`, `ad_progress`) are cleared to 0 each time.
- * - Daily cap: max 24 ads / UTC day (`ads_watched_today`).
+ * - Daily cap: 10 ads (free) / 25 (premium) per UTC day (`ads_watched_today`).
  * - Lifetime rewarded views: `ads_watched_count` += 1 each successful grant (Flutter unlock US number).
- * - Cooldown: must be ≥20s since `last_ad_timestamp` / `lastAdRewardAt` or returns **Wait** (429).
+ * - Cooldown: 45s (free) / 10s (premium) since last ad timestamp or returns **Wait** (429).
  * - Streak: consecutive UTC days with ≥1 rewarded ad — `ad_streak_count` / `ad_streak_last_day`;
  *   milestone bonuses added to the same grant (see AD_STREAK_MILESTONE_BONUS).
  */
@@ -427,6 +438,7 @@ app.post("/grant-reward", async (req, res) => {
     streakCount: 0,
     adSubCounter: 0,
     adsWatchedToday: 0,
+    remainingDailyAds: 0,
     firstLifetimeAd: false,
   };
 
@@ -440,6 +452,9 @@ app.post("/grant-reward", async (req, res) => {
       const dayKey = utcDayKey(now);
 
       const d = doc.exists ? doc.data() : {};
+      const premium = readIsPremium(d);
+      const maxAds = premium ? MAX_ADS_PER_DAY_PREMIUM : MAX_ADS_PER_DAY_FREE;
+      const adGap = premium ? AD_GAP_SECONDS_PREMIUM : AD_GAP_SECONDS_FREE;
 
       const lifetimeAdsBefore = Number(d.ads_watched_count ?? 0);
       grantFirstLifetimeAd = lifetimeAdsBefore === 0;
@@ -451,20 +466,24 @@ app.post("/grant-reward", async (req, res) => {
         storedDay = dayKey;
       }
 
-      if (adsToday >= MAX_ADS_PER_DAY) {
+      if (adsToday >= maxAds) {
         throw Object.assign(new Error("Limit Reached"), { http: 403 });
       }
 
       const lastAd = readLastAdTimestamp(d);
       if (lastAd) {
         const elapsedSec = (now - lastAd) / 1000;
-        if (elapsedSec < AD_GAP_SECONDS) {
-          const waitSeconds = Math.ceil(AD_GAP_SECONDS - elapsedSec);
+        if (elapsedSec < adGap) {
+          const waitSeconds = Math.ceil(adGap - elapsedSec);
           throw Object.assign(new Error("Wait"), { http: 429, waitSeconds });
         }
       }
 
-      const baseCredits = grantFirstLifetimeAd ? FIRST_AD_GRANT_CREDITS : REWARD_GRANT_CREDITS;
+      const baseCredits = grantFirstLifetimeAd
+        ? FIRST_AD_GRANT_CREDITS
+        : premium
+          ? REWARD_GRANT_CREDITS_PREMIUM
+          : REWARD_GRANT_CREDITS_FREE;
 
       const lastStreakDay = String(d.ad_streak_last_day || "");
       let streakCount = Number(d.ad_streak_count || 0);
@@ -521,7 +540,9 @@ app.post("/grant-reward", async (req, res) => {
         last_reset_date: storedDay,
         adRewardsDayKey: storedDay,
         last_ad_timestamp: FieldValue.serverTimestamp(),
+        lastAdWatchTime: FieldValue.serverTimestamp(),
         lastAdRewardAt: FieldValue.serverTimestamp(),
+        adsWatchedToday: adsTodayNew,
         ad_streak_count: streakCount,
         ad_streak_last_day: lastStreakDay === dayKey ? lastStreakDay : dayKey,
         paidCredits: paid,
@@ -567,6 +588,7 @@ app.post("/grant-reward", async (req, res) => {
         streakCount,
         adSubCounter: 0,
         adsWatchedToday: adsTodayNew,
+        remainingDailyAds: Math.max(0, maxAds - adsTodayNew),
         firstLifetimeAd: grantFirstLifetimeAd,
       };
     });
@@ -600,17 +622,24 @@ app.post("/claim-welcome-bonus", (_req, res) => {
 const SUBSCRIPTION_PLAN_AMOUNTS_INR = {
   daily: 8300,
   weekly: 41500,
-  monthly: 124900,
-  yearly: 829900,
+  /** ₹349 / month — within ₹299–₹399 product band. */
+  monthly: 34900,
+  /** ₹1149 / year — within ₹999–₹1299 product band. */
+  yearly: 114900,
+  /** Starter credit pack — ₹59 (120–150 credits on grant). */
+  starter_credits: 5900,
 };
 const SUBSCRIPTION_PLAN_AMOUNTS_USD = {
   daily: 99,
   weekly: 499,
-  monthly: 1499,
-  yearly: 9999,
+  monthly: 499,
+  yearly: 12999,
+  starter_credits: 99,
 };
 
-const PREMIUM_WELCOME_BONUS = Number(process.env.PREMIUM_WELCOME_BONUS || 1000);
+const PREMIUM_WELCOME_BONUS = Number(process.env.PREMIUM_WELCOME_BONUS || 500);
+const STARTER_PACK_CREDITS = Number(process.env.STARTER_PACK_CREDITS || 135);
+const PREMIUM_MONTHLY_BONUS_CREDITS = Number(process.env.PREMIUM_MONTHLY_BONUS_CREDITS || 400);
 
 function subscriptionExpiryFromPlan(plan) {
   const now = Date.now();
@@ -688,7 +717,7 @@ app.post("/create-subscription-order", async (req, res) => {
   if (!plan) {
     return res.status(400).json({
       error: "Missing or invalid plan",
-      expected: ["daily", "weekly", "monthly", "yearly"],
+      expected: ["daily", "weekly", "monthly", "yearly", "starter_credits"],
     });
   }
   const currency = String(process.env.RAZORPAY_CURRENCY || "INR")
@@ -840,6 +869,25 @@ app.post("/verify-payment", async (req, res) => {
         paid += reward;
         reward = 0;
       }
+      if (plan === "starter_credits") {
+        paid += STARTER_PACK_CREDITS;
+        const total = paid + reward;
+        t.update(ref, {
+          last_razorpay_payment_id: razorpay_payment_id,
+          paidCredits: paid,
+          rewardCredits: reward,
+          rewardCreditsExpiresAt: reward > 0 ? expTs : null,
+          credits: total,
+        });
+        return {
+          ok: true,
+          idempotent: false,
+          plan,
+          starterCreditsAdded: STARTER_PACK_CREDITS,
+          welcomeBonus: 0,
+        };
+      }
+
       let bonus = 0;
       if (d.premiumWelcomeBonusGranted !== true && PREMIUM_WELCOME_BONUS > 0) {
         bonus = PREMIUM_WELCOME_BONUS;
@@ -847,9 +895,10 @@ app.post("/verify-payment", async (req, res) => {
       }
       const total = paid + reward;
       const expDate = subscriptionExpiryFromPlan(plan);
-      t.update(ref, {
+      const premiumPatch = {
         isPremium: true,
-        subscription_tier: "pro",
+        subscription_tier: "premium",
+        subscriptionTier: "premium",
         premium_plan_type: plan,
         number_expiry_date: Timestamp.fromDate(expDate),
         expiry_date: Timestamp.fromDate(expDate),
@@ -861,7 +910,12 @@ app.post("/verify-payment", async (req, res) => {
         rewardCredits: reward,
         rewardCreditsExpiresAt: reward > 0 ? expTs : null,
         credits: total,
-      });
+      };
+      if (bonus > 0) {
+        premiumPatch.lastMonthlyBonus = FieldValue.serverTimestamp();
+        premiumPatch.last_monthly_bonus_at = FieldValue.serverTimestamp();
+      }
+      t.update(ref, premiumPatch);
       return { ok: true, idempotent: false, plan, welcomeBonus: bonus };
     });
     return res.status(200).json(out);
@@ -871,6 +925,92 @@ app.post("/verify-payment", async (req, res) => {
     return res.status(code >= 400 && code < 600 ? code : 500).json({
       error: String(e.message || e),
     });
+  }
+});
+
+/**
+ * POST /claim-premium-monthly-bonus — Firebase Bearer; grants recurring premium credits (~monthly).
+ * Idempotent within the same calendar month (UTC) using `lastMonthlyBonus` / `last_monthly_bonus_at`.
+ */
+app.post("/claim-premium-monthly-bonus", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  const { FieldValue } = firebaseAdmin.firestore;
+  const monthKey = utcDayKey(new Date()).slice(0, 7);
+
+  try {
+    const out = await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) {
+        throw Object.assign(new Error("User document not found"), { http: 404 });
+      }
+      const d = snap.data() || {};
+      if (!readIsPremium(d)) {
+        throw Object.assign(new Error("Not premium"), { http: 403 });
+      }
+      const lastRaw = d.lastMonthlyBonus || d.last_monthly_bonus_at;
+      let lastMonthKey = "";
+      if (lastRaw && typeof lastRaw.toDate === "function") {
+        lastMonthKey = utcDayKey(lastRaw.toDate()).slice(0, 7);
+      }
+      if (lastMonthKey === monthKey) {
+        return { ok: true, granted: false, reason: "already_claimed_this_month" };
+      }
+
+      let paid = Number(d.paidCredits ?? 0);
+      let reward = Number(d.rewardCredits ?? 0);
+      if (d.paidCredits === undefined && d.credits != null) {
+        paid = Number(d.credits);
+        reward = 0;
+      }
+      const now = new Date();
+      const expTs = d.rewardCreditsExpiresAt;
+      if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
+        paid += reward;
+        reward = 0;
+      }
+      paid += PREMIUM_MONTHLY_BONUS_CREDITS;
+      const total = paid + reward;
+      t.update(ref, {
+        paidCredits: paid,
+        rewardCredits: reward,
+        rewardCreditsExpiresAt: reward > 0 ? expTs : null,
+        credits: total,
+        lastMonthlyBonus: FieldValue.serverTimestamp(),
+        last_monthly_bonus_at: FieldValue.serverTimestamp(),
+      });
+      return {
+        ok: true,
+        granted: true,
+        creditsAdded: PREMIUM_MONTHLY_BONUS_CREDITS,
+        newBalance: total,
+      };
+    });
+    return res.status(200).json(out);
+  } catch (e) {
+    const code = e.http || 500;
+    if (code === 403) {
+      return res.status(403).json({ error: String(e.message || e) });
+    }
+    if (code === 404) {
+      return res.status(404).json({ error: String(e.message || e) });
+    }
+    console.error("claim-premium-monthly-bonus:", e);
+    return res.status(500).json({ error: String(e.message || e) });
   }
 });
 
@@ -1127,7 +1267,8 @@ app.post("/admin/upgrade-user", async (req, res) => {
       const total = paid + reward;
       t.update(ref, {
         isPremium: true,
-        subscription_tier: "pro",
+        subscription_tier: "premium",
+        subscriptionTier: "premium",
         paidCredits: paid,
         credits: total,
         premiumWelcomeBonusGranted: true,
@@ -1223,7 +1364,7 @@ function normalizePlanType(raw) {
   const s = String(raw ?? "")
     .trim()
     .toLowerCase();
-  if (["daily", "weekly", "monthly", "yearly"].includes(s)) return s;
+  if (["daily", "weekly", "monthly", "yearly", "starter_credits"].includes(s)) return s;
   return null;
 }
 
@@ -2975,10 +3116,10 @@ async function settleOutboundCallBill({
     const prepaid = Number(liveSnap.exists ? liveSnap.data()?.liveDeductedCredits || 0 : 0);
 
     const d = userSnap.data();
-    const tickUnits = Math.ceil(ds / 6);
     const premium = readIsPremium(d);
-    /** Pro: no per-call credit charge (unlimited calling). */
-    const billCredits = premium ? 0 : tickUnits;
+    /** Billed tick units: free = 1 credit / 6s; premium = 7 credits/min (align with ~8571ms live ticks). */
+    const tickUnits = premium ? Math.ceil((ds * CALL_CREDITS_PER_MINUTE_PREMIUM) / 60) : Math.ceil(ds / 6);
+    const billCredits = tickUnits;
     let paid = Number(d.paidCredits ?? 0);
     let reward = Number(d.rewardCredits ?? 0);
     const now = new Date();
@@ -3127,11 +3268,6 @@ app.post("/call-live-tick", async (req, res) => {
   }
 
   const db = firebaseAdmin.firestore();
-  const premiumSnap = await db.collection("users").doc(uid).get();
-  if (premiumSnap.exists && readIsPremium(premiumSnap.data())) {
-    return res.status(200).json({ ok: true, unlimited: true });
-  }
-
   const { FieldValue } = firebaseAdmin.firestore;
 
   try {

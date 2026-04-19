@@ -48,13 +48,23 @@ class FirestoreUserService {
         m['last_reset_date'] as String? ?? m['adRewardsDayKey'] as String? ?? '';
     if (reset != dayKey) return 0;
     if (m.containsKey('ads_watched_today')) return _int(m['ads_watched_today']);
+    if (m.containsKey('adsWatchedToday')) return _int(m['adsWatchedToday']);
     return _int(m['adRewardsCount']);
   }
 
   static Timestamp? _readLastAdTimestamp(Map<String, dynamic> m) {
-    final a = m['last_ad_timestamp'];
-    if (a is Timestamp) return a;
-    return m['lastAdRewardAt'] as Timestamp?;
+    DateTime? best;
+    Timestamp? bestTs;
+    for (final k in ['last_ad_timestamp', 'lastAdWatchTime', 'lastAdRewardAt']) {
+      final a = m[k];
+      if (a is! Timestamp) continue;
+      final t = a.toDate().toUtc();
+      if (best == null || t.isAfter(best)) {
+        best = t;
+        bestTs = a;
+      }
+    }
+    return bestTs;
   }
 
   static void _migrateLegacyInPlace(Map<String, dynamic> d) {
@@ -195,9 +205,16 @@ class FirestoreUserService {
     return s == 'pro' || s == 'premium';
   }
 
-  /// `'free'` | `'pro'` — derived from [isPremiumFromUserData].
+  /// `'free'` | `'premium'` — derived from [isPremiumFromUserData].
   static String subscriptionTierFromUserData(Map<String, dynamic>? data) {
-    return isPremiumFromUserData(data) ? 'pro' : 'free';
+    return isPremiumFromUserData(data) ? 'premium' : 'free';
+  }
+
+  /// Dashboard / nav: treat legacy `'pro'` the same as `'premium'`.
+  static bool isPremiumTierLabel(String? tier) {
+    if (tier == null) return false;
+    final s = tier.toLowerCase().trim();
+    return s == 'pro' || s == 'premium';
   }
 
   /// Outbound calls completed (server increments on Twilio settlement).
@@ -493,16 +510,20 @@ class FirestoreUserService {
         storedDay = dayKey;
       }
 
+      final premium = isPremiumFromUserData(m);
+      final coolDownSec = CreditsPolicy.adRewardCooldownSecondsForUser(premium);
+      final cap = CreditsPolicy.maxRewardedAdsForUser(premium);
+
       final lastTs = _readLastAdTimestamp(m);
       if (lastTs != null) {
         final elapsed = now.difference(lastTs.toDate().toUtc()).inSeconds;
-        if (elapsed < CreditsPolicy.adRewardCooldownSeconds) {
-          final wait = CreditsPolicy.adRewardCooldownSeconds - elapsed;
+        if (elapsed < coolDownSec) {
+          final wait = coolDownSec - elapsed;
           throw AdRewardCooldownException('Please wait $wait seconds');
         }
       }
 
-      if (count >= CreditsPolicy.maxRewardedAdsPerDay) {
+      if (count >= cap) {
         throw AdRewardDailyCapException();
       }
 
@@ -511,8 +532,10 @@ class FirestoreUserService {
         'ad_sub_counter': 0,
         'adRewardCycleCount': 0,
         'ads_watched_today': count + 1,
+        'adsWatchedToday': count + 1,
         'last_reset_date': storedDay,
         'last_ad_timestamp': FieldValue.serverTimestamp(),
+        'lastAdWatchTime': FieldValue.serverTimestamp(),
         'adRewardsCount': count + 1,
         'adRewardsDayKey': storedDay,
         'lastAdRewardAt': FieldValue.serverTimestamp(),
@@ -621,16 +644,18 @@ class FirestoreUserService {
     final dayKey =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     final count = _readAdsWatchedToday(m, dayKey);
+    final premium = isPremiumFromUserData(m);
+    final coolDownSec = CreditsPolicy.adRewardCooldownSecondsForUser(premium);
+    final cap = CreditsPolicy.maxRewardedAdsForUser(premium);
 
     var cool = 0;
     final last = _readLastAdTimestamp(m);
     if (last != null) {
       final elapsed = now.difference(last.toDate().toUtc()).inSeconds;
-      if (elapsed < CreditsPolicy.adRewardCooldownSeconds) {
-        cool = CreditsPolicy.adRewardCooldownSeconds - elapsed;
+      if (elapsed < coolDownSec) {
+        cool = coolDownSec - elapsed;
       }
     }
-    final cap = CreditsPolicy.maxRewardedAdsPerDay;
     final dailyLimitReached = count >= cap;
     return (
       adsToday: count,

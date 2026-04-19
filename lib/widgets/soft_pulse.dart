@@ -18,7 +18,7 @@ class SoftPulse extends StatefulWidget {
 class _SoftPulseState extends State<SoftPulse> with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 2400),
+    duration: const Duration(milliseconds: 3200),
   );
 
   @override
@@ -52,8 +52,8 @@ class _SoftPulseState extends State<SoftPulse> with SingleTickerProviderStateMix
     return AnimatedBuilder(
       animation: _c,
       builder: (context, child) {
-        final t = Curves.easeInOut.transform(_c.value);
-        final s = 1.0 + 0.014 * t;
+        final t = Curves.easeOutCubic.transform(_c.value);
+        final s = 1.0 + 0.004 * t;
         return Transform.scale(scale: s, alignment: Alignment.center, child: child);
       },
       child: widget.child,

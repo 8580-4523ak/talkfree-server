@@ -17,6 +17,8 @@ import '../widgets/voip_gate_dialog.dart';
 import '../services/firestore_user_service.dart';
 import '../services/call_live_billing_service.dart';
 import '../services/twilio_voip_facade.dart';
+import '../utils/app_snackbar.dart';
+import '../utils/monetization_copy.dart';
 import '../utils/user_facing_service_error.dart';
 import '../widgets/premium_ios_dial_pad.dart' show premiumDialCallGreen;
 
@@ -88,8 +90,20 @@ class _CallingScreenState extends State<CallingScreen>
   String? _activeCallSid;
   /// Tier-2 settlement in progress — shows a light overlay so the 5s window does not feel frozen.
   bool _finalizingBill = false;
-  /// Cached at dial — Pro users skip live ticks, balance UI, and [CallService] enforcement.
+  /// Cached at dial — affects live tick cadence, grace window, and [CallService] enforcement.
   bool _isPremium = false;
+
+  /// Premium-only: hang up after [CreditsPolicy.premiumCallGraceSeconds] once balance hits 0.
+  Timer? _graceHangupTimer;
+
+  /// Premium grace UX — “Grace mode active” chip while the grace timer runs.
+  final ValueNotifier<bool> _graceModeActive = ValueNotifier<bool>(false);
+
+  /// Premium: at most one grace window per call; a second zero-balance event ends the call.
+  bool _premiumGraceConsumed = false;
+
+  /// Free tier: show Pro benefit snack once per connected session when balance is low.
+  bool _inCallPremiumBenefitNudgeShown = false;
 
   late final AnimationController _callVisualPulse = AnimationController(
     vsync: this,
@@ -98,7 +112,7 @@ class _CallingScreenState extends State<CallingScreen>
 
   late final AnimationController _creditPulse = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 420),
+    duration: const Duration(milliseconds: 260),
   );
 
   /// Cached so the 1 Hz timer subtree does not re-resolve fonts every tick.
@@ -111,7 +125,8 @@ class _CallingScreenState extends State<CallingScreen>
       fontSize: 56,
       fontWeight: FontWeight.w300,
       color: Colors.white,
-      letterSpacing: 2,
+      letterSpacing: 0.5,
+      fontFeatures: const [FontFeature.tabularFigures()],
     );
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -129,7 +144,6 @@ class _CallingScreenState extends State<CallingScreen>
 
   void _onLiveCreditTick(Timer timer) {
     if (!mounted) return;
-    if (_isPremium) return;
     final sid = _activeCallSid;
     if (sid == null || sid.isEmpty) return;
     if (kDebugMode) {
@@ -160,10 +174,47 @@ class _CallingScreenState extends State<CallingScreen>
           if (display == null || !mounted) return;
           _creditsNotifier.value = display;
           _creditPulse.forward(from: 0);
+          if (!_isPremium &&
+              !_inCallPremiumBenefitNudgeShown &&
+              display > 0 &&
+              display <= CreditsPolicy.lowCreditWarningThreshold) {
+            _inCallPremiumBenefitNudgeShown = true;
+            AppSnackBar.show(
+              context,
+              SnackBar(
+                margin: AppTheme.snackBarFloatingMargin(context),
+                elevation: 0,
+                backgroundColor: AppColors.cardDark.withValues(alpha: 0.94),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.08),
+                  ),
+                ),
+                content: Text(
+                  MonetizationCopy.inCallLowCreditsProBenefit(
+                    premiumCreditsPerMin: CreditsPolicy.creditsPerMinutePremium,
+                  ),
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w500,
+                    fontSize: 13,
+                    height: 1.35,
+                    color: Colors.white.withValues(alpha: 0.82),
+                  ),
+                ),
+                behavior: SnackBarBehavior.floating,
+                duration: AppTheme.snackBarCalmDuration,
+              ),
+            );
+          }
           if (display <= 0) {
-            timer.cancel();
-            _liveCreditTicker = null;
-            unawaited(_autoHangupLowCredits());
+            if (_isPremium) {
+              _beginPremiumGraceIfNeeded(timer);
+            } else {
+              timer.cancel();
+              _liveCreditTicker = null;
+              unawaited(_autoHangupLowCredits());
+            }
           }
         })
         .catchError((Object e, StackTrace st) {
@@ -173,11 +224,40 @@ class _CallingScreenState extends State<CallingScreen>
         });
   }
 
+  void _beginPremiumGraceIfNeeded(Timer timer) {
+    if (_premiumGraceConsumed) {
+      timer.cancel();
+      _liveCreditTicker = null;
+      _graceHangupTimer?.cancel();
+      _graceHangupTimer = null;
+      _graceModeActive.value = false;
+      unawaited(_autoHangupLowCredits());
+      return;
+    }
+    if (_graceHangupTimer != null) return;
+    _premiumGraceConsumed = true;
+    timer.cancel();
+    _liveCreditTicker = null;
+    _graceHangupTimer = Timer(
+      Duration(seconds: CreditsPolicy.premiumCallGraceSeconds),
+      () {
+        _graceHangupTimer = null;
+        _graceModeActive.value = false;
+        if (!mounted) return;
+        unawaited(_autoHangupLowCredits());
+      },
+    );
+    _graceModeActive.value = true;
+  }
+
   void _cancelConnectedTimers() {
     _elapsedTimer?.cancel();
     _elapsedTimer = null;
     _liveCreditTicker?.cancel();
     _liveCreditTicker = null;
+    _graceHangupTimer?.cancel();
+    _graceHangupTimer = null;
+    _graceModeActive.value = false;
   }
 
   Future<void> _startConnectedCreditTimer() async {
@@ -196,33 +276,9 @@ class _CallingScreenState extends State<CallingScreen>
       return;
     }
     _connectedCreditTimerStarted = true;
-
-    if (_isPremium) {
-      var sid = _activeCallSid ?? '';
-      for (var i = 0; i < 50 && sid.isEmpty; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-        if (!mounted) return;
-        final g = await TwilioVoipFacade.instance.getActiveCallSid();
-        if (g != null && g.isNotEmpty) {
-          sid = g;
-          _activeCallSid = g;
-          CallService.instance.setActiveCallSid(g);
-        }
-      }
-      if (kDebugMode) {
-        debugPrint(
-          'DEBUG: Pro — unlimited in-call UI; no /call-live-tick '
-          '(sid=${sid.isEmpty ? "none" : "ok"})',
-        );
-      }
-      if (!mounted) return;
-      _creditsNotifier.value = CreditsPolicy.unlimitedBalanceUiSentinel;
-      _creditPulse.forward(from: 0);
-      _cancelConnectedTimers();
-      _elapsedNotifier.value = 0;
-      _elapsedTimer = Timer.periodic(const Duration(seconds: 1), _onElapsedTick);
-      return;
-    }
+    _premiumGraceConsumed = false;
+    _inCallPremiumBenefitNudgeShown = false;
+    _graceModeActive.value = false;
 
     final credits = await FirestoreUserService.fetchUsableCredits(
       widget.user.uid,
@@ -254,8 +310,9 @@ class _CallingScreenState extends State<CallingScreen>
 
     if (kDebugMode) {
       debugPrint(
-        'DEBUG: Connected → no immediate live charge; first /call-live-tick (1) after '
-        '${CreditsPolicy.connectedLiveCreditIntervalSec}s (min charge still applied at settlement)',
+        'DEBUG: Connected → first /call-live-tick after '
+        '${_isPremium ? "${CreditsPolicy.premiumLiveTickPeriodMs}ms (premium)" : "${CreditsPolicy.connectedLiveCreditIntervalSec}s (free)"} '
+        '(settlement reconciles Twilio duration)',
       );
     }
 
@@ -265,14 +322,20 @@ class _CallingScreenState extends State<CallingScreen>
     _cancelConnectedTimers();
     _elapsedNotifier.value = 0;
     _elapsedTimer = Timer.periodic(const Duration(seconds: 1), _onElapsedTick);
-    _liveCreditTicker = Timer.periodic(
-      Duration(seconds: CreditsPolicy.connectedLiveCreditIntervalSec),
-      _onLiveCreditTick,
-    );
+    if (_isPremium) {
+      _liveCreditTicker = Timer.periodic(
+        CreditsPolicy.premiumLiveTickPeriod,
+        _onLiveCreditTick,
+      );
+    } else {
+      _liveCreditTicker = Timer.periodic(
+        Duration(seconds: CreditsPolicy.connectedLiveCreditIntervalSec),
+        _onLiveCreditTick,
+      );
+    }
     if (kDebugMode) {
       debugPrint(
-        'DEBUG: Started _elapsedTimer (1s) + _liveCreditTicker → /call-live-tick '
-        '(${CreditsPolicy.connectedLiveCreditIntervalSec}s)',
+        'DEBUG: Started _elapsedTimer (1s) + _liveCreditTicker (premium=$_isPremium)',
       );
     }
   }
@@ -289,8 +352,14 @@ class _CallingScreenState extends State<CallingScreen>
       await TwilioVoipFacade.instance.hangUp();
     } catch (_) {}
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Not enough credits')),
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: const Text('Not enough credits'),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
       await _popWithFirestoreSync(
         exitReason: CallingScreenExitReason.insufficientCredits,
@@ -599,12 +668,15 @@ class _CallingScreenState extends State<CallingScreen>
         // Not a runtime permission — OEM "Calling accounts" toggle. Open system UI directly;
         // runtime mic/phone were already requested on the dialer.
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
+          AppSnackBar.show(
+            context,
+            SnackBar(
+              content: const Text(
                 'Turn on TalkFree in Calling accounts — the settings screen will open.',
               ),
-              duration: Duration(seconds: 5),
+              behavior: SnackBarBehavior.floating,
+              margin: AppTheme.snackBarFloatingMargin(context),
+              duration: const Duration(seconds: 5),
             ),
           );
           try {
@@ -657,8 +729,14 @@ class _CallingScreenState extends State<CallingScreen>
     await _callSub?.cancel();
     _callSub = null;
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Not enough credits')),
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: const Text('Not enough credits'),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
       await _popWithFirestoreSync(
         exitReason: CallingScreenExitReason.insufficientCredits,
@@ -681,6 +759,7 @@ class _CallingScreenState extends State<CallingScreen>
 
   @override
   void dispose() {
+    _graceModeActive.dispose();
     _elapsedNotifier.dispose();
     _creditsNotifier.dispose();
     _callVisualPulse.dispose();
@@ -698,11 +777,9 @@ class _CallingScreenState extends State<CallingScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      if (!_isPremium) {
-        unawaited(CallService.instance.syncAfterAppResumed());
-      }
+      unawaited(CallService.instance.syncAfterAppResumed());
       final sid = _activeCallSid;
-      if (!_isPremium && sid != null && sid.isNotEmpty) {
+      if (sid != null && sid.isNotEmpty) {
         unawaited(CallLiveBillingService.instance.flushPendingTicksForCall(sid));
       }
     }
@@ -756,6 +833,8 @@ class _CallingScreenState extends State<CallingScreen>
                       color: Colors.white70,
                     ),
                   ),
+                  if (_isPremium)
+                    _GraceModeSlot(listenable: _graceModeActive),
                   if (!kIsWeb &&
                       Platform.isAndroid &&
                       (_statusLine == 'Connected' || _statusLine == 'Calling...')) ...[
@@ -786,6 +865,7 @@ class _CallingScreenState extends State<CallingScreen>
                             child: _NeonCreditsBalance(
                               credits: credits,
                               pulse: _creditPulse,
+                              isPremium: _isPremium,
                             ),
                           ),
                         ],
@@ -846,7 +926,7 @@ class _CallingScreenState extends State<CallingScreen>
                       height: 36,
                       child: CircularProgressIndicator(
                         strokeWidth: 2.5,
-                        color: Color(0xFF39FF14),
+                        color: Color(0xFF00C853),
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -876,57 +956,215 @@ class _CallingScreenState extends State<CallingScreen>
   }
 }
 
-/// Live balance: neon green with a short pulse when the value drops.
+/// Live balance — brand green, subtle motion (no neon glow).
+/// Premium: softer tick pulse + cross-fade on value changes for a steadier feel.
 class _NeonCreditsBalance extends StatelessWidget {
   const _NeonCreditsBalance({
     required this.credits,
     required this.pulse,
+    this.isPremium = false,
   });
 
   final int credits;
   final Animation<double> pulse;
+  final bool isPremium;
 
-  static const Color _neon = Color(0xFF39FF14);
+  static const Color _green = Color(0xFF00C853);
 
   @override
   Widget build(BuildContext context) {
-    final unlimited =
-        credits == CreditsPolicy.unlimitedBalanceUiSentinel;
     return AnimatedBuilder(
       animation: pulse,
       builder: (context, child) {
         final u = Curves.easeOutCubic.transform(pulse.value);
-        final scale = 1.0 + 0.1 * (1.0 - u);
-        final blur = 10.0 + 18.0 * (1.0 - u);
+        final amp = isPremium ? 0.0085 : 0.04;
+        final scale = 1.0 + amp * (1.0 - u);
+        final textStyle = GoogleFonts.poppins(
+          fontSize: isPremium ? 25 : 24,
+          fontWeight: FontWeight.w800,
+          color: _green,
+          letterSpacing: 0,
+          height: 1.2,
+          fontFeatures: const [FontFeature.tabularFigures()],
+          shadows: const [
+            Shadow(
+              color: Color(0x66000000),
+              blurRadius: 10,
+              offset: Offset(0, 4),
+            ),
+          ],
+        );
+        final childW = isPremium
+            ? AnimatedSwitcher(
+                duration: const Duration(milliseconds: 260),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeOutCubic,
+                transitionBuilder: (Widget w, Animation<double> a) {
+                  final curved = CurvedAnimation(
+                    parent: a,
+                    curve: Curves.easeOutCubic,
+                    reverseCurve: Curves.easeOutCubic,
+                  );
+                  return FadeTransition(
+                    opacity: curved,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0, 0.05),
+                        end: Offset.zero,
+                      ).animate(curved),
+                      child: w,
+                    ),
+                  );
+                },
+                child: Padding(
+                  key: ValueKey<int>(credits),
+                  padding: EdgeInsets.zero,
+                  child: Text(
+                    '$credits credits',
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    style: textStyle,
+                  ),
+                ),
+              )
+            : Text(
+                '$credits credits',
+                key: ValueKey<int>(credits),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                style: textStyle,
+              );
         return Transform.scale(
           scale: scale,
-          child: Text(
-            unlimited
-                ? 'Unlimited calling (Pro)'
-                : '$credits credits',
-            key: ValueKey<Object>(unlimited ? 'unlimited' : credits),
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            style: GoogleFonts.poppins(
-              fontSize: unlimited ? 20 : 24,
-              fontWeight: FontWeight.w800,
-              color: _neon,
-              letterSpacing: unlimited ? 0.4 : 0.8,
-              height: 1.2,
-              shadows: [
-                Shadow(
-                  color: _neon.withValues(alpha: 0.92),
-                  blurRadius: blur,
-                ),
-                Shadow(
-                  color: _neon.withValues(alpha: 0.55),
-                  blurRadius: 3,
-                ),
-              ],
-            ),
+          child: childW,
+        );
+      },
+    );
+  }
+}
+
+/// Delays grace chip in/out slightly so the transition feels calm (presentation only).
+class _GraceModeSlot extends StatefulWidget {
+  const _GraceModeSlot({required this.listenable});
+
+  final ValueListenable<bool> listenable;
+
+  @override
+  State<_GraceModeSlot> createState() => _GraceModeSlotState();
+}
+
+class _GraceModeSlotState extends State<_GraceModeSlot> {
+  bool _visible = false;
+  int _scheduleGen = 0;
+
+  void _onGraceChanged() {
+    final on = widget.listenable.value;
+    final gen = ++_scheduleGen;
+    if (on) {
+      Future<void>.delayed(const Duration(milliseconds: 100), () {
+        if (!mounted || gen != _scheduleGen) return;
+        if (widget.listenable.value) setState(() => _visible = true);
+      });
+    } else {
+      Future<void>.delayed(const Duration(milliseconds: 85), () {
+        if (!mounted || gen != _scheduleGen) return;
+        if (!widget.listenable.value) setState(() => _visible = false);
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.listenable.addListener(_onGraceChanged);
+    if (widget.listenable.value) _onGraceChanged();
+  }
+
+  @override
+  void didUpdateWidget(covariant _GraceModeSlot oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.listenable != widget.listenable) {
+      oldWidget.listenable.removeListener(_onGraceChanged);
+      widget.listenable.addListener(_onGraceChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.listenable.removeListener(_onGraceChanged);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeOutCubic,
+      transitionBuilder: (Widget child, Animation<double> a) {
+        final curved = CurvedAnimation(
+          parent: a,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeOutCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.06),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
           ),
         );
       },
+      child: _visible
+          ? Padding(
+              key: const ValueKey<String>('grace_show'),
+              padding: const EdgeInsets.only(top: 10),
+              child: const _GraceModeChip(),
+            )
+          : const SizedBox.shrink(key: ValueKey<String>('grace_hide')),
+    );
+  }
+}
+
+/// Premium-only: subtle chip while post-zero grace is active.
+class _GraceModeChip extends StatelessWidget {
+  const _GraceModeChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: 0.96,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          color: AppColors.accentGold.withValues(alpha: 0.065),
+          border: Border.all(
+            color: AppColors.accentGold.withValues(alpha: 0.18),
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x18000000),
+              blurRadius: 14,
+              offset: Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+          child: Text(
+            '⚡ Grace mode active',
+            style: GoogleFonts.inter(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.02,
+              color: AppColors.accentGold.withValues(alpha: 0.82),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -961,11 +1199,12 @@ class _ActiveCallPulseHeader extends StatelessWidget {
                       premiumDialCallGreen.withValues(alpha: 0.05),
                     ],
                   ),
-                  boxShadow: [
+                  boxShadow: const [
                     BoxShadow(
-                      color: premiumDialCallGreen.withValues(alpha: 0.45),
-                      blurRadius: 22,
-                      spreadRadius: 2,
+                      color: Color(0x59000000),
+                      blurRadius: 18,
+                      spreadRadius: 0,
+                      offset: Offset(0, 6),
                     ),
                   ],
                 ),
@@ -997,10 +1236,10 @@ class _ActiveCallPulseHeader extends StatelessWidget {
               color: premiumDialCallGreen.withValues(alpha: 0.5),
               width: 1.5,
             ),
-            boxShadow: [
+            boxShadow: const [
               BoxShadow(
-                color: premiumDialCallGreen.withValues(alpha: 0.25),
-                blurRadius: 14,
+                color: Color(0x40000000),
+                blurRadius: 10,
               ),
             ],
           ),

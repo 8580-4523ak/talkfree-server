@@ -15,6 +15,7 @@ class GrantRewardResult {
     required this.streakCount,
     required this.adSubCounter,
     required this.adsWatchedToday,
+    this.remainingDailyAds = 0,
     this.firstLifetimeAd = false,
   });
 
@@ -26,6 +27,8 @@ class GrantRewardResult {
   /// Legacy field; server keeps this at 0 (no multi-ad cycle).
   final int adSubCounter;
   final int adsWatchedToday;
+  /// Ads remaining today after this grant (server).
+  final int remainingDailyAds;
   /// True when this was the user’s first lifetime rewarded ad (`POST /grant-reward`).
   final bool firstLifetimeAd;
 }
@@ -111,6 +114,7 @@ class GrantRewardService {
       streakCount: streakC,
       adSubCounter: (j?['adSubCounter'] as num?)?.toInt() ?? 0,
       adsWatchedToday: (j?['adsWatchedToday'] as num?)?.toInt() ?? 0,
+      remainingDailyAds: (j?['remainingDailyAds'] as num?)?.toInt() ?? 0,
       firstLifetimeAd: firstAd,
     );
     // Server (Admin SDK) updates Firestore; client must not write credits — listeners refresh UI.

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
+import '../utils/app_snackbar.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../services/twilio_sms_service.dart' show TwilioSmsException, sendTwilioSMS;
@@ -29,25 +30,41 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
     final to = _phoneCtrl.text.trim();
     final body = _messageCtrl.text.trim();
     if (to.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a recipient phone number (E.164).')),
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: const Text('Enter a recipient phone number (E.164).'),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
       return;
     }
     final digitsOnly = to.replaceAll(RegExp(r'\D'), '');
     if (digitsOnly.length < 10 || to == '+1…' || to.contains('…')) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: const Text(
             'Use a full E.164 number (e.g. +15551234567), not the hint text.',
           ),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
       return;
     }
     if (body.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a message.')),
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: const Text('Enter a message.'),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
       return;
     }
@@ -56,8 +73,14 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
     try {
       await sendTwilioSMS(to, body);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('SMS sent.')),
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: const Text('SMS sent.'),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
       );
     } on TwilioSmsException catch (e) {
       if (!mounted) return;
@@ -66,7 +89,8 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
       final text = is401
           ? 'Sign-in expired or invalid. Sign out and back in, then try again.'
           : userFacingServiceError(e.message);
-      ScaffoldMessenger.of(context).showSnackBar(
+      AppSnackBar.show(
+        context,
         SnackBar(
           content: SelectableText(
             text,
@@ -78,14 +102,18 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
           ),
           duration: Duration(seconds: is502 ? 14 : is401 ? 8 : 10),
           behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
         ),
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      AppSnackBar.show(
+        context,
         SnackBar(
           content: Text('Failed: $e'),
           duration: const Duration(seconds: 8),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
         ),
       );
     } finally {

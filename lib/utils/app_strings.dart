@@ -12,6 +12,6 @@ abstract final class AppStrings {
   /// Splash — subtitle (matches marketing mockup casing).
   static const String splashTagline = 'Call Smart. Pay Less.';
 
-  /// Splash — status under title (minimal, no marketing wall).
-  static const String splashConnecting = 'Connecting…';
+  /// Splash — short status while auth / prefs load.
+  static const String splashStatus = 'Getting your line ready…';
 }

@@ -169,7 +169,7 @@ class CallService {
     }
   }
 
-  /// After app resume — run an immediate balance check (timer may have stalled).
+  /// After app resume — run an immediate balance check when enforcement is on.
   Future<void> syncAfterAppResumed() async {
     if (_uid == null || _callStartTime == null) return;
     if (!_enforceBalanceChecks) return;

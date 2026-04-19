@@ -3,16 +3,25 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:razorpay_flutter/razorpay_flutter.dart';
 
+import '../config/credits_policy.dart';
 import '../config/razorpay_config.dart';
+import 'settings_screen.dart';
 import '../services/subscription_payment_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
-import '../theme/neon_tokens.dart';
+import '../utils/app_snackbar.dart';
 import '../widgets/glass_panel.dart';
+import '../widgets/premium_activation_overlay.dart';
+
+const Color _kPlanAccentDaily = Color(0xFF9D5CFF);
+const Color _kPlanAccentMonthly = Color(0xFFFF8A35);
 
 /// Premium subscription plans + Razorpay Checkout (see also `premium_screen.dart`).
 class SubscriptionScreen extends StatefulWidget {
-  const SubscriptionScreen({super.key});
+  const SubscriptionScreen({super.key, this.embedInShell = false});
+
+  /// When true, no [Scaffold]/[AppBar] — shown inside [DashboardScreen] shell.
+  final bool embedInShell;
 
   static const routeName = '/subscription';
 
@@ -31,6 +40,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   late Razorpay _razorpay;
   bool _checkoutOpen = false;
 
+  /// While creating a Razorpay order — only that plan’s CTA shows a spinner.
+  String? _busyPlanKey;
+
   @override
   void initState() {
     super.initState();
@@ -48,7 +60,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   Future<void> _onPaymentSuccess(PaymentSuccessResponse r) async {
     if (!mounted) return;
-    setState(() => _checkoutOpen = false);
+    setState(() {
+      _checkoutOpen = false;
+      _busyPlanKey = null;
+    });
     if (FirebaseAuth.instance.currentUser == null) {
       _showPaymentFailedDialog('Not signed in. Your payment may still be valid — sign in and contact support.');
       return;
@@ -71,20 +86,50 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       return;
     }
     try {
-      await SubscriptionPaymentService.instance.verifyPayment(
+      final paidPlan = plan;
+      final v = await SubscriptionPaymentService.instance.verifyPayment(
         razorpayPaymentId: paymentId,
         razorpayOrderId: orderId,
         razorpaySignature: signature,
       );
       _pendingPlanKey = null;
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      if (paidPlan == 'starter_credits') {
+        AppSnackBar.show(context,
+          SnackBar(
+            content: Text(
+              v.starterCreditsAdded > 0
+                  ? '+${v.starterCreditsAdded} credits added to your wallet.'
+                  : 'Starter pack confirmed.',
+              style: GoogleFonts.inter(fontWeight: FontWeight.w600).copyWith(
+                fontFeatures: const [FontFeature.tabularFigures()],
+                letterSpacing: 0,
+              ),
+            ),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
+          ),
+        );
+        Navigator.of(context).maybePop();
+        return;
+      }
+      if (v.welcomeBonusCredits > 0 && !v.idempotent) {
+        await PremiumActivationOverlay.show(
+          context,
+          bonusCredits: v.welcomeBonusCredits,
+        );
+      }
+      if (!mounted) return;
+      AppSnackBar.show(context,
         SnackBar(
           content: Text(
-            'Welcome to TalkFree Pro — your plan is active.',
+            'Premium is active — enjoy faster, cheaper calling.',
             style: GoogleFonts.inter(fontWeight: FontWeight.w600),
           ),
           behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
       Navigator.of(context).maybePop();
@@ -106,7 +151,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   void _onPaymentError(PaymentFailureResponse r) {
     if (!mounted) return;
     _pendingPlanKey = null;
-    setState(() => _checkoutOpen = false);
+    setState(() {
+      _checkoutOpen = false;
+      _busyPlanKey = null;
+    });
     final code = r.code;
     if (code == Razorpay.PAYMENT_CANCELLED) {
       _showPaymentFailedDialog('Payment cancelled.');
@@ -117,13 +165,15 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   void _onExternalWallet(ExternalWalletResponse r) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    AppSnackBar.show(context,
       SnackBar(
         content: Text(
           'Complete payment in ${r.walletName ?? "your wallet"}.',
           style: GoogleFonts.inter(),
         ),
         behavior: SnackBarBehavior.floating,
+        margin: AppTheme.snackBarFloatingMargin(context),
+        duration: AppTheme.snackBarCalmDuration,
       ),
     );
   }
@@ -131,10 +181,12 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   String? _pendingPlanKey;
 
   Future<void> _startCheckout(_PlanCheckout plan) async {
+    if (_checkoutOpen || _busyPlanKey != null) return;
+
     final key = RazorpayConfig.keyId;
     if (key == null || key.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      AppSnackBar.show(context,
         SnackBar(
           content: Text(
             'Add RAZORPAY_KEY_ID to project root .env (copy .env.example), then flutter run. '
@@ -142,6 +194,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
             style: GoogleFonts.inter(),
           ),
           behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
       return;
@@ -149,15 +203,18 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      AppSnackBar.show(context,
         SnackBar(
           content: Text('Sign in to subscribe.', style: GoogleFonts.inter()),
           behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
         ),
       );
       return;
     }
 
+    setState(() => _busyPlanKey = plan.planKey);
     _pendingPlanKey = plan.planKey;
 
     SubscriptionOrderResponse order;
@@ -167,6 +224,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     } on SubscriptionPaymentException catch (e) {
       if (!mounted) return;
       _pendingPlanKey = null;
+      setState(() => _busyPlanKey = null);
       _showPaymentFailedDialog(
         e.message.isNotEmpty
             ? e.message
@@ -176,6 +234,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     } catch (e) {
       if (!mounted) return;
       _pendingPlanKey = null;
+      setState(() => _busyPlanKey = null);
       _showPaymentFailedDialog('Could not create order: $e');
       return;
     }
@@ -183,6 +242,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     if (order.keyId != key) {
       if (!mounted) return;
       _pendingPlanKey = null;
+      setState(() => _busyPlanKey = null);
       _showPaymentFailedDialog(
         'Razorpay key mismatch: app .env RAZORPAY_KEY_ID must match server RAZORPAY_KEY_ID.',
       );
@@ -201,10 +261,13 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         if (user.phoneNumber != null && user.phoneNumber!.isNotEmpty)
           'contact': user.phoneNumber!,
       },
-      'theme': <String, String>{'color': '#00FF9C'},
+      'theme': <String, String>{'color': '#00C853'},
     };
 
-    setState(() => _checkoutOpen = true);
+    setState(() {
+      _checkoutOpen = true;
+      _busyPlanKey = null;
+    });
     try {
       _razorpay.open(options);
     } catch (e) {
@@ -268,124 +331,415 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   @override
   Widget build(BuildContext context) {
     final yearly = _planCheckouts.firstWhere((p) => p.planKey == 'yearly');
-    final others =
-        _planCheckouts.where((p) => p.planKey != 'yearly').toList(growable: false);
+    final starter = _planCheckouts.firstWhere((p) => p.planKey == 'starter_credits');
+    final others = _planCheckouts
+        .where((p) => p.planKey != 'yearly' && p.planKey != 'starter_credits')
+        .toList(growable: false);
 
-    return Scaffold(
-      backgroundColor: AppTheme.darkBg,
-      appBar: AppBar(
-        title: Text(
-          'Go Pro',
-          style: GoogleFonts.inter(fontWeight: FontWeight.w800),
-        ),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-        children: [
-          _ProBullet('Unlimited calling'),
-          _ProBullet('No ads'),
-          _ProBullet('Private number'),
-          const SizedBox(height: 22),
-          Text(
-            '🔥 Best Value',
+    final canvasColor = widget.embedInShell
+        ? const Color(0xFF020A10)
+        : AppTheme.darkBg;
+
+    final list = ListView(
+      padding: const EdgeInsets.fromLTRB(22, 14, 22, 44),
+      children: [
+        const _GoProHero(),
+        const SizedBox(height: 8),
+        Text.rich(
+          TextSpan(
             style: GoogleFonts.inter(
-              fontSize: 13,
-              fontWeight: FontWeight.w800,
-              letterSpacing: 0.2,
-              color: Theme.of(context).colorScheme.onSurface,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _yearlyHeroPriceLine(yearly),
-            style: GoogleFonts.poppins(
-              fontSize: 28,
+              fontSize: 14,
               fontWeight: FontWeight.w700,
-              letterSpacing: -0.5,
-              color: Theme.of(context).colorScheme.onSurface,
+              letterSpacing: -0.12,
+              height: 1.35,
+              color: AppColors.textMutedOnDark,
             ),
-          ),
-          const SizedBox(height: 14),
-          _PlanGlassCard(
-            plan: yearly.ui,
-            highlight: true,
-            ctaLabel: 'BUY YEARLY',
-            onTap: _checkoutOpen ? null : () => _startCheckout(yearly),
-          ),
-          const SizedBox(height: 28),
-          Text(
-            'Other plans',
-            style: GoogleFonts.inter(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.2,
-              color: Theme.of(context)
-                  .colorScheme
-                  .onSurfaceVariant
-                  .withValues(alpha: 0.55),
-            ),
-          ),
-          const SizedBox(height: 10),
-          ...others.map(
-            (p) => Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Opacity(
-                opacity: 0.52,
-                child: _PlanGlassCard(
-                  plan: p.ui,
-                  highlight: false,
-                  onTap: _checkoutOpen ? null : () => _startCheckout(p),
+            children: [
+              const TextSpan(text: 'Save ~'),
+              TextSpan(
+                text: '70%',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w900,
+                  color: AppColors.accentGold,
                 ),
               ),
-            ),
+              const TextSpan(text: ' with yearly'),
+            ],
           ),
-          const SizedBox(height: 8),
-          Text(
-            RazorpayConfig.hasKeyId
-                ? 'Secure checkout · ${RazorpayConfig.currency}'
-                : 'Add RAZORPAY_KEY_ID to enable checkout (${RazorpayConfig.currency}).',
-            style: GoogleFonts.inter(
-              fontSize: 11,
-              height: 1.35,
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 20),
+        const _ProFeatureGrid(),
+        const SizedBox(height: 18),
+        Text(
+          'Starter pack',
+          style: GoogleFonts.inter(
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.35,
+            color: AppColors.textDimmed,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _PlanGlassCard(
+          plan: starter.ui,
+          highlight: false,
+          accentColor: AppColors.primary,
+          ctaLabel: 'BUY CREDITS',
+          loading: _busyPlanKey == starter.planKey,
+          onTap: (_checkoutOpen || _busyPlanKey != null)
+              ? null
+              : () => _startCheckout(starter),
+        ),
+        const SizedBox(height: 22),
+        _PlanGlassCard(
+          plan: yearly.ui,
+          highlight: true,
+          ctaLabel: 'BUY YEARLY',
+          loading: _busyPlanKey == yearly.planKey,
+          onTap: (_checkoutOpen || _busyPlanKey != null)
+              ? null
+              : () => _startCheckout(yearly),
+        ),
+        const SizedBox(height: 14),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.verified_user_outlined,
+              size: 14,
               color: Theme.of(context)
                   .colorScheme
                   .onSurfaceVariant
                   .withValues(alpha: 0.65),
             ),
+            const SizedBox(width: 6),
+            Text(
+              'Cancel anytime',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                height: 1.35,
+                color: Theme.of(context)
+                    .colorScheme
+                    .onSurfaceVariant
+                    .withValues(alpha: 0.7),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 22),
+        Text(
+          'Other plans',
+          style: GoogleFonts.inter(
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.35,
+            color: AppColors.textDimmed,
+          ),
+        ),
+        const SizedBox(height: 10),
+        ...others.map(
+          (p) => Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: _PlanGlassCard(
+              plan: p.ui,
+              highlight: false,
+              accentColor: switch (p.planKey) {
+                'daily' => _kPlanAccentDaily,
+                'weekly' => AppColors.primary,
+                'monthly' => _kPlanAccentMonthly,
+                _ => AppColors.primary,
+              },
+              loading: _busyPlanKey == p.planKey,
+              onTap: (_checkoutOpen || _busyPlanKey != null)
+                  ? null
+                  : () => _startCheckout(p),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'You\'re saving ${CreditsPolicy.creditsSavedPerMinuteVsFree} credits/min with Pro',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.inter(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          RazorpayConfig.hasKeyId
+              ? 'Secure checkout · ${RazorpayConfig.currency}'
+              : 'Add RAZORPAY_KEY_ID to enable checkout (${RazorpayConfig.currency}).',
+          style: GoogleFonts.inter(
+            fontSize: 11,
+            height: 1.35,
+            color: Theme.of(context)
+                .colorScheme
+                .onSurfaceVariant
+                .withValues(alpha: 0.65),
+          ),
+        ),
+      ],
+    );
+
+    final body = ColoredBox(color: canvasColor, child: list);
+
+    if (widget.embedInShell) {
+      return body;
+    }
+    return Scaffold(
+      backgroundColor: canvasColor,
+      appBar: AppBar(
+        title: Text(
+          'Go Pro',
+          style: GoogleFonts.inter(
+            fontWeight: FontWeight.w800,
+            color: AppColors.accentGold,
+          ),
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: Material(
+              color: AppColors.cardDark,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  final u = FirebaseAuth.instance.currentUser;
+                  if (u == null) return;
+                  Navigator.of(context).push<void>(
+                    MaterialPageRoute<void>(
+                      builder: (_) => SettingsScreen(user: u),
+                    ),
+                  );
+                },
+                child: Ink(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppColors.cardBorderSubtle),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.all(10),
+                    child: Icon(
+                      Icons.settings_outlined,
+                      size: 20,
+                      color: AppColors.textMutedOnDark,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
+      body: body,
     );
   }
 }
 
-class _ProBullet extends StatelessWidget {
-  const _ProBullet(this.text);
-
-  final String text;
+class _GoProHero extends StatelessWidget {
+  const _GoProHero();
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
+    return Column(
+      children: [
+        const SizedBox(height: 4),
+        Center(
+          child: Container(
+            width: 88,
+            height: 88,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: AppColors.cardDark,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: AppColors.accentGold.withValues(alpha: 0.58),
+                width: 1.5,
+              ),
+            ),
+            child: Icon(
+              Icons.workspace_premium_rounded,
+              color: AppColors.accentGold,
+              size: 44,
+            ),
+          ),
+        ),
+        const SizedBox(height: 18),
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: 'Go ',
+                style: GoogleFonts.inter(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: -0.8,
+                  height: 1.05,
+                  color: AppColors.textOnDark,
+                ),
+              ),
+              TextSpan(
+                text: 'Pro',
+                style: GoogleFonts.inter(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: -0.8,
+                  height: 1.05,
+                  color: AppColors.accentGold,
+                ),
+              ),
+            ],
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Unlock premium calling experience',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            height: 1.35,
+            color: AppColors.textMutedOnDark,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.flash_on_rounded,
+              size: 15,
+              color: AppColors.accentGold.withValues(alpha: 0.88),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              'Instant activation',
+              style: GoogleFonts.inter(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.12,
+                color: AppColors.accentGold.withValues(alpha: 0.92),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _ProFeatureGrid extends StatelessWidget {
+  const _ProFeatureGrid();
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.count(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      crossAxisCount: 2,
+      mainAxisSpacing: 10,
+      crossAxisSpacing: 10,
+      childAspectRatio: 1.42,
+      children: [
+        const _FeatureMiniCard(
+          text: 'Unlimited calling globally',
+          icon: Icons.phone_in_talk_rounded,
+        ),
+        const _FeatureMiniCard(
+          text: 'No ads, ever',
+          icon: Icons.block_rounded,
+        ),
+        _FeatureMiniCard(
+          text: 'Private US number included',
+          leading: Text(
+            '🇺🇸',
+            style: GoogleFonts.inter(fontSize: 18),
+          ),
+        ),
+        const _FeatureMiniCard(
+          text: 'Unlimited SMS & Chat',
+          icon: Icons.chat_bubble_rounded,
+        ),
+      ],
+    );
+  }
+}
+
+class _FeatureMiniCard extends StatelessWidget {
+  const _FeatureMiniCard({
+    required this.text,
+    this.icon,
+    this.leading,
+  }) : assert(icon != null || leading != null);
+
+  final String text;
+  final IconData? icon;
+  final Widget? leading;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: AppColors.cardDark,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+      ),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            Icons.check_circle_rounded,
-            size: 18,
-            color: AppColors.primary.withValues(alpha: 0.85),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              text,
-              style: GoogleFonts.inter(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                height: 1.3,
-                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.95),
+          Row(
+            children: [
+              Icon(
+                Icons.check_circle_rounded,
+                size: 18,
+                color: AppColors.primary,
               ),
+              const Spacer(),
+              if (leading != null)
+                Container(
+                  width: 32,
+                  height: 32,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: AppColors.primary.withValues(alpha: 0.14),
+                  ),
+                  child: leading,
+                )
+              else
+                Container(
+                  width: 32,
+                  height: 32,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: AppColors.primary.withValues(alpha: 0.14),
+                  ),
+                  child: Icon(
+                    icon,
+                    size: 17,
+                    color: AppColors.primary,
+                  ),
+                ),
+            ],
+          ),
+          const Spacer(),
+          Text(
+            text,
+            style: GoogleFonts.inter(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.3,
+              color: AppColors.textOnDark,
             ),
           ),
         ],
@@ -436,6 +790,22 @@ class _PlanCheckout {
 /// Display prices in USD; charged in INR (paise) or USD (cents) per [RazorpayConfig.currency].
 const _planCheckouts = <_PlanCheckout>[
   _PlanCheckout(
+    planKey: 'starter_credits',
+    ui: _PlanData(
+      name: 'Starter Pack',
+      price: '₹59',
+      periodLabel: 'one-time',
+      benefits: [
+        '${CreditsPolicy.starterPackCredits} credits',
+        'Instant calling for ₹59',
+        'Call right away',
+        'No subscription',
+      ],
+    ),
+    amountInrPaise: 5900,
+    amountUsdCents: 99,
+  ),
+  _PlanCheckout(
     planKey: 'daily',
     ui: _PlanData(
       name: 'Daily',
@@ -461,57 +831,256 @@ const _planCheckouts = <_PlanCheckout>[
     planKey: 'monthly',
     ui: _PlanData(
       name: 'Monthly',
-      price: r'$14.99',
+      price: '₹349',
       periodLabel: 'per month',
       benefits: ['No Ads', 'Bonus Credits', 'Private Number'],
     ),
-    amountInrPaise: 124900,
-    amountUsdCents: 1499,
+    amountInrPaise: 34900,
+    amountUsdCents: 499,
   ),
   _PlanCheckout(
     planKey: 'yearly',
     ui: _PlanData(
       name: 'Yearly',
-      price: r'$99.99',
+      price: '₹1149',
       periodLabel: 'per year',
       benefits: ['No Ads', 'Bonus Credits', 'Private Number', 'Best value'],
     ),
-    amountInrPaise: 829900,
-    amountUsdCents: 9999,
+    amountInrPaise: 114900,
+    amountUsdCents: 12999,
   ),
 ];
 
-String _yearlyHeroPriceLine(_PlanCheckout plan) {
-  switch (RazorpayConfig.currency.toUpperCase()) {
-    case 'INR':
-      final r = (plan.amountInrPaise / 100).round();
-      return '₹$r/year';
-    case 'USD':
-    default:
-      return '${plan.ui.price}/year';
-  }
-}
-
-/// Same glass + green accent pattern as [VirtualNumberScreen] subscription rows.
+/// Yearly: gold rim + glass; other plans: themed calendar rows (mockup-aligned).
 class _PlanGlassCard extends StatelessWidget {
   const _PlanGlassCard({
     required this.plan,
     required this.onTap,
     this.highlight = false,
+    this.accentColor,
     this.ctaLabel,
+    this.loading = false,
   });
 
   final _PlanData plan;
   final VoidCallback? onTap;
   final bool highlight;
+  /// Daily / weekly / monthly accent (ignored when [highlight] is true).
+  final Color? accentColor;
   /// Primary plan CTA (e.g. yearly); defaults to "Buy Now" / "Choose".
   final String? ctaLabel;
+  final bool loading;
 
   @override
   Widget build(BuildContext context) {
+    if (highlight) {
+      final inner = GlassPanel(
+        borderRadius: 16,
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        accentNeon: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.bolt_rounded,
+                            size: 16,
+                            color: AppColors.accentGold,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'YEARLY',
+                            style: GoogleFonts.inter(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 1.2,
+                              color: AppColors.accentGold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          Text(
+                            plan.price,
+                            style: GoogleFonts.poppins(
+                              fontWeight: FontWeight.w900,
+                              fontSize: 36,
+                              letterSpacing: -0.85,
+                              height: 1.0,
+                              color: AppColors.textOnDark,
+                            ),
+                          ),
+                          Text(
+                            ' / year',
+                            style: GoogleFonts.inter(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.06,
+                              color: AppColors.textDimmed,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                OutlinedButton(
+                  onPressed: loading ? null : onTap,
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: AppColors.cardDark,
+                    foregroundColor: AppColors.accentGold,
+                    side: BorderSide(
+                      color: AppColors.accentGold.withValues(alpha: 0.75),
+                      width: 1.5,
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 12,
+                    ),
+                    minimumSize: const Size(112, 44),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: loading
+                      ? SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            color: AppColors.accentGold.withValues(
+                              alpha: 0.95,
+                            ),
+                          ),
+                        )
+                      : Text(
+                          ctaLabel ?? 'BUY YEARLY',
+                          style: GoogleFonts.inter(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 14,
+                            letterSpacing: 0.4,
+                          ),
+                        ),
+                ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 14, bottom: 10),
+              child: Divider(
+                height: 1,
+                thickness: 1,
+                color: Colors.white.withValues(alpha: 0.08),
+              ),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: _YearlyFooterCell(
+                    icon: Icons.bolt_rounded,
+                    label: 'Instant activation',
+                  ),
+                ),
+                Expanded(
+                  child: _YearlyFooterCell(
+                    icon: Icons.schedule_rounded,
+                    label: 'Limited offer ends soon',
+                  ),
+                ),
+                Expanded(
+                  child: _YearlyFooterCell(
+                    icon: Icons.groups_rounded,
+                    label: '10,000+ users upgraded today',
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+
+      return Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: AppColors.accentGold.withValues(alpha: 0.68),
+            width: 1.2,
+          ),
+          boxShadow: AppTheme.fintechCardShadow,
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(19),
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              inner,
+              Positioned(
+                right: 10,
+                top: 10,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.cardDark,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: AppColors.accentGold.withValues(alpha: 0.7),
+                      width: 1,
+                    ),
+                  ),
+                  child: Text(
+                    'BEST VALUE',
+                    style: GoogleFonts.inter(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.45,
+                      color: AppColors.accentGold,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final accent = accentColor ?? AppColors.primary;
+    final ctaText = plan.name == 'Monthly' ? 'Buy Monthly' : 'Choose';
+
     final row = Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
+        Container(
+          width: 44,
+          height: 44,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: accent.withValues(alpha: 0.16),
+            border: Border.all(
+              color: accent.withValues(alpha: 0.45),
+            ),
+          ),
+          child: Icon(
+            Icons.calendar_today_rounded,
+            size: 20,
+            color: accent,
+          ),
+        ),
+        const SizedBox(width: 12),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -519,34 +1088,31 @@ class _PlanGlassCard extends StatelessWidget {
               Text(
                 plan.name,
                 style: GoogleFonts.inter(
-                  fontWeight: highlight ? FontWeight.w800 : FontWeight.w600,
-                  fontSize: highlight ? 16 : 15,
-                  color: Theme.of(context).colorScheme.onSurface.withValues(
-                        alpha: highlight ? 1 : 0.88,
-                      ),
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15,
+                  letterSpacing: -0.22,
+                  color: AppColors.textOnDark,
                 ),
               ),
-              const SizedBox(height: 2),
+              const SizedBox(height: 3),
               Text(
                 plan.periodLabel,
                 style: GoogleFonts.inter(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textDimmed,
                 ),
               ),
-              if (plan.benefits.length > 3) ...[
-                const SizedBox(height: 6),
-                Text(
-                  plan.benefits.last,
-                  style: GoogleFonts.inter(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: highlight
-                        ? AppColors.primary.withValues(alpha: 0.9)
-                        : Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
+              const SizedBox(height: 5),
+              Text(
+                'Instant activation',
+                style: GoogleFonts.inter(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.28,
+                  color: AppColors.accentGold.withValues(alpha: 0.88),
                 ),
-              ],
+              ),
             ],
           ),
         ),
@@ -556,122 +1122,105 @@ class _PlanGlassCard extends StatelessWidget {
             Text(
               plan.price,
               style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700,
-                fontSize: highlight ? 16 : 15,
-                color: highlight
-                    ? AppColors.primary
-                    : Theme.of(context).colorScheme.onSurface,
+                fontWeight: FontWeight.w900,
+                fontSize: 22,
+                letterSpacing: -0.5,
+                height: 1.0,
+                color: AppColors.textOnDark,
               ),
             ),
-            const SizedBox(height: 8),
-            highlight
-                ? Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
-                      boxShadow: NeonTokens.glowPrimary(0.5),
-                    ),
-                    child: FilledButton(
-                      onPressed: onTap,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: AppColors.primary,
-                        foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
-                        ),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        elevation: 0,
+            const SizedBox(height: 10),
+            OutlinedButton(
+              onPressed: loading ? null : onTap,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: accent,
+                side: BorderSide(
+                  color: accent.withValues(alpha: 0.85),
+                  width: 1.4,
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 8,
+                ),
+                minimumSize: const Size(92, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              child: loading
+                  ? SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: accent,
                       ),
-                      child: Text(
-                        ctaLabel ?? 'Buy Now',
-                        style: GoogleFonts.inter(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
-                  )
-                : OutlinedButton(
-                    onPressed: onTap,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor:
-                          Theme.of(context).colorScheme.onSurfaceVariant,
-                      side: BorderSide(
-                        color: Colors.white.withValues(alpha: 0.12),
-                      ),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 8,
-                      ),
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                    child: Text(
-                      'Choose',
+                    )
+                  : Text(
+                      ctaText,
                       style: GoogleFonts.inter(
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w800,
                         fontSize: 12,
                       ),
                     ),
-                  ),
+            ),
           ],
         ),
       ],
     );
 
-    final panel = GlassPanel(
-      borderRadius: 16,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      accentNeon: false,
-      child: row,
-    );
-
-    if (highlight) {
-      return Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              AppColors.primary.withValues(alpha: 0.35),
-              AppColors.primary.withValues(alpha: 0.08),
-              AppColors.primary.withValues(alpha: 0.2),
-            ],
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: AppColors.primary.withValues(alpha: 0.18),
-              blurRadius: 20,
-              spreadRadius: -2,
-              offset: const Offset(0, 10),
-            ),
-          ],
-        ),
-        padding: const EdgeInsets.all(1),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(19),
-          child: panel,
-        ),
-      );
-    }
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
           color: AppColors.cardDark,
-          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          border: Border.all(
+            color: accent.withValues(alpha: 0.22),
+          ),
           borderRadius: BorderRadius.circular(16),
         ),
         child: row,
+      ),
+    );
+  }
+}
+
+class _YearlyFooterCell extends StatelessWidget {
+  const _YearlyFooterCell({
+    required this.icon,
+    required this.label,
+  });
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Column(
+        children: [
+          Icon(
+            icon,
+            size: 15,
+            color: AppColors.textMutedOnDark,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            label,
+            textAlign: TextAlign.center,
+            maxLines: 3,
+            style: GoogleFonts.inter(
+              fontSize: 9,
+              fontWeight: FontWeight.w600,
+              height: 1.25,
+              letterSpacing: -0.05,
+              color: AppColors.textDimmed,
+            ),
+          ),
+        ],
       ),
     );
   }

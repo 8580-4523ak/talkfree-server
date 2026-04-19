@@ -56,46 +56,65 @@ class _SplashScreenState extends State<SplashScreen>
             padding: const EdgeInsets.symmetric(horizontal: 32),
             child: Column(
               children: [
-                const Spacer(flex: 2),
-                SizedBox(
-                  width: logoSize,
-                  height: logoSize,
-                  child: ClipOval(
-                    child: Image.asset(
-                      _kSplashMarkAsset,
-                      fit: BoxFit.cover,
-                      alignment: Alignment.center,
-                      filterQuality: FilterQuality.high,
+                Expanded(
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: logoSize,
+                          height: logoSize,
+                          child: ClipOval(
+                            child: Image.asset(
+                              _kSplashMarkAsset,
+                              fit: BoxFit.cover,
+                              alignment: Alignment.center,
+                              filterQuality: FilterQuality.high,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 28),
+                        Text(
+                          AppStrings.appName,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.plusJakartaSans(
+                            fontSize: 32,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.4,
+                            height: 1.05,
+                            color: AppColors.textOnDark,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          AppStrings.splashTagline,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(
+                            fontSize: 17,
+                            height: 1.35,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.2,
+                            color: AppColors.primary.withValues(alpha: 0.95),
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Text(
+                          AppStrings.splashStatus,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            height: 1.45,
+                            fontWeight: FontWeight.w400,
+                            color: AppColors.textMutedOnDark,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 28),
-                Text(
-                  AppStrings.appName,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.plusJakartaSans(
-                    fontSize: 32,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.4,
-                    height: 1.05,
-                    color: AppColors.textOnDark,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  AppStrings.splashConnecting,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(
-                    fontSize: 15,
-                    height: 1.4,
-                    fontWeight: FontWeight.w500,
-                    color: AppColors.textMutedOnDark,
-                  ),
-                ),
-                const Spacer(flex: 3),
                 if (widget.showLoader)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 32),
+                    padding: const EdgeInsets.only(bottom: 28),
                     child: SizedBox(
                       width: 28,
                       height: 28,
@@ -107,7 +126,7 @@ class _SplashScreenState extends State<SplashScreen>
                     ),
                   )
                 else
-                  const SizedBox(height: 60),
+                  const SizedBox(height: 28),
               ],
             ),
           ),

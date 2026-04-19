@@ -21,6 +21,35 @@ class BrowseInventoryPage {
   final String? nextPage;
 }
 
+/// Full walk of Twilio paginated inventory for one country (US or CA).
+class BrowseAggregatedInventory {
+  const BrowseAggregatedInventory({
+    required this.numbers,
+    this.nextPage,
+    this.truncatedByPageCap = false,
+  });
+
+  final List<VirtualNumber> numbers;
+
+  /// If non-null, Twilio still has more numbers (or [truncatedByPageCap] hit the client cap).
+  final String? nextPage;
+
+  /// True when [nextPage] is set only because [BrowseInventoryClient.fetchAllLocalPages] stopped at [maxPages].
+  final bool truncatedByPageCap;
+}
+
+/// Twilio `InRegion` codes — one pass each so we do not depend on flaky global pagination.
+const List<String> _browseUsRegions = [
+  'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID',
+  'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO',
+  'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA',
+  'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
+];
+
+const List<String> _browseCaRegions = [
+  'AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'NT', 'NU', 'ON', 'PE', 'QC', 'SK', 'YT',
+];
+
 /// US/CA local number inventory via backend (no Twilio credentials in the app).
 class BrowseInventoryClient {
   BrowseInventoryClient._();
@@ -42,6 +71,7 @@ class BrowseInventoryClient {
       e164: e164,
       phoneNumber: NanpPhoneDisplay.format(e164),
       country: place,
+      isoCountryCode: country,
     );
   }
 
@@ -110,6 +140,108 @@ class BrowseInventoryClient {
     return BrowseInventoryPage(
       numbers: out,
       nextPage: (trimmed != null && trimmed.isNotEmpty) ? trimmed : null,
+    );
+  }
+
+  /// Chains Twilio [nextPage] until inventory is exhausted for [country] (`US` or `CA`).
+  ///
+  /// Optional [inRegion] sets Twilio `InRegion` on the **first** request only (state/province).
+  ///
+  /// Uses [pageSize] 1000 (server max) to reduce round-trips. De-duplicates by E.164.
+  /// If Twilio returns more than [maxPages] pages, remaining inventory is exposed via
+  /// [BrowseAggregatedInventory.nextPage] (use [fetchLocalPage] with that token, or tap
+  /// “Load more” in the UI).
+  Future<BrowseAggregatedInventory> fetchAllLocalPages({
+    required String country,
+    String? inRegion,
+    int pageSize = 1000,
+    int maxPages = 200,
+  }) async {
+    final merged = <VirtualNumber>[];
+    final seen = <String>{};
+    String? next;
+
+    for (var i = 0; i < maxPages; i++) {
+      final page = await fetchLocalPage(
+        country: country,
+        pageSize: pageSize,
+        inRegion: next == null ? inRegion : null,
+        nextPage: next,
+      );
+      for (final n in page.numbers) {
+        if (seen.add(n.e164)) merged.add(n);
+      }
+      final np = page.nextPage?.trim();
+      if (np == null || np.isEmpty) {
+        return BrowseAggregatedInventory(
+          numbers: merged,
+          nextPage: null,
+          truncatedByPageCap: false,
+        );
+      }
+      next = np;
+    }
+
+    return BrowseAggregatedInventory(
+      numbers: merged,
+      nextPage: next,
+      truncatedByPageCap: true,
+    );
+  }
+
+  /// Full US or CA inventory: fetches every state/province in parallel batches, paginates
+  /// each region, then merges (Twilio’s unpaged country listing often returns only ~1 page).
+  Future<BrowseAggregatedInventory> fetchMergedInventoryByRegion({
+    required String country,
+    int pageSize = 1000,
+    int maxPagesPerRegion = 100,
+  }) async {
+    final cc = country.trim().toUpperCase();
+    final regions = cc == 'US'
+        ? _browseUsRegions
+        : cc == 'CA'
+            ? _browseCaRegions
+            : const <String>[];
+
+    if (regions.isEmpty) {
+      return fetchAllLocalPages(country: cc, pageSize: pageSize, maxPages: maxPagesPerRegion);
+    }
+
+    final merged = <VirtualNumber>[];
+    final seen = <String>{};
+    var anyTruncated = false;
+
+    const batch = 6;
+    for (var i = 0; i < regions.length; i += batch) {
+      final slice = regions.skip(i).take(batch).toList();
+      final futures = slice.map((r) async {
+        try {
+          return await fetchAllLocalPages(
+            country: cc,
+            inRegion: r,
+            pageSize: pageSize,
+            maxPages: maxPagesPerRegion,
+          );
+        } catch (e, st) {
+          if (kDebugMode) {
+            debugPrint('browse region $cc/$r failed: $e\n$st');
+          }
+          return const BrowseAggregatedInventory(numbers: []);
+        }
+      });
+      final parts = await Future.wait(futures);
+      for (final p in parts) {
+        if (p.truncatedByPageCap) anyTruncated = true;
+        for (final n in p.numbers) {
+          if (seen.add(n.e164)) merged.add(n);
+        }
+      }
+    }
+
+    return BrowseAggregatedInventory(
+      numbers: merged,
+      nextPage: null,
+      truncatedByPageCap: anyTruncated,
     );
   }
 }

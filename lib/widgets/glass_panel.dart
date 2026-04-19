@@ -3,6 +3,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 
 import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 
 /// Frosted glass: blur + translucent fill + soft border (premium fintech shell).
 class GlassPanel extends StatelessWidget {
@@ -11,7 +12,7 @@ class GlassPanel extends StatelessWidget {
     required this.child,
     this.borderRadius = 18,
     this.padding,
-    /// Stronger neon rim + glow (hero cards, rewards).
+    /// Slightly stronger primary-tinted rim (optional accents).
     this.accentNeon = false,
   });
 
@@ -24,26 +25,34 @@ class GlassPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final borderColor = accentNeon
         ? AppColors.primary.withValues(alpha: 0.22)
-        : Colors.white.withValues(alpha: 0.08);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(borderRadius),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(borderRadius),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                AppColors.cardDark.withValues(alpha: 0.98),
-                AppColors.darkBackgroundDeep.withValues(alpha: 0.98),
-              ],
+        : AppColors.cardBorderSubtle;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(borderRadius),
+        boxShadow: AppTheme.fintechCardShadow,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(borderRadius),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            padding: padding,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(borderRadius),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  const Color(0xFF161820),
+                  AppColors.cardDark.withValues(alpha: 0.99),
+                  AppColors.darkBackgroundDeep.withValues(alpha: 0.97),
+                ],
+                stops: const [0.0, 0.52, 1.0],
+              ),
+              border: Border.all(color: borderColor, width: 1),
             ),
-            border: Border.all(color: borderColor, width: accentNeon ? 0.5 : 0.5),
+            child: child,
           ),
-          child: child,
         ),
       ),
     );

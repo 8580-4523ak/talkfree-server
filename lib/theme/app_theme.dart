@@ -8,6 +8,27 @@ abstract final class AppTheme {
 
   static const double radiusMd = 18;
   static const double radiusLg = 22;
+  static const double radiusFintech = 18;
+
+  /// Unified elevation: dark lift only (no colored glow). Cards / panels — below [fintechPrimaryCtaShadow].
+  static List<BoxShadow> get fintechCardShadow => const [
+        BoxShadow(
+          color: Color(0x52000000),
+          blurRadius: 16,
+          offset: Offset(0, 7),
+          spreadRadius: -5,
+        ),
+      ];
+
+  /// Strongest lift — primary CTAs only (Watch Ad, key green buttons).
+  static List<BoxShadow> get fintechPrimaryCtaShadow => const [
+        BoxShadow(
+          color: Color(0x9C000000),
+          blurRadius: 36,
+          offset: Offset(0, 18),
+          spreadRadius: -8,
+        ),
+      ];
 
   /// Global neon accent — same as [ColorScheme.primary] in [darkTheme].
   static const Color neonGreen = AppColors.primary;
@@ -36,6 +57,23 @@ abstract final class AppTheme {
   /// Credits / Pro value (intro wallet slide, etc.).
   static const String lottieMoney = 'assets/lottie/money.json';
 
+  /// Short SnackBar read — calm auto-dismiss without covering shell CTAs.
+  static const Duration snackBarCalmDuration = Duration(milliseconds: 2400);
+
+  /// Floating SnackBar inset above bottom nav / primary thumb zone.
+  static EdgeInsets snackBarFloatingMargin(BuildContext context) {
+    final pad = MediaQuery.viewPaddingOf(context).bottom;
+    return EdgeInsets.fromLTRB(16, 0, 16, 88 + pad);
+  }
+
+  /// SnackBar scaffold enter/exit timing ([ScaffoldMessengerState.showSnackBar]).
+  static const AnimationStyle snackBarScaffoldMotion = AnimationStyle(
+    duration: Duration(milliseconds: 220),
+    reverseDuration: Duration(milliseconds: 220),
+    curve: Curves.easeOutCubic,
+    reverseCurve: Curves.easeOutCubic,
+  );
+
   /// Premium / rewards accent.
   static const String lottieFlyingMoney = 'assets/lottie/flying_money.json';
 
@@ -53,14 +91,14 @@ abstract final class AppTheme {
   static ThemeData dark() {
     const colorScheme = ColorScheme.dark(
       primary: AppColors.primary,
-      onPrimary: AppColors.onPrimary,
+      onPrimary: AppColors.onPrimaryButton,
       secondary: AppColors.primary,
       onSecondary: AppColors.darkBackground,
       surface: AppColors.cardDark,
       onSurface: AppColors.textOnDark,
       onSurfaceVariant: AppColors.textMutedOnDark,
-      outline: AppColors.primary,
-      outlineVariant: Color(0xFF334155),
+      outline: Color(0xFF2E323D),
+      outlineVariant: Color(0xFF3D424F),
       error: AppColors.danger,
       onError: AppColors.onPrimary,
     );
@@ -70,32 +108,36 @@ abstract final class AppTheme {
 
     final textTheme = TextTheme(
       displayLarge: poppins.displayLarge?.copyWith(
-        color: AppColors.primary,
+        color: AppColors.textOnDark,
         fontWeight: FontWeight.w700,
       ),
       displayMedium: poppins.displayMedium?.copyWith(
-        color: AppColors.primary,
+        color: AppColors.textOnDark,
         fontWeight: FontWeight.w700,
       ),
       displaySmall: poppins.displaySmall?.copyWith(
-        color: AppColors.primary,
+        color: AppColors.textOnDark,
         fontWeight: FontWeight.w700,
       ),
       headlineLarge: poppins.headlineLarge?.copyWith(
-        color: AppColors.primary,
-        fontWeight: FontWeight.w700,
+        color: AppColors.textOnDark,
+        fontWeight: FontWeight.w800,
+        letterSpacing: -0.3,
       ),
       headlineMedium: poppins.headlineMedium?.copyWith(
-        color: AppColors.primary,
-        fontWeight: FontWeight.w700,
+        color: AppColors.textOnDark,
+        fontWeight: FontWeight.w800,
+        letterSpacing: -0.3,
       ),
       headlineSmall: poppins.headlineSmall?.copyWith(
-        color: AppColors.primary,
-        fontWeight: FontWeight.w600,
+        color: AppColors.textOnDark,
+        fontWeight: FontWeight.w700,
+        letterSpacing: -0.25,
       ),
       titleLarge: poppins.titleLarge?.copyWith(
         color: AppColors.textOnDark,
-        fontWeight: FontWeight.w700,
+        fontWeight: FontWeight.w800,
+        letterSpacing: -0.25,
       ),
       titleMedium: poppins.titleMedium?.copyWith(
         color: AppColors.textOnDark,
@@ -110,9 +152,9 @@ abstract final class AppTheme {
           interBase.bodyMedium?.copyWith(color: AppColors.textOnDark),
       bodySmall: interBase.bodySmall?.copyWith(color: AppColors.textMutedOnDark),
       labelLarge: interBase.labelLarge?.copyWith(
-        color: AppColors.primary,
+        color: AppColors.textOnDark,
         fontWeight: FontWeight.w600,
-        letterSpacing: 0.4,
+        letterSpacing: 0.2,
       ),
       labelMedium:
           interBase.labelMedium?.copyWith(color: AppColors.textMutedOnDark),
@@ -127,27 +169,29 @@ abstract final class AppTheme {
       scaffoldBackgroundColor: AppTheme.darkBg,
       textTheme: textTheme,
       primaryColor: AppColors.primary,
-      dividerColor: AppColors.primary.withValues(alpha: 0.14),
+      dividerColor: Colors.white.withValues(alpha: 0.08),
       appBarTheme: AppBarTheme(
         elevation: 0,
         scrolledUnderElevation: 0,
         backgroundColor: AppTheme.darkBg,
         foregroundColor: AppColors.textOnDark,
         iconTheme: const IconThemeData(color: AppColors.textOnDark),
-        titleTextStyle: GoogleFonts.poppins(
-          fontSize: 20,
-          fontWeight: FontWeight.w600,
+        titleTextStyle: GoogleFonts.inter(
+          fontSize: 18,
+          fontWeight: FontWeight.w800,
+          letterSpacing: -0.3,
           color: AppColors.textOnDark,
         ),
       ),
       cardTheme: CardThemeData(
         color: AppColors.cardDark,
         elevation: 0,
-        shadowColor: Colors.black.withValues(alpha: 0.45),
+        surfaceTintColor: Colors.transparent,
+        shadowColor: Colors.black.withValues(alpha: 0.5),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(radiusMd),
-          side: BorderSide(
-            color: Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(radiusFintech),
+          side: const BorderSide(
+            color: AppColors.cardBorderSubtle,
             width: 1,
           ),
         ),
@@ -155,14 +199,21 @@ abstract final class AppTheme {
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           backgroundColor: AppColors.primary,
-          foregroundColor: AppColors.darkBackground,
+          foregroundColor: AppColors.onPrimaryButton,
           disabledBackgroundColor: AppColors.primary.withValues(alpha: 0.35),
-          disabledForegroundColor: AppColors.darkBackground.withValues(alpha: 0.5),
-          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+          disabledForegroundColor:
+              AppColors.onPrimaryButton.withValues(alpha: 0.45),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 15),
+          textStyle: GoogleFonts.inter(
+            fontWeight: FontWeight.w800,
+            fontSize: 15,
+            letterSpacing: 0.15,
+          ),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(radiusLg),
           ),
           minimumSize: const Size.fromHeight(52),
+          elevation: 0,
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -179,7 +230,7 @@ abstract final class AppTheme {
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor: AppColors.primary,
-          foregroundColor: AppColors.darkBackground,
+          foregroundColor: AppColors.onPrimaryButton,
           textStyle: GoogleFonts.inter(
             fontWeight: FontWeight.w700,
             fontSize: 16,
@@ -193,7 +244,7 @@ abstract final class AppTheme {
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
         backgroundColor: AppTheme.darkBg,
         selectedItemColor: AppColors.primary,
-        unselectedItemColor: AppColors.textMutedOnDark.withValues(alpha: 0.55),
+        unselectedItemColor: AppColors.textMutedOnDark.withValues(alpha: 0.75),
         type: BottomNavigationBarType.fixed,
         elevation: 0,
         showUnselectedLabels: true,
