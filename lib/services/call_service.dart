@@ -1,13 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 
 import '../config/credits_policy.dart';
-import '../config/voice_backend_config.dart';
 import 'firestore_user_service.dart';
 import 'terminate_call_service.dart';
 
@@ -192,52 +188,6 @@ String formatDialInputToE164(
   final d = t.replaceAll(RegExp(r'\D'), '');
   if (d.isEmpty) return '';
   return '+$defaultCallingCode$d';
-}
-
-/// `POST /call` with JSON `{ "to": "+..." }` and Firebase Bearer (server initiates PSTN).
-Future<void> makeCall(String number) async {
-  final normalized = _normalizeCallNumberForApi(number);
-  if (normalized.isEmpty) {
-    throw Exception('Invalid phone number');
-  }
-
-  final user = FirebaseAuth.instance.currentUser;
-  if (user == null) {
-    throw Exception('Not signed in');
-  }
-  final idToken = await user.getIdToken();
-  if (idToken == null || idToken.isEmpty) {
-    throw Exception('Could not get Firebase ID token');
-  }
-
-  final uri = VoiceBackendConfig.initiateCallUri();
-
-  try {
-    final response = await http
-        .post(
-          uri,
-          headers: <String, String>{
-            'Authorization': 'Bearer $idToken',
-            'Content-Type': 'application/json; charset=utf-8',
-            'Accept': 'application/json',
-          },
-          body: jsonEncode(<String, String>{'to': normalized}),
-        )
-        .timeout(const Duration(seconds: 30));
-
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    throw Exception(
-      'Call failed (${response.statusCode}): ${response.body}',
-    );
-  } catch (e, st) {
-    if (kDebugMode) {
-      debugPrint('makeCall error: $e\n$st');
-    }
-    rethrow;
-  }
 }
 
 /// Spaces stripped; leading `+` preserved, otherwise prefix `+91`.

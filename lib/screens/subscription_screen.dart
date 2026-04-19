@@ -650,7 +650,7 @@ class _ProFeatureGrid extends StatelessWidget {
       childAspectRatio: 1.42,
       children: [
         const _FeatureMiniCard(
-          text: 'Unlimited calling globally',
+          text: 'Faster calling worldwide',
           icon: Icons.phone_in_talk_rounded,
         ),
         const _FeatureMiniCard(
@@ -665,7 +665,7 @@ class _ProFeatureGrid extends StatelessWidget {
           ),
         ),
         const _FeatureMiniCard(
-          text: 'Unlimited SMS & Chat',
+          text: 'No waiting — SMS & chat',
           icon: Icons.chat_bubble_rounded,
         ),
       ],

@@ -10,9 +10,6 @@ abstract final class VoiceBackendConfig {
   /// Base URL only, no trailing slash.
   static String get baseUrl => productionOrigin;
 
-  /// `POST /call` with JSON `{ "to": "+..." }` and Firebase `Authorization: Bearer`.
-  static Uri initiateCallUri() => Uri.https(_host, '/call');
-
   /// `GET /token` — Twilio Voice access JWT; requires Firebase `Authorization: Bearer`.
   static Uri tokenUri() => Uri.https(_host, '/token');
 

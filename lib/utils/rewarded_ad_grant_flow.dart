@@ -10,7 +10,10 @@ import 'app_snackbar.dart';
 import '../widgets/engagement_overlays.dart';
 
 /// Plays a rewarded ad then POSTs `/grant-reward`. Use from any screen (server enforces limits).
-Future<bool> runRewardedAdGrantFlow(BuildContext context) async {
+Future<bool> runRewardedAdGrantFlow(
+  BuildContext context, {
+  required bool isPremium,
+}) async {
   final earned = await AdService.instance.loadAndShowRewardedAd();
   if (!context.mounted) return false;
   if (!earned) return false;
@@ -25,6 +28,7 @@ Future<bool> runRewardedAdGrantFlow(BuildContext context) async {
         streakBonus: result.streakBonus,
         streakDays: result.streakCount,
         welcomeFirstAd: result.firstLifetimeAd,
+        isPremium: isPremium,
       );
     } else {
       AppSnackBar.show(context,

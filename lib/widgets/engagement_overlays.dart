@@ -36,6 +36,7 @@ abstract final class EngagementOverlays {
     int streakBonus = 0,
     int streakDays = 0,
     bool welcomeFirstAd = false,
+    bool isPremium = false,
   }) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
@@ -45,6 +46,7 @@ abstract final class EngagementOverlays {
         streakBonus: streakBonus,
         streakDays: streakDays,
         welcomeFirstAd: welcomeFirstAd,
+        isPremium: isPremium,
         onDone: () => entry.remove(),
       ),
     );
@@ -160,6 +162,7 @@ class _AdFanfareLayer extends StatefulWidget {
     required this.streakBonus,
     required this.streakDays,
     required this.welcomeFirstAd,
+    this.isPremium = false,
     required this.onDone,
   });
 
@@ -167,6 +170,7 @@ class _AdFanfareLayer extends StatefulWidget {
   final int streakBonus;
   final int streakDays;
   final bool welcomeFirstAd;
+  final bool isPremium;
   final VoidCallback onDone;
 
   @override
@@ -316,7 +320,7 @@ class _AdFanfareLayerState extends State<_AdFanfareLayer>
                             alignment: Alignment.center,
                             scale: _creditPop.value,
                             child: Text(
-                              widget.welcomeFirstAd
+                              widget.welcomeFirstAd && !widget.isPremium
                                   ? '+${widget.creditsAdded} FREE Credits'
                                   : '+${widget.creditsAdded} Credits 🎉',
                               textAlign: TextAlign.center,

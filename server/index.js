@@ -229,27 +229,14 @@ const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
 /**
- * GET /call?to= — server-initiated PSTN (legacy / tests).
- * **Auth:** `Authorization: Bearer <Firebase ID token>` (same as POST /call JSON).
+ * GET /call — **disabled.** Legacy server-initiated PSTN had no credit validation.
+ * Outbound calls use Twilio Voice SDK → `POST /call` (form) + `/call-live-tick` billing.
  */
-app.get("/call", async (req, res) => {
-  const uid = await getUidFromBearer(req, res);
-  if (!uid) return;
-  try {
-    const to = req.query.to;
-    if (!to) {
-      return res.status(400).send("Missing ?to= number");
-    }
-    await twilioClient.calls.create({
-      to: String(to).trim(),
-      from: process.env.TWILIO_CALLER_ID,
-      url: twimlDialUrl,
-    });
-    res.send("Call triggered successfully");
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Error: " + err.message);
-  }
+app.get("/call", (_req, res) => {
+  return res.status(410).json({
+    error: "disabled",
+    message: "GET /call is disabled. Use the in-app Twilio Voice client (token + form POST /call TwiML).",
+  });
 });
 
 /**
@@ -275,26 +262,13 @@ app.get("/token", async (req, res) => {
 });
 
 app.post("/call", async (req, res) => {
-  // Mobile app: JSON `{ "to": "+..." }` — server-initiated PSTN (optional; Voice SDK uses form branch below).
+  // JSON branch was server-initiated PSTN without Firestore credit checks — disabled (Flutter unused).
   if (req.is("application/json")) {
-    const uid = await getUidFromBearer(req, res);
-    if (!uid) return;
-    const toRaw = req.body && (req.body.to ?? req.body.To);
-    if (toRaw == null || String(toRaw).trim() === "") {
-      return res.status(400).json({ error: "Missing JSON field: to" });
-    }
-    const to = String(toRaw).trim();
-    try {
-      await twilioClient.calls.create({
-        to,
-        from: TWILIO_CALLER_ID,
-        url: twimlDialUrl,
-      });
-      return res.status(200).json({ ok: true, message: "Call triggered successfully" });
-    } catch (err) {
-      console.error(err);
-      return res.status(500).json({ error: String(err.message || err) });
-    }
+    return res.status(410).json({
+      error: "disabled",
+      message:
+        "JSON POST /call is disabled. Use Twilio Voice SDK outbound (form POST /call returns TwiML) and server billing ticks.",
+    });
   }
 
   // Twilio Voice SDK / TwiML App webhook (application/x-www-form-urlencoded): return TwiML to <Dial> PSTN.
@@ -344,6 +318,9 @@ function readAdsWatchedToday(d, dayKey) {
   if (reset !== dayKey) return 0;
   if (d.ads_watched_today !== undefined && d.ads_watched_today !== null) {
     return Number(d.ads_watched_today);
+  }
+  if (d.adsWatchedToday !== undefined && d.adsWatchedToday !== null) {
+    return Number(d.adsWatchedToday);
   }
   return Number(d.adRewardsCount || 0);
 }
@@ -399,7 +376,7 @@ app.get("/grant-reward", (_req, res) => {
 /**
  * POST /grant-reward — secured ad rewards (Flutter: GrantRewardService).
  * - Verifies Firebase ID token → uid.
- * - Each successful request adds REWARD_GRANT_CREDITS (default 2) to reward credits — **1 ad = 1 grant**.
+ * - Each successful request adds `REWARD_GRANT_CREDITS_FREE` / `REWARD_GRANT_CREDITS_PREMIUM` (env; defaults 10 / 20) to reward credits — **1 ad = 1 grant**.
  * - Legacy cycle fields (`ad_sub_counter`, `ad_progress`) are cleared to 0 each time.
  * - Daily cap: 10 ads (free) / 25 (premium) per UTC day (`ads_watched_today`).
  * - Lifetime rewarded views: `ads_watched_count` += 1 each successful grant (Flutter unlock US number).
@@ -452,7 +429,8 @@ app.post("/grant-reward", async (req, res) => {
       const dayKey = utcDayKey(now);
 
       const d = doc.exists ? doc.data() : {};
-      const premium = readIsPremium(d);
+      const premiumExpired = isPremiumSubscriptionExpired(d, now);
+      const premium = readEffectivePremiumUser(d, now);
       const maxAds = premium ? MAX_ADS_PER_DAY_PREMIUM : MAX_ADS_PER_DAY_FREE;
       const adGap = premium ? AD_GAP_SECONDS_PREMIUM : AD_GAP_SECONDS_FREE;
 
@@ -542,7 +520,6 @@ app.post("/grant-reward", async (req, res) => {
         last_ad_timestamp: FieldValue.serverTimestamp(),
         lastAdWatchTime: FieldValue.serverTimestamp(),
         lastAdRewardAt: FieldValue.serverTimestamp(),
-        adsWatchedToday: adsTodayNew,
         ad_streak_count: streakCount,
         ad_streak_last_day: lastStreakDay === dayKey ? lastStreakDay : dayKey,
         paidCredits: paid,
@@ -573,6 +550,10 @@ app.post("/grant-reward", async (req, res) => {
       if (creditsAdded > 0) {
         patch.last_grant_reward_at = FieldValue.serverTimestamp();
         patch.last_grant_at_ads_watched_today = adsTodayNew;
+      }
+
+      if (premiumExpired) {
+        Object.assign(patch, PREMIUM_SUBSCRIPTION_DEMOTE_FIELDS);
       }
 
       if (doc.exists) {
@@ -911,10 +892,6 @@ app.post("/verify-payment", async (req, res) => {
         rewardCreditsExpiresAt: reward > 0 ? expTs : null,
         credits: total,
       };
-      if (bonus > 0) {
-        premiumPatch.lastMonthlyBonus = FieldValue.serverTimestamp();
-        premiumPatch.last_monthly_bonus_at = FieldValue.serverTimestamp();
-      }
       t.update(ref, premiumPatch);
       return { ok: true, idempotent: false, plan, welcomeBonus: bonus };
     });
@@ -950,56 +927,70 @@ app.post("/claim-premium-monthly-bonus", async (req, res) => {
   const db = firebaseAdmin.firestore();
   const ref = db.collection("users").doc(uid);
   const { FieldValue } = firebaseAdmin.firestore;
-  const monthKey = utcDayKey(new Date()).slice(0, 7);
 
   try {
-    const out = await db.runTransaction(async (t) => {
-      const snap = await t.get(ref);
-      if (!snap.exists) {
-        throw Object.assign(new Error("User document not found"), { http: 404 });
-      }
-      const d = snap.data() || {};
-      if (!readIsPremium(d)) {
-        throw Object.assign(new Error("Not premium"), { http: 403 });
-      }
-      const lastRaw = d.lastMonthlyBonus || d.last_monthly_bonus_at;
-      let lastMonthKey = "";
-      if (lastRaw && typeof lastRaw.toDate === "function") {
-        lastMonthKey = utcDayKey(lastRaw.toDate()).slice(0, 7);
-      }
-      if (lastMonthKey === monthKey) {
-        return { ok: true, granted: false, reason: "already_claimed_this_month" };
-      }
+    const out = await db.runTransaction(
+      async (t) => {
+        const snap = await t.get(ref);
+        if (!snap.exists) {
+          throw Object.assign(new Error("User document not found"), { http: 404 });
+        }
+        const d = snap.data() || {};
+        const nowClaim = new Date();
+        if (isPremiumSubscriptionExpired(d, nowClaim)) {
+          t.update(ref, PREMIUM_SUBSCRIPTION_DEMOTE_FIELDS);
+          return { __premiumExpired: true };
+        }
+        if (!readEffectivePremiumUser(d, nowClaim)) {
+          throw Object.assign(new Error("Not premium"), { http: 403 });
+        }
 
-      let paid = Number(d.paidCredits ?? 0);
-      let reward = Number(d.rewardCredits ?? 0);
-      if (d.paidCredits === undefined && d.credits != null) {
-        paid = Number(d.credits);
-        reward = 0;
-      }
-      const now = new Date();
-      const expTs = d.rewardCreditsExpiresAt;
-      if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < now) {
-        paid += reward;
-        reward = 0;
-      }
-      paid += PREMIUM_MONTHLY_BONUS_CREDITS;
-      const total = paid + reward;
-      t.update(ref, {
-        paidCredits: paid,
-        rewardCredits: reward,
-        rewardCreditsExpiresAt: reward > 0 ? expTs : null,
-        credits: total,
-        lastMonthlyBonus: FieldValue.serverTimestamp(),
-        last_monthly_bonus_at: FieldValue.serverTimestamp(),
-      });
-      return {
-        ok: true,
-        granted: true,
-        creditsAdded: PREMIUM_MONTHLY_BONUS_CREDITS,
-        newBalance: total,
-      };
-    });
+        const monthKey = utcDayKey(nowClaim).slice(0, 7);
+
+        const lastMonthlyBonusTs = d.lastMonthlyBonus;
+        const lastMonthlyBonusAtTs = d.last_monthly_bonus_at;
+        const lastRaw = lastMonthlyBonusTs || lastMonthlyBonusAtTs;
+        let lastMonthKey = "";
+        if (lastRaw && typeof lastRaw.toDate === "function") {
+          lastMonthKey = utcDayKey(lastRaw.toDate()).slice(0, 7);
+        }
+        if (lastMonthKey === monthKey) {
+          return { ok: true, granted: false, reason: "already_claimed_this_month" };
+        }
+
+        let paid = Number(d.paidCredits ?? 0);
+        let reward = Number(d.rewardCredits ?? 0);
+        if (d.paidCredits === undefined && d.credits != null) {
+          paid = Number(d.credits);
+          reward = 0;
+        }
+        const expTs = d.rewardCreditsExpiresAt;
+        if (reward > 0 && expTs && expTs.toDate && expTs.toDate() < nowClaim) {
+          paid += reward;
+          reward = 0;
+        }
+        paid += PREMIUM_MONTHLY_BONUS_CREDITS;
+        const total = paid + reward;
+        t.update(ref, {
+          paidCredits: paid,
+          rewardCredits: reward,
+          rewardCreditsExpiresAt: reward > 0 ? expTs : null,
+          credits: total,
+          lastMonthlyBonus: FieldValue.serverTimestamp(),
+          last_monthly_bonus_at: FieldValue.serverTimestamp(),
+        });
+        return {
+          ok: true,
+          granted: true,
+          creditsAdded: PREMIUM_MONTHLY_BONUS_CREDITS,
+          newBalance: total,
+        };
+      },
+      { maxAttempts: 20 },
+    );
+    if (out && out.__premiumExpired) {
+      return res.status(403).json({ error: "Premium subscription expired" });
+    }
     return res.status(200).json(out);
   } catch (e) {
     const code = e.http || 500;
@@ -1064,13 +1055,14 @@ async function handlePurchaseBrowseNumber(req, res) {
     });
   }
 
-  if (countTwilioLines(d) >= maxTwilioLinesFor(d)) {
+  const nowBrowse = new Date();
+  if (countTwilioLines(d) >= maxTwilioLinesFor(d, nowBrowse)) {
     return res.status(409).json({
       error: "Number limit reached",
-      message: readIsPremium(d)
+      message: readEffectivePremiumUser(d, nowBrowse)
         ? "Maximum phone lines for your account."
         : "Free accounts can have one phone line.",
-      max: maxTwilioLinesFor(d),
+      max: maxTwilioLinesFor(d, nowBrowse),
     });
   }
 
@@ -1378,8 +1370,8 @@ function countTwilioLines(d) {
   return n;
 }
 
-function maxTwilioLinesFor(d) {
-  return readIsPremium(d) ? MAX_TWILIO_LINES_PREMIUM : MAX_TWILIO_LINES_FREE;
+function maxTwilioLinesFor(d, nowDate = new Date()) {
+  return readEffectivePremiumUser(d, nowDate) ? MAX_TWILIO_LINES_PREMIUM : MAX_TWILIO_LINES_FREE;
 }
 
 /** Outbound SMS credit deduction (reward balance first). */
@@ -1706,6 +1698,16 @@ function pickUidForAssignedNumber(docs) {
  * `createdAt` uses server timestamps for correct inbox ordering. Always respond 200 with empty TwiML.
  */
 app.post("/sms-webhook", async (req, res) => {
+  const canonicalUrl = `${publicBase}/sms-webhook`;
+  const sig = req.get("X-Twilio-Signature") || "";
+  if (process.env.SKIP_TWILIO_SIGNATURE !== "1" && TWILIO_AUTH_TOKEN) {
+    const ok = twilio.validateRequest(TWILIO_AUTH_TOKEN, sig, canonicalUrl, req.body);
+    if (!ok) {
+      console.warn("/sms-webhook: invalid Twilio signature");
+      return res.status(403).send("Forbidden");
+    }
+  }
+
   const To = String(req.body.To || "").trim();
   const From = String(req.body.From || "").trim();
   const Body = String(req.body.Body || "");
@@ -1950,7 +1952,8 @@ app.get("/api/twilio/available-numbers", async (req, res) => {
   try {
     const snap = await firebaseAdmin.firestore().collection("users").doc(uid).get();
     const d = snap.data() || {};
-    const premium = readIsPremium(d);
+    const nowAvail = new Date();
+    const premium = readEffectivePremiumUser(d, nowAvail);
     const adsOk = readLifetimeAdsWatched(d) >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
     if (!premium && !adsOk) {
       return res.status(403).json({
@@ -2054,7 +2057,8 @@ app.post("/api/twilio/provision-number", async (req, res) => {
   }
 
   const d = snap.data() || {};
-  if (!readIsPremium(d)) {
+  const nowProv = new Date();
+  if (!readEffectivePremiumUser(d, nowProv)) {
     return res.status(403).json({
       error: "Premium required",
       message: "Only premium users can provision a number via this endpoint.",
@@ -2070,7 +2074,7 @@ app.post("/api/twilio/provision-number", async (req, res) => {
     });
   }
 
-  const nowDate = new Date();
+  const nowDate = nowProv;
   const lineExpTs = Timestamp.fromDate(premiumLineExpiryFromUserDoc(d, nowDate));
 
   let incoming;
@@ -2289,6 +2293,7 @@ app.post("/assign-free-number", async (req, res) => {
     return res.status(404).json({ error: "User document not found" });
   }
   const d = snap.data() || {};
+  const nowFree = new Date();
   const existingAssigned = String(d.assigned_number ?? "").trim();
   if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
     const ne = readNumberExpiryDate(d);
@@ -2303,7 +2308,7 @@ app.post("/assign-free-number", async (req, res) => {
     });
   }
 
-  if (readIsPremium(d)) {
+  if (readEffectivePremiumUser(d, nowFree)) {
     return res.status(403).json({
       error: "Premium should use POST /purchase-number",
       message: "Choose your number from the app, then purchase the selected E.164.",
@@ -2333,13 +2338,13 @@ app.post("/assign-free-number", async (req, res) => {
     });
   }
 
-  if (countTwilioLines(d) >= maxTwilioLinesFor(d)) {
+  if (countTwilioLines(d) >= maxTwilioLinesFor(d, nowFree)) {
     return res.status(409).json({
       error: "Number limit reached",
-      message: readIsPremium(d)
+      message: readEffectivePremiumUser(d, nowFree)
         ? "Maximum phone lines for your account."
         : "Free accounts can have one phone line.",
-      max: maxTwilioLinesFor(d),
+      max: maxTwilioLinesFor(d, nowFree),
     });
   }
 
@@ -2488,7 +2493,8 @@ app.post("/purchase-number", async (req, res) => {
   }
 
   const d = snap.data() || {};
-  if (!readIsPremium(d)) {
+  const nowPurchase = new Date();
+  if (!readEffectivePremiumUser(d, nowPurchase)) {
     return res.status(403).json({
       error: "Premium required",
       message: "Only premium users can purchase a number via this endpoint.",
@@ -2508,7 +2514,7 @@ app.post("/purchase-number", async (req, res) => {
     });
   }
 
-  const nowDate = new Date();
+  const nowDate = nowPurchase;
   const lineExpTs = Timestamp.fromDate(premiumLineExpiryFromUserDoc(d, nowDate));
   const expIso = lineExpTs.toDate().toISOString();
 
@@ -2657,6 +2663,7 @@ app.post("/assign-number", async (req, res) => {
   }
 
   const d = snap.data() || {};
+  const nowAssign = new Date();
   const existingAssigned = String(d.assigned_number ?? "").trim();
   if (existingAssigned && existingAssigned.toLowerCase() !== "none") {
     const ne = readNumberExpiryDate(d);
@@ -2671,13 +2678,13 @@ app.post("/assign-number", async (req, res) => {
     });
   }
 
-  if (countTwilioLines(d) >= maxTwilioLinesFor(d)) {
+  if (countTwilioLines(d) >= maxTwilioLinesFor(d, nowAssign)) {
     return res.status(409).json({
       error: "Number limit reached",
-      message: readIsPremium(d)
+      message: readEffectivePremiumUser(d, nowAssign)
         ? "Maximum phone lines for your account."
         : "Free accounts can have one phone line.",
-      max: maxTwilioLinesFor(d),
+      max: maxTwilioLinesFor(d, nowAssign),
     });
   }
 
@@ -2693,7 +2700,7 @@ app.post("/assign-number", async (req, res) => {
   const adsLifetime = readLifetimeAdsWatched(d);
   const enoughCredits = usable >= ASSIGN_NUMBER_MIN_CREDITS;
   const enoughAds = adsLifetime >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
-  const premium = readIsPremium(d);
+  const premium = readEffectivePremiumUser(d, nowAssign);
 
   if (!premium && !enoughAds && !enoughCredits) {
     return res.status(403).json({
@@ -2834,6 +2841,37 @@ function readNumberExpiryDate(d) {
   return null;
 }
 
+/**
+ * Pro subscription end — prefers `expiry_date` (set by verify-payment), else same triplet as
+ * [readNumberExpiryDate] for older docs.
+ */
+function readSubscriptionExpiryDate(d) {
+  if (!d) return null;
+  const ex = d.expiry_date;
+  if (ex && typeof ex.toDate === "function") return ex.toDate();
+  return readNumberExpiryDate(d);
+}
+
+/** True when doc flags say premium but subscription end is on or before [nowDate] (UTC wall clock). */
+function isPremiumSubscriptionExpired(d, nowDate = new Date()) {
+  if (!readIsPremium(d)) return false;
+  const exp = readSubscriptionExpiryDate(d);
+  if (!exp) return false;
+  return exp.getTime() <= nowDate.getTime();
+}
+
+/** Premium for product / billing gates: Pro flag and subscription not past end (see [isPremiumSubscriptionExpired]). */
+function readEffectivePremiumUser(d, nowDate = new Date()) {
+  return readIsPremium(d) && !isPremiumSubscriptionExpired(d, nowDate);
+}
+
+/** Firestore fields written when subscription expiry demotes the user to free tier. */
+const PREMIUM_SUBSCRIPTION_DEMOTE_FIELDS = {
+  isPremium: false,
+  subscription_tier: "free",
+  subscriptionTier: "free",
+};
+
 /** Primary line status: `active` | `expired` (and legacy `number_status`). */
 function readNumberLineStatus(d) {
   if (!d) return "";
@@ -2845,13 +2883,13 @@ function readNumberLineStatus(d) {
 }
 
 /** `normal` (free auto-assign) | `vip` (credit assign-number) | `premium` (Pro purchase). */
-function readNumberTier(d) {
+function readNumberTier(d, nowDate = new Date()) {
   if (!d) return "normal";
   const t = String(d.number_tier ?? d.numberTier ?? "").toLowerCase().trim();
   if (t === "normal" || t === "vip" || t === "premium") return t;
   const npt = String(d.number_plan_type ?? "").toLowerCase();
   if (npt === "browse_credits") return "vip";
-  if (readIsPremium(d)) return "premium";
+  if (readEffectivePremiumUser(d, nowDate)) return "premium";
   return "normal";
 }
 
@@ -2881,7 +2919,7 @@ function assertAssignedNumberSubscriptionActive(d) {
   if (!assigned || assigned.toLowerCase() === "none") return;
   const exp = readNumberExpiryDate(d);
   if (exp == null) return;
-  const tier = readNumberTier(d);
+  const tier = readNumberTier(d, new Date());
   const graceMs = tier === "premium" ? PREMIUM_SUBSCRIPTION_GRACE_MS : 0;
   if (exp.getTime() + graceMs < Date.now()) {
     const err = new Error("Assigned number lease expired — renew your plan in the app.");
@@ -2889,6 +2927,76 @@ function assertAssignedNumberSubscriptionActive(d) {
     err.code = "NUMBER_EXPIRED";
     throw err;
   }
+}
+
+/**
+ * Demote Firestore users whose Pro subscription end is in the past but `isPremium` was never cleared
+ * (offline clients, missed writes). Uses [isPremiumSubscriptionExpired] / [readSubscriptionExpiryDate]
+ * (`expiry_date` first, then number-lease fields — same as live routes).
+ *
+ * Queries (two passes, same pagination): `isPremium == true` (boolean) and `isPremium == "true"` (legacy string).
+ */
+async function runPremiumExpiryJanitor() {
+  if (!firebaseAdmin) {
+    console.warn("[premium-expiry-janitor] skipped — Firebase Admin not configured");
+    return { skipped: true, scanned: 0, demoted: 0, errors: 0 };
+  }
+  const db = firebaseAdmin.firestore();
+  const { FieldPath } = firebaseAdmin.firestore;
+  const now = new Date();
+  const pageSize = 400;
+  const out = { scanned: 0, demoted: 0, errors: 0 };
+
+  /**
+   * @param {boolean|string} premiumEq — Firestore `isPremium` equality (boolean `true` or legacy `"true"`).
+   */
+  async function paginateDemote(premiumEq) {
+    let lastDoc = null;
+    for (;;) {
+      let q = db
+        .collection("users")
+        .where("isPremium", "==", premiumEq)
+        .orderBy(FieldPath.documentId())
+        .limit(pageSize);
+      if (lastDoc) {
+        q = q.startAfter(lastDoc);
+      }
+      const snap = await q.get();
+      if (snap.empty) {
+        break;
+      }
+      for (const doc of snap.docs) {
+        out.scanned += 1;
+        const d = doc.data() || {};
+        if (!readIsPremium(d)) {
+          continue;
+        }
+        if (!isPremiumSubscriptionExpired(d, now)) {
+          continue;
+        }
+        try {
+          await doc.ref.update(PREMIUM_SUBSCRIPTION_DEMOTE_FIELDS);
+          out.demoted += 1;
+          console.log(`[premium-expiry-janitor] demoted uid=${doc.id}`);
+        } catch (e) {
+          out.errors += 1;
+          console.error(`[premium-expiry-janitor] update failed uid=${doc.id}:`, e.message || e);
+        }
+      }
+      lastDoc = snap.docs[snap.docs.length - 1];
+      if (snap.size < pageSize) {
+        break;
+      }
+    }
+  }
+
+  await paginateDemote(true);
+  await paginateDemote("true");
+
+  console.log(
+    `[premium-expiry-janitor] done scanned=${out.scanned} demoted=${out.demoted} errors=${out.errors}`,
+  );
+  return out;
 }
 
 /**
@@ -2950,7 +3058,7 @@ async function runNumberLeaseJanitor() {
     if (leaseEnd == null) {
       continue;
     }
-    const tier = readNumberTier(d);
+    const tier = readNumberTier(d, new Date(nowMs));
     const graceMs = tier === "premium" ? PREMIUM_SUBSCRIPTION_GRACE_MS : 0;
     if (leaseEnd.getTime() + graceMs >= nowMs) {
       continue;
@@ -3116,13 +3224,13 @@ async function settleOutboundCallBill({
     const prepaid = Number(liveSnap.exists ? liveSnap.data()?.liveDeductedCredits || 0 : 0);
 
     const d = userSnap.data();
-    const premium = readIsPremium(d);
+    const now = new Date();
+    const premium = readEffectivePremiumUser(d, now);
     /** Billed tick units: free = 1 credit / 6s; premium = 7 credits/min (align with ~8571ms live ticks). */
     const tickUnits = premium ? Math.ceil((ds * CALL_CREDITS_PER_MINUTE_PREMIUM) / 60) : Math.ceil(ds / 6);
     const billCredits = tickUnits;
     let paid = Number(d.paidCredits ?? 0);
     let reward = Number(d.rewardCredits ?? 0);
-    const now = new Date();
     const expTs = d.rewardCreditsExpiresAt;
     if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < now) {
       paid += reward;
@@ -3209,8 +3317,9 @@ async function settleOutboundCallBill({
 }
 
 /**
- * POST /call-live-tick — Firebase Bearer; JSON `{ "callSid": "CA...", "amount": 1|10 }`.
- * Deducts credits on the server and increments live session total (reconciled at call end).
+ * POST /call-live-tick — Firebase Bearer; JSON `{ "callSid": "CA...", "amount": 1|10 }` (legacy).
+ * **Trust:** debit is always **1** prepaid credit per request; `amount` is validated but not used for the debit
+ * (prevents inflated client ticks). `POST /sync-call-billing` / Twilio settlement reconciles final duration.
  */
 app.post("/call-live-tick", async (req, res) => {
   if (!firebaseAdmin) {
@@ -3246,11 +3355,11 @@ app.post("/call-live-tick", async (req, res) => {
   }
 
   const callSid = String(req.body?.callSid || req.body?.CallSid || "").trim();
-  const amount = Number(req.body?.amount);
+  const clientAmount = Number(req.body?.amount);
   if (!callSid) {
     return res.status(400).json({ error: "Missing callSid" });
   }
-  if (!Number.isFinite(amount) || !ALLOWED_LIVE_TICK_AMOUNTS.has(amount)) {
+  if (!Number.isFinite(clientAmount) || !ALLOWED_LIVE_TICK_AMOUNTS.has(clientAmount)) {
     return res.status(400).json({ error: "Invalid amount (allowed: 1 or 10)" });
   }
 
@@ -3280,12 +3389,14 @@ app.post("/call-live-tick", async (req, res) => {
       }
 
       const d = userSnap.data();
-      const debit = amount;
+      const nowTick = new Date();
+      const premiumExpired = isPremiumSubscriptionExpired(d, nowTick);
+      const premium = readEffectivePremiumUser(d, nowTick);
+      const debit = 1;
       let paid = Number(d.paidCredits ?? 0);
       let reward = Number(d.rewardCredits ?? 0);
-      const now = new Date();
       const expTs = d.rewardCreditsExpiresAt;
-      if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < now) {
+      if (reward > 0 && expTs && typeof expTs.toDate === "function" && expTs.toDate() < nowTick) {
         paid += reward;
         reward = 0;
       }
@@ -3308,19 +3419,29 @@ app.post("/call-live-tick", async (req, res) => {
 
       let rewardExpOut = null;
       if (reward > 0) {
-        rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= now ? expTs : null;
+        rewardExpOut = expTs && expTs.toDate && expTs.toDate() >= nowTick ? expTs : null;
       }
 
       const bal = paid + reward;
+      if (clientAmount !== 1) {
+        console.warn(
+          `[billing] call-live-tick clientAmount=${clientAmount} ignored; debit=${debit} user=${uid} callSid=${callSid}`,
+        );
+      }
       console.log(
-        `[billing] call-live-tick user=${uid} callSid=${callSid} amount=${amount} debit=${debit} balanceAfter=${bal}`,
+        `[billing] call-live-tick user=${uid} callSid=${callSid} premium=${premium} premiumExpired=${premiumExpired} ` +
+          `clientAmount=${clientAmount} debit=${debit} balanceAfter=${bal}`,
       );
-      t.update(userRef, {
+      const tickPatch = {
         paidCredits: paid,
         rewardCredits: reward,
         rewardCreditsExpiresAt: rewardExpOut,
         credits: bal,
-      });
+      };
+      if (premiumExpired) {
+        Object.assign(tickPatch, PREMIUM_SUBSCRIPTION_DEMOTE_FIELDS);
+      }
+      t.update(userRef, tickPatch);
       t.set(
         liveRef,
         {
@@ -3571,6 +3692,33 @@ app.post("/jobs/run-number-janitor", async (req, res) => {
 });
 
 /**
+ * POST /jobs/run-premium-expiry-janitor — optional HTTP cron (Render). Header `X-Cron-Secret` must match `CRON_SECRET`.
+ * Demotes `isPremium` users past [readSubscriptionExpiryDate] (see [runPremiumExpiryJanitor]).
+ *
+ * Alias: POST `/jobs/premium-expiry-janitor` (same handler) — avoids 404 when cron URL omits `run-`.
+ */
+async function handlePremiumExpiryJanitorHttp(req, res) {
+  const secret = String(process.env.CRON_SECRET || "").trim();
+  if (!secret) {
+    return res.status(503).json({ error: "CRON_SECRET not configured" });
+  }
+  const got = String(req.headers["x-cron-secret"] ?? "").trim();
+  if (got !== secret) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const r = await runPremiumExpiryJanitor();
+    return res.status(200).json({ ok: true, ...r });
+  } catch (e) {
+    console.error(`${req.path || "/jobs/run-premium-expiry-janitor"}:`, e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+}
+
+app.post("/jobs/run-premium-expiry-janitor", handlePremiumExpiryJanitorHttp);
+app.post("/jobs/premium-expiry-janitor", handlePremiumExpiryJanitorHttp);
+
+/**
  * POST /renew-number — Bearer; JSON `{ "mode": "ads" | "credits" }`. Extends primary line `expiry_date`.
  */
 app.post("/renew-number", async (req, res) => {
@@ -3634,7 +3782,7 @@ app.post("/renew-number", async (req, res) => {
     });
   }
 
-  const premium = readIsPremium(d);
+  const premium = readEffectivePremiumUser(d, now);
   const baseMs = Math.max(now.getTime(), cur.getTime());
   const extendFreeMs = FREE_TIER_NUMBER_LEASE_MS;
   const planKey = normalizePlanType(d.premium_plan_type) || "monthly";
@@ -3928,6 +4076,26 @@ const server = app.listen(Number(PORT), () => {
       { timezone: "UTC" },
     );
     console.log(`[number-janitor] scheduled (cron="${schedule}" UTC) — releases expired Twilio numbers`);
+  }
+
+  if (process.env.DISABLE_PREMIUM_EXPIRY_JANITOR === "1") {
+    console.log("[premium-expiry-janitor] disabled (DISABLE_PREMIUM_EXPIRY_JANITOR=1)");
+  } else if (!firebaseAdmin) {
+    console.warn("[premium-expiry-janitor] not scheduled — Firebase Admin not configured");
+  } else {
+    const premSchedule = String(process.env.PREMIUM_EXPIRY_JANITOR_CRON || "15 * * * *").trim();
+    cron.schedule(
+      premSchedule,
+      () => {
+        runPremiumExpiryJanitor().catch((e) =>
+          console.error("[premium-expiry-janitor] unhandled:", e.message || e),
+        );
+      },
+      { timezone: "UTC" },
+    );
+    console.log(
+      `[premium-expiry-janitor] scheduled (cron="${premSchedule}" UTC) — demotes expired Pro subscriptions`,
+    );
   }
 });
 server.on("error", (err) => {

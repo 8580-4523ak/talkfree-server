@@ -73,6 +73,7 @@ class CallHistoryScreen extends StatelessWidget {
           final docs = snap.data?.docs ?? [];
           if (docs.isEmpty) {
             return _EmptyRecentsState(
+              user: user,
               onStartCalling: onStartCalling,
               onWatchAd: onWatchAd,
             );
@@ -114,8 +115,13 @@ class CallHistoryScreen extends StatelessWidget {
 }
 
 class _EmptyRecentsState extends StatelessWidget {
-  const _EmptyRecentsState({this.onStartCalling, this.onWatchAd});
+  const _EmptyRecentsState({
+    required this.user,
+    this.onStartCalling,
+    this.onWatchAd,
+  });
 
+  final User user;
   final VoidCallback? onStartCalling;
   final Future<void> Function()? onWatchAd;
 
@@ -154,57 +160,73 @@ class _EmptyRecentsState extends StatelessWidget {
             ),
             const SizedBox(height: 28),
             if (onWatchAd != null) ...[
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: () async {
-                    await runRewardedAdGrantFlow(context);
-                  },
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: AppColors.onPrimary,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: Text(
-                    'WATCH AD TO START',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.35,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    onStartCalling?.call();
-                  },
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.textOnDark,
-                    side: BorderSide(
-                      color: Colors.white.withValues(alpha: 0.2),
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: Text(
-                    'Open dialer',
-                    style: GoogleFonts.inter(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
+              StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                stream: FirestoreUserService.watchUserDocument(user.uid),
+                builder: (context, userSnap) {
+                  final isPremium = FirestoreUserService.isPremiumFromUserData(
+                    userSnap.data?.data(),
+                  );
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: () async {
+                            await runRewardedAdGrantFlow(
+                              context,
+                              isPremium: isPremium,
+                            );
+                          },
+                          style: FilledButton.styleFrom(
+                            backgroundColor: AppColors.primary,
+                            foregroundColor: AppColors.onPrimary,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            elevation: 0,
+                          ),
+                          child: Text(
+                            'WATCH AD TO START',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.35,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton(
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            onStartCalling?.call();
+                          },
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: AppColors.textOnDark,
+                            side: BorderSide(
+                              color: Colors.white.withValues(alpha: 0.2),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                          child: Text(
+                            'Open dialer',
+                            style: GoogleFonts.inter(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
             ] else
               SizedBox(

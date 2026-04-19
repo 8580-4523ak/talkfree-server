@@ -111,6 +111,25 @@ class FirestoreUserService {
     return null;
   }
 
+  /// Pro subscription end — prefers `expiry_date` (Node `/verify-payment`), else [numberLeaseExpiryFromUserData].
+  static DateTime? subscriptionExpiryFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    final ex = data['expiry_date'];
+    if (ex is Timestamp) return ex.toDate();
+    return numberLeaseExpiryFromUserData(data);
+  }
+
+  static bool _rawPremiumFlags(Map<String, dynamic> data) {
+    final p = data['isPremium'];
+    if (p is bool && p) return true;
+    if (p is String && p.toLowerCase().trim() == 'true') return true;
+    final raw =
+        data['subscription_tier'] ?? data['subscriptionTier'] ?? data['plan'];
+    if (raw == null) return false;
+    final s = raw.toString().toLowerCase().trim();
+    return s == 'pro' || s == 'premium';
+  }
+
   /// Server line tier: `normal` | `vip` | `premium`.
   static String? numberTierFromUserData(Map<String, dynamic>? data) {
     if (data == null) return null;
@@ -189,20 +208,18 @@ class FirestoreUserService {
     return _int(data['ad_streak_count']);
   }
 
-  /// `true` when `isPremium` is set or legacy tier fields say Pro.
+  /// `true` when Firestore flags say Pro **and** [subscriptionExpiryFromUserData] is null or after [at] (UTC).
+  /// Matches Node `readEffectivePremiumUser` (stale `isPremium` before demotion still reads as non‑premium).
   ///
   /// **Security:** `isPremium` / credits must be written only by Firebase Admin (Node `/verify-payment`,
   /// `/grant-reward`, billing). See `firestore.rules`.
-  static bool isPremiumFromUserData(Map<String, dynamic>? data) {
+  static bool isPremiumFromUserData(Map<String, dynamic>? data, [DateTime? at]) {
     if (data == null) return false;
-    final p = data['isPremium'];
-    if (p is bool && p) return true;
-    if (p is String && p.toLowerCase().trim() == 'true') return true;
-    final raw =
-        data['subscription_tier'] ?? data['subscriptionTier'] ?? data['plan'];
-    if (raw == null) return false;
-    final s = raw.toString().toLowerCase().trim();
-    return s == 'pro' || s == 'premium';
+    if (!_rawPremiumFlags(data)) return false;
+    final n = (at ?? DateTime.now()).toUtc();
+    final exp = subscriptionExpiryFromUserData(data);
+    if (exp == null) return true;
+    return exp.toUtc().isAfter(n);
   }
 
   /// `'free'` | `'premium'` — derived from [isPremiumFromUserData].
@@ -486,7 +503,7 @@ class FirestoreUserService {
   }
 
   /// Records one rewarded-ad view (daily cap + cooldown). Prefer **POST /grant-reward** for credits.
-  /// Returns [serverGrantNeeded] **true** — call [GrantRewardService] to sync server-side grant (+2 credits).
+  /// Returns [serverGrantNeeded] **true** — call [GrantRewardService] to sync server-side grant (credits from server).
   static Future<
       ({
         bool serverGrantNeeded,
@@ -510,7 +527,7 @@ class FirestoreUserService {
         storedDay = dayKey;
       }
 
-      final premium = isPremiumFromUserData(m);
+      final premium = isPremiumFromUserData(m, now);
       final coolDownSec = CreditsPolicy.adRewardCooldownSecondsForUser(premium);
       final cap = CreditsPolicy.maxRewardedAdsForUser(premium);
 
@@ -532,7 +549,6 @@ class FirestoreUserService {
         'ad_sub_counter': 0,
         'adRewardCycleCount': 0,
         'ads_watched_today': count + 1,
-        'adsWatchedToday': count + 1,
         'last_reset_date': storedDay,
         'last_ad_timestamp': FieldValue.serverTimestamp(),
         'lastAdWatchTime': FieldValue.serverTimestamp(),
@@ -644,7 +660,7 @@ class FirestoreUserService {
     final dayKey =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     final count = _readAdsWatchedToday(m, dayKey);
-    final premium = isPremiumFromUserData(m);
+    final premium = isPremiumFromUserData(m, now);
     final coolDownSec = CreditsPolicy.adRewardCooldownSecondsForUser(premium);
     final cap = CreditsPolicy.maxRewardedAdsForUser(premium);
 

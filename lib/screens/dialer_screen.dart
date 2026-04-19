@@ -53,7 +53,7 @@ class DialerScreen extends StatefulWidget {
   final VoidCallback? onOpenHistory;
   /// Hides the large credits card when [onOpenHistory] shows credits in the header row.
   final bool embedInShell;
-  /// Pro subscribers get unlimited outbound calling (no per-minute credit UI).
+  /// Pro subscribers: lower per-minute cost in billing (no per-minute credit UI here).
   final bool isPremium;
   final Future<void> Function()? onEarnMinutes;
   final bool rewardedAdBusy;
@@ -582,6 +582,7 @@ class _DialerScreenState extends State<DialerScreen>
       lifetimeAdsWatched:
           FirestoreUserService.lifetimeAdsWatchedFromUserData(userData),
       streakDays: FirestoreUserService.adStreakCountFromUserData(userData),
+      isPremium: widget.isPremium,
     );
     return RewardCtaAnimatedLabel(
       title: cta.title,
@@ -1273,7 +1274,7 @@ class _GlassCreditsCard extends StatelessWidget {
       ),
       child: isPremium
           ? Text(
-              'Unlimited calling (Pro)',
+              'Lower call cost (Pro)',
               style: GoogleFonts.inter(
                 fontSize: 16,
                 fontWeight: FontWeight.w700,

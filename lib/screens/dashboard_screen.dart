@@ -411,6 +411,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               streakBonus: result.streakBonus,
               streakDays: result.streakCount,
               welcomeFirstAd: result.firstLifetimeAd,
+              isPremium: FirestoreUserService.isPremiumTierLabel(
+                _subscriptionTier.value,
+              ),
             );
             if (result.adsWatchedToday == 3) {
               if (!mounted) return;
@@ -1366,6 +1369,7 @@ class _FreeGetMinutesCta extends StatelessWidget {
     required this.onWatchRewardedAd,
     required this.lifetimeAdsWatched,
     required this.adStreakCount,
+    required this.isPremium,
   });
 
   final bool canTapAd;
@@ -1376,6 +1380,8 @@ class _FreeGetMinutesCta extends StatelessWidget {
   final Future<void> Function() onWatchRewardedAd;
   final ValueNotifier<int> lifetimeAdsWatched;
   final ValueNotifier<int> adStreakCount;
+  /// Matches server ad grant tier (home ad row is only shown for non‑Pro; still pass for CTA copy).
+  final bool isPremium;
 
   @override
   Widget build(BuildContext context) {
@@ -1503,6 +1509,7 @@ class _FreeGetMinutesCta extends StatelessWidget {
                                       final cta = RewardAdCtaCopy.homeOrDialer(
                                         lifetimeAdsWatched: lifetime,
                                         streakDays: streak,
+                                        isPremium: isPremium,
                                       );
                                       return Column(
                                         crossAxisAlignment:
@@ -1749,7 +1756,7 @@ class _FreeProUpsellCard extends StatelessWidget {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            'Unlimited calls + No ads',
+                            'Lower call cost + No ads',
                             style: GoogleFonts.inter(
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
@@ -2442,6 +2449,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
                             onWatchRewardedAd: widget.onWatchRewardedAd,
                             lifetimeAdsWatched: widget.lifetimeAdsWatched,
                             adStreakCount: widget.adStreakCount,
+                            isPremium: isPro,
                           ),
                         ),
                       ),
@@ -2625,7 +2633,7 @@ class _PremiumCardShinePainter extends CustomPainter {
       oldDelegate._t.value != _t.value;
 }
 
-/// Pro-only home hero: greeting, shine, icon row, unlimited — no ad UI.
+/// Pro-only home hero: greeting, shine, icon row, Pro benefits — no ad UI.
 class _ProPremiumShineHeroCard extends StatelessWidget {
   const _ProPremiumShineHeroCard({
     required this.displayName,
@@ -3016,7 +3024,7 @@ class _ProPremiumBenefitsSection extends StatelessWidget {
           children: const [
             _ProBenefitCell(
               icon: Icons.phone_in_talk_rounded,
-              label: 'Unlimited\nCalling',
+              label: 'Lower call\ncost',
             ),
             _ProBenefitCell(
               icon: Icons.shield_rounded,

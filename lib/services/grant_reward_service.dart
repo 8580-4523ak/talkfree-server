@@ -6,7 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../config/voice_backend_config.dart';
 
-/// Result of POST `/grant-reward` (server adds [creditsAdded] per ad, typically 2).
+/// Result of POST `/grant-reward` (server adds [creditsAdded] per ad; free vs premium from env).
 class GrantRewardResult {
   const GrantRewardResult({
     required this.creditsAdded,

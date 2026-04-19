@@ -21,7 +21,7 @@ class _PendingTick {
   final DateTime queuedAt;
 }
 
-/// **Tier 1:** [postLiveTick] → `POST /call-live-tick` (1 or 10 credits).
+/// **Tier 1:** [postLiveTick] → `POST /call-live-tick` (server debits **1** credit per tick; body `amount` is legacy).
 /// **Tier 2:** [runFinalSettlementWindow] + [syncCallBilling] → `POST /sync-call-billing`
 /// (Twilio duration vs prepaid; idempotent). Twilio `/call-status` webhook is a backup if the app dies.
 ///
@@ -118,7 +118,7 @@ class CallLiveBillingService {
     return flushed;
   }
 
-  /// Deducts [amount] (1 or 10) for an in-progress Twilio Voice call.
+  /// Sends a live billing tick; server always deducts one prepaid unit (see [CreditsPolicy] for allowed [amount] values).
   Future<bool> postLiveTick({
     required String callSid,
     required int amount,

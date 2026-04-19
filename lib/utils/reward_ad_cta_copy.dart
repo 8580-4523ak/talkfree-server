@@ -9,12 +9,14 @@ abstract final class RewardAdCtaCopy {
   static ({String title, String subtitle}) homeOrDialer({
     required int lifetimeAdsWatched,
     required int streakDays,
+    required bool isPremium,
   }) {
+    final perAd = CreditsPolicy.creditsPerRewardedAdForUser(isPremium);
     final next = CreditsPolicy.nextStreakMilestoneAfter(streakDays);
     if (lifetimeAdsWatched == 0) {
       return (
         title: MonetizationCopy.watchAdEarn,
-        subtitle: 'Earn ${CreditsPolicy.creditsPerRewardedAdForUser(false)} credits per ad',
+        subtitle: 'Earn $perAd credits per ad',
       );
     }
     if (next != null && next.day - streakDays == 1) {
@@ -25,7 +27,7 @@ abstract final class RewardAdCtaCopy {
     }
     return (
       title: MonetizationCopy.watchAdEarn,
-      subtitle: 'Earn ${CreditsPolicy.creditsPerRewardedAdForUser(false)} credits per ad',
+      subtitle: 'Earn $perAd credits per ad',
     );
   }
 }

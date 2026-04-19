@@ -310,7 +310,10 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                                       if (widget.onWatchRewardedAd != null) {
                                         await widget.onWatchRewardedAd!();
                                       } else {
-                                        await runRewardedAdGrantFlow(context);
+                                        await runRewardedAdGrantFlow(
+                                          context,
+                                          isPremium: isPremium,
+                                        );
                                       }
                                     } finally {
                                       if (mounted) {
