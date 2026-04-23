@@ -1255,6 +1255,9 @@ const SUBSCRIPTION_PLAN_AMOUNTS_INR = {
   yearly: 114900,
   /** Starter credit pack — ₹59 (120–150 credits on grant). */
   starter_credits: 5900,
+  credit_pack_small: 4900,
+  credit_pack_medium: 9900,
+  credit_pack_large: 19900,
 };
 const SUBSCRIPTION_PLAN_AMOUNTS_USD = {
   daily: 99,
@@ -1262,6 +1265,16 @@ const SUBSCRIPTION_PLAN_AMOUNTS_USD = {
   monthly: 499,
   yearly: 12999,
   starter_credits: 99,
+  credit_pack_small: 49,
+  credit_pack_medium: 99,
+  credit_pack_large: 199,
+};
+
+/** Credits added to `paidCredits` on successful verify for each pack plan_key. */
+const CREDIT_PACK_CREDITS = {
+  credit_pack_small: 100,
+  credit_pack_medium: 250,
+  credit_pack_large: 600,
 };
 
 const PREMIUM_WELCOME_BONUS = Number(process.env.PREMIUM_WELCOME_BONUS || 100);
@@ -1377,6 +1390,84 @@ app.post("/create-subscription-order", async (req, res) => {
     });
   } catch (e) {
     console.error("create-subscription-order:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+/**
+ * POST /purchase-credits-pack — Firebase Bearer; JSON `{ "pack": "small"|"medium"|"large" }`.
+ * Creates a Razorpay Order (same shape as create-subscription-order); verify via POST /verify-payment.
+ */
+app.post("/purchase-credits-pack", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured (set FIREBASE_SERVICE_ACCOUNT_JSON)" });
+  }
+  const rzp = getRazorpaySdk();
+  if (!rzp) {
+    return res.status(503).json({
+      error: "Razorpay not configured on server (set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)",
+    });
+  }
+  const auth = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) {
+    return res.status(401).json({ error: "Missing Authorization: Bearer <Firebase ID token>" });
+  }
+  let uid;
+  try {
+    uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+  } catch (e) {
+    console.error("verifyIdToken (purchase-credits-pack):", e.message);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  const pack = String(req.body && req.body.pack != null ? req.body.pack : "")
+    .trim()
+    .toLowerCase();
+  const planKey =
+    pack === "small"
+      ? "credit_pack_small"
+      : pack === "medium"
+        ? "credit_pack_medium"
+        : pack === "large"
+          ? "credit_pack_large"
+          : null;
+  if (!planKey) {
+    return res.status(400).json({
+      error: "Missing or invalid pack",
+      expected: ["small", "medium", "large"],
+    });
+  }
+  const currency = String(process.env.RAZORPAY_CURRENCY || "INR")
+    .trim()
+    .toUpperCase();
+  const amount =
+    currency === "USD"
+      ? SUBSCRIPTION_PLAN_AMOUNTS_USD[planKey]
+      : SUBSCRIPTION_PLAN_AMOUNTS_INR[planKey];
+  if (amount == null || !Number.isFinite(amount)) {
+    return res.status(500).json({ error: "Unknown amount for pack/currency" });
+  }
+  const keyId = String(process.env.RAZORPAY_KEY_ID).trim();
+  const receipt = `tf_cp_${uid.slice(0, 10)}_${pack}_${Date.now()}`.slice(0, 40);
+  try {
+    const order = await rzp.orders.create({
+      amount,
+      currency,
+      receipt,
+      notes: {
+        firebase_uid: uid,
+        plan_key: planKey,
+      },
+    });
+    return res.status(200).json({
+      orderId: order.id,
+      amount: Number(order.amount),
+      currency: order.currency,
+      keyId,
+      planKey,
+    });
+  } catch (e) {
+    console.error("purchase-credits-pack:", e);
     return res.status(500).json({ error: String(e.message || e) });
   }
 });
@@ -1511,6 +1602,26 @@ app.post("/verify-payment", async (req, res) => {
           idempotent: false,
           plan,
           starterCreditsAdded: STARTER_PACK_CREDITS,
+          welcomeBonus: 0,
+        };
+      }
+
+      const packCredits = CREDIT_PACK_CREDITS[plan];
+      if (packCredits != null && Number.isFinite(packCredits) && packCredits > 0) {
+        paid += packCredits;
+        const total = paid + reward;
+        t.update(ref, {
+          last_razorpay_payment_id: razorpay_payment_id,
+          paidCredits: paid,
+          rewardCredits: reward,
+          rewardCreditsExpiresAt: reward > 0 ? expTs : null,
+          credits: total,
+        });
+        return {
+          ok: true,
+          idempotent: false,
+          plan,
+          creditPackCreditsAdded: packCredits,
           welcomeBonus: 0,
         };
       }
@@ -2060,7 +2171,20 @@ function normalizePlanType(raw) {
   const s = String(raw ?? "")
     .trim()
     .toLowerCase();
-  if (["daily", "weekly", "monthly", "yearly", "starter_credits"].includes(s)) return s;
+  if (
+    [
+      "daily",
+      "weekly",
+      "monthly",
+      "yearly",
+      "starter_credits",
+      "credit_pack_small",
+      "credit_pack_medium",
+      "credit_pack_large",
+    ].includes(s)
+  ) {
+    return s;
+  }
   return null;
 }
 

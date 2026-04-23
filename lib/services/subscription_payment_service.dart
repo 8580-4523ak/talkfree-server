@@ -13,12 +13,15 @@ class SubscriptionOrderResponse {
     required this.amount,
     required this.currency,
     required this.keyId,
+    this.planKey,
   });
 
   final String orderId;
   final int amount;
   final String currency;
   final String keyId;
+  /// Set for `POST /purchase-credits-pack` (Razorpay order `notes.plan_key`).
+  final String? planKey;
 }
 
 class SubscriptionPaymentException implements Exception {
@@ -36,12 +39,15 @@ class VerifyPaymentResult {
     this.plan,
     this.welcomeBonusCredits = 0,
     this.starterCreditsAdded = 0,
+    this.creditPackCreditsAdded = 0,
     this.idempotent = false,
   });
 
   final String? plan;
   final int welcomeBonusCredits;
   final int starterCreditsAdded;
+  /// Credits from `credit_pack_*` verify (paid balance).
+  final int creditPackCreditsAdded;
   final bool idempotent;
 }
 
@@ -89,6 +95,44 @@ class SubscriptionPaymentService {
       amount: (j['amount'] as num).toInt(),
       currency: j['currency'] as String,
       keyId: j['keyId'] as String,
+      planKey: j['planKey'] as String?,
+    );
+  }
+
+  /// Razorpay order for a credit pack (`small` | `medium` | `large`). Verify with [verifyPayment].
+  Future<SubscriptionOrderResponse> createCreditsPackOrder(String pack) async {
+    final token = await _bearer();
+    if (token == null || token.isEmpty) {
+      throw StateError('Not signed in');
+    }
+    final uri = VoiceBackendConfig.purchaseCreditsPackUri();
+    final response = await http
+        .post(
+          uri,
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: jsonEncode(<String, String>{'pack': pack}),
+        )
+        .timeout(const Duration(seconds: 45));
+
+    if (response.statusCode != 200) {
+      if (kDebugMode) {
+        debugPrint('purchase-credits-pack: ${response.statusCode} ${response.body}');
+      }
+      throw SubscriptionPaymentException(
+        response.statusCode,
+        _parseError(response.body) ?? 'Could not create pack order',
+      );
+    }
+    final j = jsonDecode(response.body) as Map<String, dynamic>;
+    return SubscriptionOrderResponse(
+      orderId: j['orderId'] as String,
+      amount: (j['amount'] as num).toInt(),
+      currency: j['currency'] as String,
+      keyId: j['keyId'] as String,
+      planKey: j['planKey'] as String?,
     );
   }
 
@@ -134,11 +178,13 @@ class SubscriptionPaymentService {
     final plan = j['plan'] as String?;
     final welcome = (j['welcomeBonus'] as num?)?.toInt() ?? 0;
     final starter = (j['starterCreditsAdded'] as num?)?.toInt() ?? 0;
+    final packCredits = (j['creditPackCreditsAdded'] as num?)?.toInt() ?? 0;
     final idem = j['idempotent'] == true;
     return VerifyPaymentResult(
       plan: plan,
       welcomeBonusCredits: welcome,
       starterCreditsAdded: starter,
+      creditPackCreditsAdded: packCredits,
       idempotent: idem,
     );
   }

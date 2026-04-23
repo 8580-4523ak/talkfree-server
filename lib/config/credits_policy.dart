@@ -48,6 +48,25 @@ abstract final class CreditsPolicy {
   /// Starter pack: credits added on successful `starter_credits` purchase.
   static const int starterPackCredits = 80;
 
+  /// Razorpay-backed credit packs (`POST /purchase-credits-pack` + `/verify-payment`).
+  static const List<CreditPackOffer> creditPackOffers = [
+    CreditPackOffer(
+      packId: 'small',
+      rupeesLabel: '₹49',
+      credits: 100,
+    ),
+    CreditPackOffer(
+      packId: 'medium',
+      rupeesLabel: '₹99',
+      credits: 250,
+    ),
+    CreditPackOffer(
+      packId: 'large',
+      rupeesLabel: '₹199',
+      credits: 600,
+    ),
+  ];
+
   /// Free tier: after this many lifetime rewarded ads, show soft “skip ads / credits pack” before the next grant.
   static const int softPaywallLifetimeAdsThreshold = 40;
 
@@ -193,4 +212,19 @@ abstract final class CreditsPolicy {
         return 2592000000;
     }
   }
+}
+
+/// One purchasable credit pack (server `plan_key`: `credit_pack_{packId}`).
+class CreditPackOffer {
+  const CreditPackOffer({
+    required this.packId,
+    required this.rupeesLabel,
+    required this.credits,
+  });
+
+  final String packId;
+  final String rupeesLabel;
+  final int credits;
+
+  String get planKey => 'credit_pack_$packId';
 }

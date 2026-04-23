@@ -10,6 +10,7 @@ import 'app_scaffold_messenger.dart';
 import 'theme/app_theme.dart';
 import 'screens/app_root.dart';
 import 'screens/number_selection_screen.dart';
+import 'screens/premium_credits_wallet_screen.dart';
 import 'screens/subscription_screen.dart';
 import 'screens/virtual_number_screen.dart';
 
@@ -63,6 +64,9 @@ class TalkFreeApp extends StatelessWidget {
         }
         if (settings.name == SubscriptionScreen.routeName) {
           return SubscriptionScreen.createRoute();
+        }
+        if (settings.name == PremiumCreditsWalletScreen.routeName) {
+          return PremiumCreditsWalletScreen.createRoute();
         }
         return null;
       },

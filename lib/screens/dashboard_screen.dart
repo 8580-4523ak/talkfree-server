@@ -32,6 +32,7 @@ import 'call_history_screen.dart';
 import 'dialer_screen.dart';
 import 'inbox_screen.dart';
 import 'settings_screen.dart';
+import 'premium_credits_wallet_screen.dart';
 import 'subscription_screen.dart';
 import 'virtual_number_screen.dart';
 
@@ -2801,7 +2802,28 @@ class _ProPremiumShineHeroCard extends StatelessWidget {
                           textAlign: TextAlign.center,
                         ),
                       ),
-                      const SizedBox(height: 18),
+                      const SizedBox(height: 6),
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).push(
+                            PremiumCreditsWalletScreen.createRoute(),
+                          );
+                        },
+                        icon: Icon(
+                          Icons.account_balance_wallet_outlined,
+                          size: 18,
+                          color: AppColors.primary.withValues(alpha: 0.95),
+                        ),
+                        label: Text(
+                          'Buy packs · optional ad',
+                          style: GoogleFonts.inter(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 13,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
                       const Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [

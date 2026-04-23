@@ -98,6 +98,9 @@ abstract final class VoiceBackendConfig {
   /// `POST /verify-payment` — Razorpay `payment_id`, `order_id`, `signature`; grants Pro via Admin.
   static Uri verifyPaymentUri() => Uri.https(_host, '/verify-payment');
 
+  /// `POST /purchase-credits-pack` — JSON `{ "pack": "small"|"medium"|"large" }`; Razorpay order for credit packs.
+  static Uri purchaseCreditsPackUri() => Uri.https(_host, '/purchase-credits-pack');
+
   /// `POST /claim-premium-monthly-bonus` — Firebase Bearer; recurring premium credit grant.
   static Uri claimPremiumMonthlyBonusUri() =>
       Uri.https(_host, '/claim-premium-monthly-bonus');

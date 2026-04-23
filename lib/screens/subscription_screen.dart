@@ -12,6 +12,7 @@ import '../theme/app_theme.dart';
 import '../utils/app_snackbar.dart';
 import '../widgets/glass_panel.dart';
 import '../widgets/premium_activation_overlay.dart';
+import 'premium_credits_wallet_screen.dart';
 
 const Color _kPlanAccentDaily = Color(0xFF9D5CFF);
 const Color _kPlanAccentMonthly = Color(0xFFFF8A35);
@@ -344,6 +345,25 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       padding: const EdgeInsets.fromLTRB(22, 14, 22, 44),
       children: [
         const _GoProHero(),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: () {
+            Navigator.of(context).push(PremiumCreditsWalletScreen.createRoute());
+          },
+          icon: Icon(
+            Icons.shopping_bag_outlined,
+            color: AppColors.primary.withValues(alpha: 0.95),
+          ),
+          label: Text(
+            'Credit packs — ₹49 / ₹99 / ₹199',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w800, fontSize: 13),
+          ),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: AppColors.textOnDark,
+            side: BorderSide(color: AppColors.primary.withValues(alpha: 0.55)),
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+          ),
+        ),
         const SizedBox(height: 8),
         Text.rich(
           TextSpan(
