@@ -1,9 +1,13 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import '../theme/app_theme.dart';
-import '../utils/app_snackbar.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../config/credits_policy.dart';
+import '../services/firestore_user_service.dart';
 import '../services/twilio_sms_service.dart' show TwilioSmsException, sendTwilioSMS;
+import '../theme/app_theme.dart';
+import '../utils/app_snackbar.dart';
 import '../utils/user_facing_service_error.dart';
 
 /// Simple screen to exercise [sendTwilioSMS] (Twilio trial: To-number often must be verified).
@@ -124,6 +128,7 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final uid = FirebaseAuth.instance.currentUser?.uid;
 
     return Scaffold(
       backgroundColor: AppTheme.darkBg,
@@ -133,6 +138,58 @@ class _SmsTestScreenState extends State<SmsTestScreen> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
+          if (uid != null)
+            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+              stream: FirestoreUserService.watchUserDocument(uid),
+              builder: (context, snap) {
+                final data = snap.data?.data();
+                final pro = FirestoreUserService.isPremiumFromUserData(data);
+                final otp = FirestoreUserService.otpAdsProgressFromUserData(data);
+                final need = CreditsPolicy.otpAdsRequiredPerSms;
+                if (pro) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Text(
+                      'Pro: outbound SMS uses ${CreditsPolicy.smsOutboundCreditCost} credits per send.',
+                      style: GoogleFonts.inter(
+                        fontSize: 13,
+                        height: 1.35,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  );
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Free tier: bank OTP-purpose rewarded ads',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      LinearProgressIndicator(
+                        value: need <= 0 ? 0.0 : (otp / need).clamp(0.0, 1.0),
+                        minHeight: 8,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '$otp / $need rewarded ads banked for one SMS — earn with purpose “OTP” on Home, Dialer, Number, or Inbox (no credits used).',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          height: 1.35,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
           Text(
             'Recipient (E.164, e.g. +15551234567)',
             style: theme.textTheme.labelLarge,

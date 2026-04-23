@@ -2,28 +2,46 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+
+import '../config/credits_policy.dart';
 import '../services/firestore_user_service.dart';
+import '../services/grant_reward_service.dart' show GrantRewardPurpose;
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
-import '../utils/rewarded_ad_grant_flow.dart';
 import '../utils/call_log_format.dart';
+import '../widgets/purpose_rewarded_ad_strip.dart';
+import '../widgets/scale_on_press.dart';
+import '../widgets/soft_pulse.dart';
 
 /// Neon-black call log list (`users/{uid}/call_history`).
 class CallHistoryScreen extends StatelessWidget {
   const CallHistoryScreen({
     super.key,
     required this.user,
+    this.isPremium = false,
     this.onStartCalling,
-    this.onWatchAd,
+    this.onWatchPurposeAd,
+    this.rewardedAdBusy = false,
+    this.grantRewardPending = false,
+    this.cooldownRemaining = 0,
+    this.dailyLimitReached = false,
+    this.showRewardRecommendedBadge = true,
   });
 
   final User user;
+  final bool isPremium;
 
   /// When set (e.g. from [DashboardScreen]), closes this route then switches to the Dialer tab.
   final VoidCallback? onStartCalling;
 
-  /// Free tier: runs rewarded-ad flow from empty state.
-  final Future<void> Function()? onWatchAd;
+  /// Free tier: parent runs rewarded-ad + `/grant-reward` with explicit [GrantRewardPurpose].
+  final Future<void> Function(GrantRewardPurpose purpose)? onWatchPurposeAd;
+
+  final bool rewardedAdBusy;
+  final bool grantRewardPending;
+  final int cooldownRemaining;
+  final bool dailyLimitReached;
+  final bool showRewardRecommendedBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -74,8 +92,14 @@ class CallHistoryScreen extends StatelessWidget {
           if (docs.isEmpty) {
             return _EmptyRecentsState(
               user: user,
+              isPremium: isPremium,
               onStartCalling: onStartCalling,
-              onWatchAd: onWatchAd,
+              onWatchPurposeAd: onWatchPurposeAd,
+              rewardedAdBusy: rewardedAdBusy,
+              grantRewardPending: grantRewardPending,
+              cooldownRemaining: cooldownRemaining,
+              dailyLimitReached: dailyLimitReached,
+              showRewardRecommendedBadge: showRewardRecommendedBadge,
             );
           }
 
@@ -117,13 +141,25 @@ class CallHistoryScreen extends StatelessWidget {
 class _EmptyRecentsState extends StatelessWidget {
   const _EmptyRecentsState({
     required this.user,
+    this.isPremium = false,
     this.onStartCalling,
-    this.onWatchAd,
+    this.onWatchPurposeAd,
+    this.rewardedAdBusy = false,
+    this.grantRewardPending = false,
+    this.cooldownRemaining = 0,
+    this.dailyLimitReached = false,
+    this.showRewardRecommendedBadge = true,
   });
 
   final User user;
+  final bool isPremium;
   final VoidCallback? onStartCalling;
-  final Future<void> Function()? onWatchAd;
+  final Future<void> Function(GrantRewardPurpose purpose)? onWatchPurposeAd;
+  final bool rewardedAdBusy;
+  final bool grantRewardPending;
+  final int cooldownRemaining;
+  final bool dailyLimitReached;
+  final bool showRewardRecommendedBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -150,7 +186,7 @@ class _EmptyRecentsState extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Earn credits with ads, then call any number from the dialer.',
+              'Watch rewarded ads for call credits, number unlock, or SMS — then dial any number.',
               textAlign: TextAlign.center,
               style: GoogleFonts.inter(
                 fontSize: 14,
@@ -159,74 +195,61 @@ class _EmptyRecentsState extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 28),
-            if (onWatchAd != null) ...[
-              StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                stream: FirestoreUserService.watchUserDocument(user.uid),
-                builder: (context, userSnap) {
-                  final isPremium = FirestoreUserService.isPremiumFromUserData(
-                    userSnap.data?.data(),
-                  );
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton(
-                          onPressed: () async {
-                            await runRewardedAdGrantFlow(
-                              context,
-                              isPremium: isPremium,
-                            );
-                          },
-                          style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.primary,
-                            foregroundColor: AppColors.onPrimary,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            elevation: 0,
-                          ),
-                          child: Text(
-                            'WATCH AD TO START',
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.35,
-                            ),
-                          ),
+            if (!isPremium && onWatchPurposeAd != null) ...[
+              Builder(
+                builder: (context) {
+                  final adSlotOpen =
+                      !dailyLimitReached && cooldownRemaining <= 0;
+                  final pulseOn =
+                      adSlotOpen && !grantRewardPending && !rewardedAdBusy;
+                  return SoftPulse(
+                    enabled: pulseOn,
+                    child: ScaleOnPress(
+                      child: PurposeRewardedAdStrip(
+                        canTapAd: adSlotOpen,
+                        grantRewardPending: grantRewardPending,
+                        rewardedAdBusy: rewardedAdBusy,
+                        cooldownRemaining: cooldownRemaining,
+                        dailyLimitReached: dailyLimitReached,
+                        emphasizePurpose: GrantRewardPurpose.call,
+                        showRewardRecommendedBadge: showRewardRecommendedBadge,
+                        cooldownPolicySeconds:
+                            CreditsPolicy.adRewardCooldownSecondsForUser(
+                          isPremium,
                         ),
+                        subtitleCallIsPremium: isPremium,
+                        onPurposeAd: onWatchPurposeAd!,
                       ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton(
-                          onPressed: () {
-                            Navigator.of(context).pop();
-                            onStartCalling?.call();
-                          },
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.textOnDark,
-                            side: BorderSide(
-                              color: Colors.white.withValues(alpha: 0.2),
-                            ),
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
-                          child: Text(
-                            'Open dialer',
-                            style: GoogleFonts.inter(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   );
                 },
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    onStartCalling?.call();
+                  },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textOnDark,
+                    side: BorderSide(
+                      color: Colors.white.withValues(alpha: 0.2),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: Text(
+                    'Open dialer',
+                    style: GoogleFonts.inter(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
               ),
             ] else
               SizedBox(

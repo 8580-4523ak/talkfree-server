@@ -1,19 +1,25 @@
 import 'dart:async' show Timer;
+import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../config/credits_policy.dart';
+import '../services/assign_free_number_service.dart';
+import '../services/assign_number_service.dart' show AssignNumberException;
 import '../services/firestore_user_service.dart';
+import '../services/grant_reward_service.dart' show GrantRewardPurpose;
 import '../utils/rewarded_ad_grant_flow.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_snackbar.dart';
 import '../utils/us_phone_format.dart';
-import '../widgets/assign_us_number_flow.dart';
 import '../widgets/glass_panel.dart';
 import '../widgets/lease_ring_painter.dart';
+import '../widgets/purpose_rewarded_ad_strip.dart';
+import '../widgets/scale_on_press.dart';
+import '../widgets/soft_pulse.dart';
 import 'number_selection_screen.dart';
 import 'subscription_screen.dart';
 
@@ -22,12 +28,12 @@ class VirtualNumberRouteArgs {
   const VirtualNumberRouteArgs({
     required this.userUid,
     required this.userCredits,
-    this.onWatchRewardedAd,
+    this.onPurposeRewardAd,
   });
 
   final String userUid;
   final int userCredits;
-  final Future<void> Function()? onWatchRewardedAd;
+  final Future<void> Function(GrantRewardPurpose purpose)? onPurposeRewardAd;
 }
 
 /// "The Store" — unlock 2nd line, ad progress, subscription plans (buy = UI only).
@@ -39,8 +45,15 @@ class VirtualNumberScreen extends StatefulWidget {
     super.key,
     required this.userUid,
     required this.userCredits,
-    this.onWatchRewardedAd,
+    this.onPurposeRewardAd,
+    this.rewardedAdBusy = false,
+    this.grantRewardPending = false,
+    this.cooldownRemaining = 0,
+    this.rewardDailyLimitReached = false,
+    this.emphasizeRewardPurpose = GrantRewardPurpose.number,
+    this.repeatHabitPulseBoost = false,
     this.embedInShell = false,
+    this.showRecommendedBadge = true,
   });
 
   static const String routeName = '/virtual-number';
@@ -49,13 +62,14 @@ class VirtualNumberScreen extends StatefulWidget {
     final args = settings.arguments;
     final uid = args is VirtualNumberRouteArgs ? args.userUid : '';
     final credits = args is VirtualNumberRouteArgs ? args.userCredits : 0;
-    final onWatch = args is VirtualNumberRouteArgs ? args.onWatchRewardedAd : null;
+    final onPurpose =
+        args is VirtualNumberRouteArgs ? args.onPurposeRewardAd : null;
     return MaterialPageRoute<void>(
       settings: settings,
       builder: (_) => VirtualNumberScreen(
         userUid: uid,
         userCredits: credits,
-        onWatchRewardedAd: onWatch,
+        onPurposeRewardAd: onPurpose,
       ),
     );
   }
@@ -63,9 +77,18 @@ class VirtualNumberScreen extends StatefulWidget {
   final String userUid;
   final int userCredits;
   /// When set (e.g. from dashboard), wires the same rewarded-ad pipeline as Home.
-  final Future<void> Function()? onWatchRewardedAd;
+  final Future<void> Function(GrantRewardPurpose purpose)? onPurposeRewardAd;
+  final bool rewardedAdBusy;
+  final bool grantRewardPending;
+  final int cooldownRemaining;
+  final bool rewardDailyLimitReached;
+  final GrantRewardPurpose emphasizeRewardPurpose;
+  final bool repeatHabitPulseBoost;
   /// When true, no [Scaffold]/[AppBar] — used inside [DashboardScreen] bottom shell.
   final bool embedInShell;
+
+  /// “⭐ Recommended” above the unlock CTA (same gating as Home/Dialer).
+  final bool showRecommendedBadge;
 
   @override
   State<VirtualNumberScreen> createState() => _VirtualNumberScreenState();
@@ -82,19 +105,11 @@ class VirtualNumberScreen extends StatefulWidget {
     return null;
   }
 
-  /// Lifetime rewarded-ad views only (`ads_watched_count`). No fallback to daily fields.
-  static int _readAdsWatched(Map<String, dynamic>? data) {
-    if (data == null) return 0;
-    final v = data['ads_watched_count'];
-    if (v is int) return v;
-    if (v is num) return v.toInt();
-    return 0;
-  }
 }
 
 class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
   bool _claiming = false;
-  bool _watchAdBusy = false;
+  bool _standaloneAdBusy = false;
   Timer? _leaseTicker;
 
   void _syncLeaseTicker(String? assigned, DateTime? leaseExp) {
@@ -118,14 +133,12 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
 
   Future<void> _claimUsNumber(
     BuildContext context,
-    int adsWatched,
+    int numberAdProgress,
     bool isPremium,
     int credits,
   ) async {
-    final minAds = CreditsPolicy.assignNumberMinAdsWatched;
-    final minCr = CreditsPolicy.assignNumberMinCredits;
-    final eligible =
-        isPremium || adsWatched >= minAds || credits >= minCr;
+    final minAds = CreditsPolicy.numberUnlockAdsRequired;
+    final eligible = isPremium || numberAdProgress >= minAds;
     if (!eligible || _claiming) return;
     if (isPremium) {
       await Navigator.of(context).pushNamed<void>(
@@ -139,40 +152,36 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
     }
     setState(() => _claiming = true);
     try {
-      await runAssignUsNumberFlow(
-        context,
-        autoPickFirstNumber: false,
-        onSuccess: (r) {
-          if (!context.mounted) return;
-          AppSnackBar.show(
-            context,
-            SnackBar(
-              content: Text(
-                r.alreadyAssigned
-                    ? 'Your line: ${r.assignedNumber}'
-                    : 'Your number is ready! ${r.assignedNumber}',
-                style: GoogleFonts.inter(),
-              ),
-              behavior: SnackBarBehavior.floating,
-              margin: AppTheme.snackBarFloatingMargin(context),
-              duration: AppTheme.snackBarCalmDuration,
-            ),
-          );
-        },
-        onError: (msg) {
-          if (context.mounted) {
-            AppSnackBar.show(
-              context,
-              SnackBar(
-                content: Text(msg, style: GoogleFonts.inter()),
-                behavior: SnackBarBehavior.floating,
-                margin: AppTheme.snackBarFloatingMargin(context),
-                duration: AppTheme.snackBarCalmDuration,
-              ),
-            );
-          }
-        },
+      final r = await AssignFreeNumberService.instance.requestAssignFreeNumber(
+        planType: 'monthly',
       );
+      if (!context.mounted) return;
+      AppSnackBar.show(
+        context,
+        SnackBar(
+          content: Text(
+            r.alreadyAssigned
+                ? 'Your line: ${r.assignedNumber}'
+                : 'Your number is ready! ${r.assignedNumber}',
+            style: GoogleFonts.inter(),
+          ),
+          behavior: SnackBarBehavior.floating,
+          margin: AppTheme.snackBarFloatingMargin(context),
+          duration: AppTheme.snackBarCalmDuration,
+        ),
+      );
+    } on AssignNumberException catch (e) {
+      if (context.mounted) {
+        AppSnackBar.show(
+          context,
+          SnackBar(
+            content: Text(e.message, style: GoogleFonts.inter()),
+            behavior: SnackBarBehavior.floating,
+            margin: AppTheme.snackBarFloatingMargin(context),
+            duration: AppTheme.snackBarCalmDuration,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _claiming = false);
     }
@@ -217,15 +226,15 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
 
           final data = snap.data!.data();
           final assigned = VirtualNumberScreen._readAssigned(data);
-          final adsWatched = VirtualNumberScreen._readAdsWatched(data);
+          final numberAdProgress =
+              FirestoreUserService.numberAdsProgressFromUserData(data);
           final isPremium = FirestoreUserService.isPremiumFromUserData(data);
           final leaseExp = FirestoreUserService.numberLeaseExpiryFromUserData(data);
           final planType = FirestoreUserService.numberPlanTypeFromUserData(data);
           final credits =
               FirestoreUserService.usableCreditsFromSnapshot(snap.data!);
           final canClaim = isPremium ||
-              adsWatched >= CreditsPolicy.assignNumberMinAdsWatched ||
-              credits >= CreditsPolicy.assignNumberMinCredits;
+              numberAdProgress >= CreditsPolicy.numberUnlockAdsRequired;
 
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!context.mounted) return;
@@ -293,64 +302,71 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                       ),
                     ] else ...[
                       _NumberUnlockPromoCard(
-                        adsWatched: adsWatched,
+                        numberAdProgress: numberAdProgress,
                         isPremium: isPremium,
-                        requiredAds: CreditsPolicy.assignNumberMinAdsWatched,
+                        requiredAds: CreditsPolicy.numberUnlockAdsRequired,
                       ),
                       if (!isPremium && !canClaim) ...[
                         const SizedBox(height: 18),
-                        SizedBox(
-                          width: double.infinity,
-                          child: FilledButton(
-                            onPressed: _watchAdBusy
-                                ? null
-                                : () async {
-                                    setState(() => _watchAdBusy = true);
+                        Builder(
+                          builder: (context) {
+                            final parentHandles =
+                                widget.onPurposeRewardAd != null;
+                            final rewardedBusy = parentHandles
+                                ? widget.rewardedAdBusy
+                                : _standaloneAdBusy;
+                            final grantPending = parentHandles
+                                ? widget.grantRewardPending
+                                : false;
+                            final adSlotOpen = !widget.rewardDailyLimitReached &&
+                                widget.cooldownRemaining <= 0;
+                            final pulseOn = adSlotOpen &&
+                                !grantPending &&
+                                !rewardedBusy;
+                            return SoftPulse(
+                              enabled: pulseOn,
+                              pulseBoost: widget.repeatHabitPulseBoost,
+                              child: ScaleOnPress(
+                                child: PurposeRewardedAdStrip(
+                                  canTapAd: adSlotOpen,
+                                  grantRewardPending: grantPending,
+                                  rewardedAdBusy: rewardedBusy,
+                                  cooldownRemaining: widget.cooldownRemaining,
+                                  dailyLimitReached:
+                                      widget.rewardDailyLimitReached,
+                                  emphasizePurpose:
+                                      widget.emphasizeRewardPurpose,
+                                  showRewardRecommendedBadge:
+                                      widget.showRecommendedBadge,
+                                  cooldownPolicySeconds: CreditsPolicy
+                                      .adRewardCooldownSecondsForUser(
+                                    isPremium,
+                                  ),
+                                  subtitleCallIsPremium: isPremium,
+                                  onPurposeAd: (purpose) async {
+                                    if (widget.onPurposeRewardAd != null) {
+                                      await widget.onPurposeRewardAd!(purpose);
+                                      return;
+                                    }
+                                    setState(() => _standaloneAdBusy = true);
                                     try {
-                                      if (widget.onWatchRewardedAd != null) {
-                                        await widget.onWatchRewardedAd!();
-                                      } else {
-                                        await runRewardedAdGrantFlow(
-                                          context,
-                                          isPremium: isPremium,
-                                        );
-                                      }
+                                      await runRewardedAdGrantFlow(
+                                        context: context,
+                                        isPremium: isPremium,
+                                        purpose: purpose,
+                                      );
                                     } finally {
                                       if (mounted) {
-                                        setState(() => _watchAdBusy = false);
+                                        setState(
+                                          () => _standaloneAdBusy = false,
+                                        );
                                       }
                                     }
                                   },
-                            style: FilledButton.styleFrom(
-                              backgroundColor: AppColors.surfaceDark,
-                              foregroundColor: AppColors.primary,
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                              side: BorderSide(
-                                color: AppColors.primary.withValues(alpha: 0.45),
+                                ),
                               ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                            ),
-                            child: _watchAdBusy
-                                ? SizedBox(
-                                    width: 22,
-                                    height: 22,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2.2,
-                                      color: AppColors.primary
-                                          .withValues(alpha: 0.95),
-                                    ),
-                                  )
-                                : Text(
-                                    'WATCH AD NOW',
-                                    style: GoogleFonts.inter(
-                                      fontWeight: FontWeight.w900,
-                                      fontSize: 13,
-                                      letterSpacing: 0.6,
-                                    ),
-                                  ),
-                          ),
+                            );
+                          },
                         ),
                         Align(
                           alignment: Alignment.center,
@@ -378,7 +394,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                           busy: _claiming,
                           onPressed: () => _claimUsNumber(
                             context,
-                            adsWatched,
+                            numberAdProgress,
                             isPremium,
                             credits,
                           ),
@@ -388,7 +404,7 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                         Padding(
                           padding: const EdgeInsets.only(top: 10),
                           child: Text(
-                            'Reach ${CreditsPolicy.assignNumberMinAdsWatched} lifetime ads or ${CreditsPolicy.assignNumberMinCredits} credits — or go Pro.',
+                            'Watch ${CreditsPolicy.numberUnlockAdsRequired} rewarded ads to unlock your US line — or go Pro to pick a number instantly.',
                             textAlign: TextAlign.center,
                             style: GoogleFonts.inter(
                               fontSize: 11,
@@ -401,32 +417,34 @@ class _VirtualNumberScreenState extends State<VirtualNumberScreen> {
                         ),
                       Padding(
                         padding: const EdgeInsets.only(top: 14),
-                        child: Center(
-                          child: TextButton.icon(
-                            onPressed: () {
-                              Navigator.of(context).pushNamed(
-                                NumberSelectionScreen.routeName,
-                                arguments: NumberSelectionRouteArgs(
-                                  userUid: widget.userUid,
-                                  userCredits: credits,
+                        child: isPremium
+                            ? Center(
+                                child: TextButton.icon(
+                                  onPressed: () {
+                                    Navigator.of(context).pushNamed(
+                                      NumberSelectionScreen.routeName,
+                                      arguments: NumberSelectionRouteArgs(
+                                        userUid: widget.userUid,
+                                        userCredits: credits,
+                                      ),
+                                    );
+                                  },
+                                  icon: Icon(
+                                    Icons.search_rounded,
+                                    size: 18,
+                                    color: AppColors.textMutedOnDark,
+                                  ),
+                                  label: Text(
+                                    'Browse all numbers',
+                                    style: GoogleFonts.inter(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 13,
+                                      color: AppColors.textMutedOnDark,
+                                    ),
+                                  ),
                                 ),
-                              );
-                            },
-                            icon: Icon(
-                              Icons.search_rounded,
-                              size: 18,
-                              color: AppColors.textMutedOnDark,
-                            ),
-                            label: Text(
-                              'Browse all numbers',
-                              style: GoogleFonts.inter(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13,
-                                color: AppColors.textMutedOnDark,
-                              ),
-                            ),
-                          ),
-                        ),
+                              )
+                            : const SizedBox.shrink(),
                       ),
                       const SizedBox(height: 18),
                       const _NumberFeatureGrid(),
@@ -575,22 +593,38 @@ class _AssignedLineGlassCard extends StatelessWidget {
 
 class _NumberUnlockPromoCard extends StatelessWidget {
   const _NumberUnlockPromoCard({
-    required this.adsWatched,
+    required this.numberAdProgress,
     required this.isPremium,
     required this.requiredAds,
   });
 
-  final int adsWatched;
+  final int numberAdProgress;
   final bool isPremium;
   final int requiredAds;
 
   double get _progress {
     if (isPremium) return 1.0;
     if (requiredAds <= 0) return 0;
-    return (adsWatched / requiredAds).clamp(0.0, 1.0);
+    return (numberAdProgress / requiredAds).clamp(0.0, 1.0);
   }
 
   int get _percent => (_progress * 100).round();
+
+  int get _adsRemaining =>
+      math.max(0, requiredAds - numberAdProgress).clamp(0, requiredAds);
+
+  bool get _finalStretchUrgency =>
+      !isPremium &&
+      _progress >= 0.9 &&
+      _adsRemaining > 0 &&
+      numberAdProgress < requiredAds;
+
+  bool get _almostUnlockedUrgency =>
+      !isPremium &&
+      _progress >= 0.7 &&
+      _progress < 0.9 &&
+      _adsRemaining > 0 &&
+      numberAdProgress < requiredAds;
 
   @override
   Widget build(BuildContext context) {
@@ -650,7 +684,7 @@ class _NumberUnlockPromoCard extends StatelessWidget {
                       Text(
                         isPremium
                             ? 'Pro member — pick and activate instantly.'
-                            : 'Start unlocking your number — watch ads on Home to progress.',
+                            : 'Watch rewarded ads on Home — number unlock is separate from call credits.',
                         style: GoogleFonts.inter(
                           fontSize: 13,
                           height: 1.45,
@@ -760,10 +794,100 @@ class _NumberUnlockPromoCard extends StatelessWidget {
                   const SizedBox(height: 14),
                   _ThreeSegmentProgressBar(progress: _progress),
                   const SizedBox(height: 12),
+                  if (!isPremium) ...[
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: LinearProgressIndicator(
+                        value: _progress.clamp(0.0, 1.0),
+                        minHeight: 10,
+                        backgroundColor:
+                            Colors.white.withValues(alpha: 0.08),
+                        color: AppColors.primary,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '$numberAdProgress / $requiredAds ads watched',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: -0.2,
+                        color: AppColors.primary.withValues(alpha: 0.98),
+                      ),
+                    ),
+                    if (_adsRemaining > 0) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Only $_adsRemaining ads left to unlock 🔥',
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          height: 1.35,
+                          color: AppColors.textOnDark.withValues(alpha: 0.92),
+                        ),
+                      ),
+                    ],
+                    if (_finalStretchUrgency) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          color: const Color(0xFF00E676).withValues(alpha: 0.12),
+                          border: Border.all(
+                            color: const Color(0xFF69F0AE)
+                                .withValues(alpha: 0.45),
+                          ),
+                        ),
+                        child: Text(
+                          '🚀 Final stretch — only $_adsRemaining ads to go!',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w900,
+                            height: 1.3,
+                            color: const Color(0xFFB9F6CA),
+                          ),
+                        ),
+                      ),
+                    ] else if (_almostUnlockedUrgency) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          color: const Color(0xFFFF6D00).withValues(alpha: 0.16),
+                          border: Border.all(
+                            color: const Color(0xFFFF9100)
+                                .withValues(alpha: 0.45),
+                          ),
+                        ),
+                        child: Text(
+                          '🔥 Almost unlocked — just $_adsRemaining ads left!',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w900,
+                            height: 1.3,
+                            color: const Color(0xFFFFE0B2),
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                  ],
                   Text(
                     isPremium
                         ? 'You can activate immediately.'
-                        : 'Keep watching ads to unlock your number',
+                        : 'Each ad moves the bar — one reward per ad.',
                     style: GoogleFonts.inter(
                       fontSize: 11,
                       fontWeight: FontWeight.w500,

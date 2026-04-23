@@ -3,9 +3,15 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+
+import '../config/credits_policy.dart';
 import '../services/firestore_user_service.dart';
+import '../services/grant_reward_service.dart' show GrantRewardPurpose;
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
+import '../widgets/purpose_rewarded_ad_strip.dart';
+import '../widgets/scale_on_press.dart';
+import '../widgets/soft_pulse.dart';
 import 'number_selection_screen.dart';
 
 /// Deep navy inbox canvas (mockup).
@@ -16,12 +22,25 @@ class InboxScreen extends StatelessWidget {
   const InboxScreen({
     super.key,
     required this.user,
-    this.onGoHomeForCredits,
+    this.onWatchPurposeAd,
+    this.rewardedAdBusy = false,
+    this.grantRewardPending = false,
+    this.cooldownRemaining = 0,
+    this.dailyLimitReached = false,
+    this.showRewardRecommendedBadge = true,
+    this.emphasizeRewardPurpose = GrantRewardPurpose.otp,
+    this.repeatHabitPulseBoost = false,
   });
 
   final User user;
-  /// Switches shell to Home tab so user can watch ads for credits.
-  final VoidCallback? onGoHomeForCredits;
+  final Future<void> Function(GrantRewardPurpose purpose)? onWatchPurposeAd;
+  final bool rewardedAdBusy;
+  final bool grantRewardPending;
+  final int cooldownRemaining;
+  final bool dailyLimitReached;
+  final bool showRewardRecommendedBadge;
+  final GrantRewardPurpose emphasizeRewardPurpose;
+  final bool repeatHabitPulseBoost;
 
   static DateTime _messageTime(Map<String, dynamic> data) {
     for (final key in ['createdAt', 'timestamp', 'receivedAt', 'date']) {
@@ -132,8 +151,15 @@ class InboxScreen extends StatelessWidget {
           if (sorted.isEmpty) {
             return _InboxEmptyMockup(
               user: user,
-              onEarnMinutes: isPremium ? null : onGoHomeForCredits,
               isPremium: isPremium,
+              onWatchPurposeAd: isPremium ? null : onWatchPurposeAd,
+              rewardedAdBusy: rewardedAdBusy,
+              grantRewardPending: grantRewardPending,
+              cooldownRemaining: cooldownRemaining,
+              dailyLimitReached: dailyLimitReached,
+              showRewardRecommendedBadge: showRewardRecommendedBadge,
+              emphasizeRewardPurpose: emphasizeRewardPurpose,
+              repeatHabitPulseBoost: repeatHabitPulseBoost,
             );
           }
 
@@ -172,7 +198,7 @@ class InboxScreen extends StatelessWidget {
                       if (!isPremium) ...[
                         const SizedBox(height: 12),
                         Text(
-                          'Use credits to reply instantly from your private line.',
+                          'Free tier: bank ${CreditsPolicy.otpAdsRequiredPerSms} rewarded ads (OTP purpose) to send one SMS — no credits.',
                           style: GoogleFonts.inter(
                             fontSize: 12,
                             fontWeight: FontWeight.w500,
@@ -245,13 +271,27 @@ class InboxScreen extends StatelessWidget {
 class _InboxEmptyMockup extends StatelessWidget {
   const _InboxEmptyMockup({
     required this.user,
-    this.onEarnMinutes,
     this.isPremium = false,
+    this.onWatchPurposeAd,
+    this.rewardedAdBusy = false,
+    this.grantRewardPending = false,
+    this.cooldownRemaining = 0,
+    this.dailyLimitReached = false,
+    this.showRewardRecommendedBadge = true,
+    this.emphasizeRewardPurpose = GrantRewardPurpose.otp,
+    this.repeatHabitPulseBoost = false,
   });
 
   final User user;
-  final VoidCallback? onEarnMinutes;
   final bool isPremium;
+  final Future<void> Function(GrantRewardPurpose purpose)? onWatchPurposeAd;
+  final bool rewardedAdBusy;
+  final bool grantRewardPending;
+  final int cooldownRemaining;
+  final bool dailyLimitReached;
+  final bool showRewardRecommendedBadge;
+  final GrantRewardPurpose emphasizeRewardPurpose;
+  final bool repeatHabitPulseBoost;
 
   @override
   Widget build(BuildContext context) {
@@ -314,7 +354,7 @@ class _InboxEmptyMockup extends StatelessWidget {
                 Text(
                   isPremium
                       ? 'Messages for your private line will appear here.'
-                      : 'Earn credits on Home, then text from your private line.',
+                      : 'Watch rewarded ads here for OTP sends, or use Home / Dialer for call credits and number unlock.',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.inter(
                     fontSize: 13,
@@ -325,10 +365,38 @@ class _InboxEmptyMockup extends StatelessWidget {
                 ),
                 const SizedBox(height: 22),
                 const _InboxEmptyFeatureRow(),
-                if (!isPremium) ...[
+                if (!isPremium && onWatchPurposeAd != null) ...[
                   const SizedBox(height: 24),
-                  _InboxEarnGradientCta(
-                    onPressed: onEarnMinutes,
+                  Builder(
+                    builder: (context) {
+                      final adSlotOpen =
+                          !dailyLimitReached && cooldownRemaining <= 0;
+                      final pulseOn = adSlotOpen &&
+                          !grantRewardPending &&
+                          !rewardedAdBusy;
+                      return SoftPulse(
+                        enabled: pulseOn,
+                        pulseBoost: repeatHabitPulseBoost,
+                        child: ScaleOnPress(
+                          child: PurposeRewardedAdStrip(
+                            canTapAd: adSlotOpen,
+                            grantRewardPending: grantRewardPending,
+                            rewardedAdBusy: rewardedAdBusy,
+                            cooldownRemaining: cooldownRemaining,
+                            dailyLimitReached: dailyLimitReached,
+                            emphasizePurpose: emphasizeRewardPurpose,
+                            showRewardRecommendedBadge:
+                                showRewardRecommendedBadge,
+                            cooldownPolicySeconds:
+                                CreditsPolicy.adRewardCooldownSecondsForUser(
+                              isPremium,
+                            ),
+                            subtitleCallIsPremium: isPremium,
+                            onPurposeAd: onWatchPurposeAd!,
+                          ),
+                        ),
+                      );
+                    },
                   ),
                   const SizedBox(height: 16),
                 ] else ...[
@@ -583,91 +651,10 @@ class _InboxEmptyFeatureRow extends StatelessWidget {
         const SizedBox(width: 8),
         chip(
           Icons.savings_rounded,
-          'Earn credits',
-          'unlock more',
+          'Rewarded ads',
+          'call · number · SMS',
         ),
       ],
-    );
-  }
-}
-
-class _InboxEarnGradientCta extends StatelessWidget {
-  const _InboxEarnGradientCta({this.onPressed});
-
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onPressed != null;
-    return Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(999),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: enabled ? onPressed : null,
-        borderRadius: BorderRadius.circular(999),
-        child: Ink(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(999),
-            gradient: enabled
-                ? const LinearGradient(
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                    colors: [
-                      Color(0xFF00E676),
-                      Color(0xFF00C853),
-                      Color(0xFF69F0AE),
-                    ],
-                    stops: [0.0, 0.5, 1.0],
-                  )
-                : null,
-            color: enabled ? null : AppColors.cardDark,
-            boxShadow: enabled ? AppTheme.fintechPrimaryCtaShadow : null,
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-          child: Row(
-            children: [
-              Icon(
-                Icons.card_giftcard_rounded,
-                color: enabled
-                    ? AppColors.onPrimaryButton
-                    : AppColors.textMutedOnDark,
-                size: 26,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  'Earn free minutes',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: -0.2,
-                    color: enabled
-                        ? AppColors.onPrimaryButton
-                        : AppColors.textMutedOnDark,
-                  ),
-                ),
-              ),
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: enabled
-                      ? AppColors.onPrimaryButton.withValues(alpha: 0.22)
-                      : Colors.white.withValues(alpha: 0.08),
-                ),
-                child: Icon(
-                  Icons.chevron_right_rounded,
-                  color: enabled
-                      ? AppColors.onPrimaryButton
-                      : AppColors.textMutedOnDark,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

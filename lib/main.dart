@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'config/app_env.dart';
 
@@ -14,6 +15,13 @@ import 'screens/virtual_number_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final n = (prefs.getInt('talkfree_app_launch_count') ?? 0) + 1;
+    await prefs.setInt('talkfree_app_launch_count', n);
+  } catch (e, st) {
+    debugPrint('talkfree_app_launch_count: $e\n$st');
+  }
   await Firebase.initializeApp();
   await AppEnv.loadDotEnv();
   runApp(const TalkFreeApp());

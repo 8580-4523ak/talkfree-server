@@ -48,6 +48,12 @@ abstract final class VoiceBackendConfig {
   /// `POST /grant-reward` — Firebase ID token in `Authorization` (server adds credits).
   static Uri grantRewardUri() => Uri.https(_host, '/grant-reward');
 
+  /// `POST /record-paywall` — JSON `{ "type", "eventId" }` for `user_stats` funnel (idempotent).
+  static Uri recordPaywallUri() => Uri.https(_host, '/record-paywall');
+
+  /// `GET /paywall-config` — A/B threshold + copy (no auth).
+  static Uri paywallConfigUri() => Uri.https(_host, '/paywall-config');
+
   /// `GET /available-numbers` — Firebase ID token; optional `areaCode` query (3 digits).
   static Uri availableNumbersUri({String? areaCode}) {
     final q = <String, String>{};

@@ -20,7 +20,7 @@ class BrowseNumberPurchaseService {
   BrowseNumberPurchaseService._();
   static final BrowseNumberPurchaseService instance = BrowseNumberPurchaseService._();
 
-  /// [price] must match server `BROWSE_NUMBER_PRICE` (default 500) and [VirtualNumber.defaultPrice].
+  /// [price] must match server `BROWSE_NUMBER_PRICE` (default 150) and [VirtualNumber.defaultPrice].
   Future<void> purchaseNumber({
     required String phoneE164,
     required int price,

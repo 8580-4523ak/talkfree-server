@@ -787,7 +787,7 @@ class _PlanCheckout {
   }
 }
 
-/// Display prices in USD; charged in INR (paise) or USD (cents) per [RazorpayConfig.currency].
+/// Plan card `price` strings are INR for user-facing copy; checkout amount uses [amountSmallestUnit] for [RazorpayConfig.currency].
 const _planCheckouts = <_PlanCheckout>[
   _PlanCheckout(
     planKey: 'starter_credits',
@@ -809,7 +809,7 @@ const _planCheckouts = <_PlanCheckout>[
     planKey: 'daily',
     ui: _PlanData(
       name: 'Daily',
-      price: r'$0.99',
+      price: '₹83',
       periodLabel: 'per day',
       benefits: ['No Ads', 'Bonus Credits', 'Private Number'],
     ),
@@ -820,7 +820,7 @@ const _planCheckouts = <_PlanCheckout>[
     planKey: 'weekly',
     ui: _PlanData(
       name: 'Weekly',
-      price: r'$4.99',
+      price: '₹415',
       periodLabel: 'per week',
       benefits: ['No Ads', 'Bonus Credits', 'Private Number'],
     ),

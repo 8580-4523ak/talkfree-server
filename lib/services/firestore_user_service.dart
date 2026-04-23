@@ -202,6 +202,28 @@ class FirestoreUserService {
     return 0;
   }
 
+  /// Progress toward free US number unlock (`number_ads_progress`, cap [CreditsPolicy.numberUnlockAdsRequired]).
+  /// Migrates from lifetime `ads_watched_count` when the field is absent.
+  static int numberAdsProgressFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return 0;
+    final cap = CreditsPolicy.numberUnlockAdsRequired;
+    final v = data['number_ads_progress'];
+    if (v is int) return v.clamp(0, cap);
+    if (v is num) return v.toInt().clamp(0, cap);
+    final life = lifetimeAdsWatchedFromUserData(data);
+    return life.clamp(0, cap);
+  }
+
+  /// Banked rewarded ads toward one outbound SMS on free tier (`otp_ads_progress`, cap 3).
+  static int otpAdsProgressFromUserData(Map<String, dynamic>? data) {
+    if (data == null) return 0;
+    final v = data['otp_ads_progress'];
+    final cap = CreditsPolicy.otpAdsRequiredPerSms;
+    if (v is int) return v.clamp(0, cap);
+    if (v is num) return v.toInt().clamp(0, cap);
+    return 0;
+  }
+
   /// Consecutive UTC days with ≥1 rewarded ad (`POST /grant-reward` maintains).
   static int adStreakCountFromUserData(Map<String, dynamic>? data) {
     if (data == null) return 0;
@@ -360,6 +382,8 @@ class FirestoreUserService {
       'ad_progress': 0,
       'ads_watched_today': 0,
       'ads_watched_count': 0,
+      'number_ads_progress': 0,
+      'otp_ads_progress': 0,
       'last_reset_date': '',
       'last_ad_timestamp': null,
       'adRewardsCount': 0,
@@ -470,6 +494,8 @@ class FirestoreUserService {
         'ad_progress': 0,
         'ads_watched_today': 0,
         'ads_watched_count': 0,
+        'number_ads_progress': 0,
+        'otp_ads_progress': 0,
         'last_reset_date': '',
         'last_ad_timestamp': null,
         'adRewardsCount': 0,

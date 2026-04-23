@@ -84,7 +84,7 @@ class CallSuccessScreen extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                'Go Pro for bonus credits, better rates, and more rewarded ads per day.',
+                'Go Pro for bonus credits, better per-minute rates, and a higher daily ad cap.',
                 textAlign: TextAlign.center,
                 style: GoogleFonts.inter(
                   fontSize: 14,

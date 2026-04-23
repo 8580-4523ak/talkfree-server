@@ -8,7 +8,7 @@ class VirtualNumber {
     this.price = defaultPrice,
   });
 
-  static const int defaultPrice = 500;
+  static const int defaultPrice = 150;
 
   /// Twilio E.164 (e.g. `+12025550123`) — used for purchase API.
   final String e164;

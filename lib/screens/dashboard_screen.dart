@@ -6,18 +6,22 @@ import 'package:flutter/foundation.dart' show immutable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show Clipboard, ClipboardData;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../config/credits_policy.dart';
+import '../config/reward_ad_ui_prefs.dart';
+import '../config/reward_recommended_policy.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../theme/system_ui.dart';
 import '../services/ad_service.dart';
 import '../utils/app_snackbar.dart';
 import '../utils/monetization_copy.dart';
-import '../utils/reward_ad_cta_copy.dart';
 import '../utils/reward_ad_feedback.dart';
+import '../utils/rewarded_ad_grant_flow.dart'
+    show maybeShowSoftAdPaywallBeforeGrant, recordSoftPaywallGrantSuccess;
 import '../widgets/engagement_overlays.dart';
-import '../widgets/cooldown_reward_progress_bar.dart';
+import '../widgets/purpose_rewarded_ad_strip.dart';
 import '../widgets/scale_on_press.dart';
 import '../widgets/soft_pulse.dart';
 import '../services/firestore_user_service.dart';
@@ -150,6 +154,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _grantRewardPending = false;
   late int _navIndex;
 
+  /// Last rewarded-ad purpose the user chose (persisted) — highlights that row on all strips until they pick another.
+  GrantRewardPurpose? _lastSelectedGrantPurpose;
+
+  /// “⭐ Recommended” on primary ad rows (first launches + low credits / no line).
+  bool _showRewardRecommendedBadge = true;
+  int? _appLaunchCount;
+
   /// Client-side cooldown after a rewarded ad finishes (sync with tier policy).
   Timer? _localAdCooldownTimer;
   int _localAdCooldownSeconds = 0;
@@ -197,6 +208,50 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _setAdViewIfChanged(_AdRewardView next) {
     if (_adView.value == next) return;
     _adView.value = next;
+  }
+
+  GrantRewardPurpose? _grantPurposeFromStorage(String? raw) {
+    switch (raw) {
+      case 'call':
+        return GrantRewardPurpose.call;
+      case 'number':
+        return GrantRewardPurpose.number;
+      case 'otp':
+        return GrantRewardPurpose.otp;
+      default:
+        return null;
+    }
+  }
+
+  GrantRewardPurpose _defaultStripEmphasisForTab(int tabIndex) {
+    switch (tabIndex) {
+      case 2:
+        return GrantRewardPurpose.number;
+      case 3:
+        return GrantRewardPurpose.otp;
+      default:
+        return GrantRewardPurpose.call;
+    }
+  }
+
+  GrantRewardPurpose _stripEmphasisForTab(int tabIndex) =>
+      _lastSelectedGrantPurpose ?? _defaultStripEmphasisForTab(tabIndex);
+
+  /// Stronger ad-strip pulse when the user repeats their last grant on this tab’s “natural” purpose.
+  bool _repeatHabitPulseBoostForTab(int tabIndex) =>
+      _lastSelectedGrantPurpose != null &&
+      _lastSelectedGrantPurpose == _defaultStripEmphasisForTab(tabIndex);
+
+  Future<void> _persistLastSelectedGrantPurpose(GrantRewardPurpose p) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(RewardAdUiPrefs.lastSelectedGrantPurposeStorageKey, p.name);
+      if (mounted) {
+        setState(() => _lastSelectedGrantPurpose = p);
+      }
+    } catch (_) {
+      // Best-effort only.
+    }
   }
 
   /// Single source of truth from cached snapshot + local post-ad cooldown (no full Scaffold rebuild).
@@ -262,6 +317,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (_adStreakCount.value != streak) {
       _adStreakCount.value = streak;
     }
+    _syncRewardRecommendedBadgeVisibility();
+  }
+
+  void _syncRewardRecommendedBadgeVisibility() {
+    final isPro =
+        FirestoreUserService.isPremiumTierLabel(_subscriptionTier.value);
+    final bool next;
+    if (isPro) {
+      next = false;
+    } else {
+      final launches = _appLaunchCount ?? 0;
+      final hasNum = (_assignedNumber.value ?? '').trim().isNotEmpty;
+      next = RewardRecommendedPolicy.showRecommendedBadge(
+        appLaunchCount: launches,
+        usableCredits: _credits.value,
+        hasAssignedUsNumber: hasNum,
+      );
+    }
+    if (next != _showRewardRecommendedBadge) {
+      setState(() => _showRewardRecommendedBadge = next);
+    }
   }
 
   void _applyOptimisticAdWatched() {
@@ -282,6 +358,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     applyTalkFreeDarkNavigationChrome();
     _navIndex = widget.initialNavIndex;
+    SharedPreferences.getInstance().then((p) {
+      if (!mounted) return;
+      setState(() {
+        _appLaunchCount = p.getInt('talkfree_app_launch_count') ?? 1;
+        _lastSelectedGrantPurpose = _grantPurposeFromStorage(
+          p.getString(RewardAdUiPrefs.lastSelectedGrantPurposeStorageKey),
+        );
+      });
+      _syncRewardRecommendedBadgeVisibility();
+    });
     _userDocSub =
         FirestoreUserService.watchUserDocument(widget.user.uid).listen(
       (snap) {
@@ -359,9 +445,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
+  /// After server 429 cooldown — aligns local UI with [waitSeconds] from `/grant-reward`.
+  void _applyServerCooldownSeconds(int waitSeconds) {
+    _localAdCooldownTimer?.cancel();
+    _localAdCooldownSeconds = math.max(1, waitSeconds);
+    _refreshFromLatestSnapshot();
+    _localAdCooldownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      _localAdCooldownSeconds -= 1;
+      if (_localAdCooldownSeconds <= 0) {
+        _localAdCooldownSeconds = 0;
+        _localAdCooldownTimer?.cancel();
+        _localAdCooldownTimer = null;
+      }
+      _refreshFromLatestSnapshot();
+    });
+  }
+
   Future<void> _onWatchRewardedAd(
     int cooldownRemaining,
     bool dailyLimitReached,
+    GrantRewardPurpose purpose,
   ) async {
     if (_rewardedAdBusy) return;
     if (dailyLimitReached) {
@@ -396,13 +500,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final earned = await AdService.instance.loadAndShowRewardedAd();
       if (!mounted) return;
       if (earned) {
-        _applyOptimisticAdWatched();
-        _startPostAdCooldown();
         setState(() => _grantRewardPending = true);
         try {
-          final result = await GrantRewardService.instance.requestMinuteGrant();
+          await maybeShowSoftAdPaywallBeforeGrant(
+            context,
+            isPremium: FirestoreUserService.isPremiumTierLabel(
+              _subscriptionTier.value,
+            ),
+          );
           if (!mounted) return;
-          if (result.creditsAdded > 0) {
+          final result =
+              await GrantRewardService.instance.requestMinuteGrant(
+            purpose,
+            adVerified: true,
+          );
+          if (!mounted) return;
+          if (result.deduped) {
+            EngagementOverlays.showRewardMicroToast(
+              context,
+              headline: 'Ad already counted',
+              subline: result.message ?? 'Reward already granted.',
+            );
+            return;
+          }
+          unawaited(recordSoftPaywallGrantSuccess());
+          _applyOptimisticAdWatched();
+          _startPostAdCooldown();
+          unawaited(_persistLastSelectedGrantPurpose(purpose));
+          if (purpose == GrantRewardPurpose.call && result.creditsAdded > 0) {
             _credits.value = _credits.value + result.creditsAdded;
             unawaited(RewardSoundService.playCoin());
             EngagementOverlays.showAdRewardFanfare(
@@ -414,6 +539,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
               isPremium: FirestoreUserService.isPremiumTierLabel(
                 _subscriptionTier.value,
               ),
+            );
+            EngagementOverlays.showFloatingCreditDelta(
+              context,
+              delta: result.creditsAdded,
             );
             if (result.adsWatchedToday == 3) {
               if (!mounted) return;
@@ -430,20 +559,40 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               );
             }
-          } else {
-            AppSnackBar.show(context,
-              SnackBar(
-                content: const Text(
-                  'Reward recorded — credits will sync shortly.',
-                ),
-                behavior: SnackBarBehavior.floating,
-                margin: AppTheme.snackBarFloatingMargin(context),
-                duration: AppTheme.snackBarCalmDuration,
-              ),
+          } else if (purpose == GrantRewardPurpose.call) {
+            EngagementOverlays.showRewardMicroToast(
+              context,
+              headline: 'Reward saved',
+              subline: 'Balance will sync on the next refresh.',
+            );
+          } else if (purpose == GrantRewardPurpose.number) {
+            final p = result.numberAdsProgress;
+            final cap = CreditsPolicy.numberUnlockAdsRequired;
+            EngagementOverlays.showRewardMicroToast(
+              context,
+              headline: '+1 unlock progress',
+              subline: p != null
+                  ? '$p / $cap toward your US line'
+                  : 'One step closer to your number.',
+            );
+          } else if (purpose == GrantRewardPurpose.otp) {
+            final p = result.otpAdsProgress;
+            final cap = CreditsPolicy.otpAdsRequiredPerSms;
+            EngagementOverlays.showRewardMicroToast(
+              context,
+              headline: '+1 SMS ready',
+              subline: p != null
+                  ? '$p / $cap toward a free send'
+                  : 'Bank updated — keep going.',
             );
           }
         } on GrantRewardException catch (e) {
           if (!mounted) return;
+          if (e.statusCode == 429 &&
+              e.waitSeconds != null &&
+              e.waitSeconds! > 0) {
+            _applyServerCooldownSeconds(e.waitSeconds!);
+          }
           AppSnackBar.show(context,
             SnackBar(
               content: Text(RewardAdFeedback.forGrantError(e)),
@@ -497,22 +646,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  Future<void> _debugAddCredits() async {
-    if (!kDebugMode) return;
-    try {
-      await FirestoreUserService.addPaidCredits(widget.user.uid, 100);
-      if (!mounted) return;
-      AppSnackBar.show(context,
-        const SnackBar(content: Text('[Debug] +100 credits added.')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      AppSnackBar.show(context,
-        SnackBar(content: Text('[Debug] Failed: $e')),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -556,24 +689,44 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 outboundCallsTotal: _outboundCallsTotal,
                 totalCallTalkSeconds: _totalCallTalkSeconds,
                 adStreakCount: _adStreakCount,
-                onDebugAddCredits: kDebugMode ? _debugAddCredits : null,
-                onWatchRewardedAd: () => _onWatchRewardedAd(
+                purposeStripEmphasis: _stripEmphasisForTab(0),
+                repeatHabitPulseBoost: _repeatHabitPulseBoostForTab(0),
+                showRewardRecommendedBadge: _showRewardRecommendedBadge,
+                onWatchPurposeAd: (purpose) => _onWatchRewardedAd(
                   cooldownRemaining,
                   dailyLimitReached,
+                  purpose,
                 ),
                 onGoToDialer: () => setState(() => _navIndex = 1),
                 onOpenCallHistory: () {
                   Navigator.of(context).push<void>(
                     MaterialPageRoute<void>(
-                      builder: (_) => CallHistoryScreen(
-                        user: widget.user,
-                        onStartCalling: () {
-                          setState(() => _navIndex = 1);
+                      builder: (_) => ValueListenableBuilder<String>(
+                        valueListenable: _subscriptionTier,
+                        builder: (context, tier, _) {
+                          final isPro =
+                              FirestoreUserService.isPremiumTierLabel(tier);
+                          return CallHistoryScreen(
+                            user: widget.user,
+                            isPremium: isPro,
+                            onStartCalling: () {
+                              setState(() => _navIndex = 1);
+                            },
+                            onWatchPurposeAd: isPro
+                                ? null
+                                : (purpose) => _onWatchRewardedAd(
+                                      cooldownRemaining,
+                                      dailyLimitReached,
+                                      purpose,
+                                    ),
+                            rewardedAdBusy: _rewardedAdBusy,
+                            grantRewardPending: _grantRewardPending,
+                            cooldownRemaining: cooldownRemaining,
+                            dailyLimitReached: dailyLimitReached,
+                            showRewardRecommendedBadge:
+                                _showRewardRecommendedBadge,
+                          );
                         },
-                        onWatchAd: () => _onWatchRewardedAd(
-                          cooldownRemaining,
-                          dailyLimitReached,
-                        ),
                       ),
                     ),
                   );
@@ -588,28 +741,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     key: const ValueKey<Object>('talkfree_dialer'),
                     user: widget.user,
                     isPremium: isPro,
+                    emphasizeRewardPurpose: _stripEmphasisForTab(1),
+                    repeatHabitPulseBoost: _repeatHabitPulseBoostForTab(1),
+                    showRecommendedBadge: _showRewardRecommendedBadge,
                     embedInShell: true,
                     onOpenHistory: () {
                       Navigator.of(context).push<void>(
                         MaterialPageRoute<void>(
-                          builder: (_) => CallHistoryScreen(
-                            user: widget.user,
-                            onStartCalling: () {
-                              setState(() => _navIndex = 1);
+                          builder: (_) => ValueListenableBuilder<String>(
+                            valueListenable: _subscriptionTier,
+                            builder: (context, tier, _) {
+                              final isPro = FirestoreUserService
+                                  .isPremiumTierLabel(tier);
+                              return CallHistoryScreen(
+                                user: widget.user,
+                                isPremium: isPro,
+                                onStartCalling: () {
+                                  setState(() => _navIndex = 1);
+                                },
+                                onWatchPurposeAd: isPro
+                                    ? null
+                                    : (purpose) => _onWatchRewardedAd(
+                                          cooldownRemaining,
+                                          dailyLimitReached,
+                                          purpose,
+                                        ),
+                                rewardedAdBusy: _rewardedAdBusy,
+                                grantRewardPending: _grantRewardPending,
+                                cooldownRemaining: cooldownRemaining,
+                                dailyLimitReached: dailyLimitReached,
+                                showRewardRecommendedBadge:
+                                    _showRewardRecommendedBadge,
+                              );
                             },
-                            onWatchAd: () => _onWatchRewardedAd(
-                              cooldownRemaining,
-                              dailyLimitReached,
-                            ),
                           ),
                         ),
                       );
                     },
                     onEarnMinutes: isPro
                         ? null
-                        : () => _onWatchRewardedAd(
+                        : (purpose) => _onWatchRewardedAd(
                               cooldownRemaining,
                               dailyLimitReached,
+                              purpose,
                             ),
                     rewardedAdBusy: _rewardedAdBusy,
                     cooldownRemaining: cooldownRemaining,
@@ -624,16 +798,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 embedInShell: true,
                 userUid: widget.user.uid,
                 userCredits: credits,
-                onWatchRewardedAd: () => _onWatchRewardedAd(
+                showRecommendedBadge: _showRewardRecommendedBadge,
+                onPurposeRewardAd: (purpose) => _onWatchRewardedAd(
                   cooldownRemaining,
                   dailyLimitReached,
+                  purpose,
                 ),
+                rewardedAdBusy: _rewardedAdBusy,
+                grantRewardPending: _grantRewardPending,
+                cooldownRemaining: cooldownRemaining,
+                rewardDailyLimitReached: dailyLimitReached,
+                emphasizeRewardPurpose: _stripEmphasisForTab(2),
+                repeatHabitPulseBoost: _repeatHabitPulseBoostForTab(2),
               );
             } else if (_navIndex == 3) {
               tabBody = InboxScreen(
                 key: const ValueKey<String>('talkfree_inbox'),
                 user: widget.user,
-                onGoHomeForCredits: () => setState(() => _navIndex = 0),
+                onWatchPurposeAd: (purpose) => _onWatchRewardedAd(
+                  cooldownRemaining,
+                  dailyLimitReached,
+                  purpose,
+                ),
+                rewardedAdBusy: _rewardedAdBusy,
+                grantRewardPending: _grantRewardPending,
+                cooldownRemaining: cooldownRemaining,
+                dailyLimitReached: dailyLimitReached,
+                showRewardRecommendedBadge: _showRewardRecommendedBadge,
+                emphasizeRewardPurpose: _stripEmphasisForTab(3),
+                repeatHabitPulseBoost: _repeatHabitPulseBoostForTab(3),
               );
             } else {
               tabBody = const SubscriptionScreen(embedInShell: true);
@@ -813,7 +1006,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   bottomNavigationBar: BottomNavigationBar(
                     currentIndex: _navIndex,
-                    onTap: (i) => setState(() => _navIndex = i),
+                    onTap: (i) => setState(() {
+                      _navIndex = i;
+                    }),
                     type: BottomNavigationBarType.fixed,
                     backgroundColor: AppTheme.darkBg,
                     selectedItemColor: _navIndex == 4
@@ -958,11 +1153,9 @@ class _FreePhoneIllustration extends StatelessWidget {
 class _FreeMinutesStatusCard extends StatelessWidget {
   const _FreeMinutesStatusCard({
     required this.credits,
-    this.onDebugLongPress,
   });
 
   final int credits;
-  final Future<void> Function()? onDebugLongPress;
 
   static const int _goalMinutes = 10;
 
@@ -1016,8 +1209,6 @@ class _FreeMinutesStatusCard extends StatelessWidget {
             Material(
               color: Colors.transparent,
               child: InkWell(
-                onLongPress:
-                    onDebugLongPress == null ? null : () => onDebugLongPress!(),
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(14, 18, 14, 16),
                   child: Column(
@@ -1039,7 +1230,7 @@ class _FreeMinutesStatusCard extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'YOUR FREE CALL MINUTES',
+                                  'CALL CREDITS (EARNED WITH ADS)',
                                   style: GoogleFonts.inter(
                                     fontSize: 10,
                                     fontWeight: FontWeight.w800,
@@ -1219,28 +1410,18 @@ class _FreeGaugePainter extends CustomPainter {
 
 class _FreeAdRewardProgressCard extends StatelessWidget {
   const _FreeAdRewardProgressCard({
-    required this.streak,
     required this.adsToday,
   });
 
-  final int streak;
   final int adsToday;
 
   @override
   Widget build(BuildContext context) {
-    final next = CreditsPolicy.nextStreakMilestoneAfter(streak);
-    final gap = next == null ? 0 : (next.day - streak).clamp(0, 999);
-    final bonus = next?.bonusCredits ?? 5;
-    final subtitle = next == null
-        ? 'Keep watching — bonus minutes stack up'
-        : gap <= 0
-            ? 'Milestone ready — keep your streak going'
-            : '$gap more ad${gap == 1 ? '' : 's'} to unlock +$bonus MIN';
-
-    var filled = 0;
-    if (next != null && next.day > 0) {
-      filled = ((streak / next.day) * 7).floor().clamp(0, 7);
-    }
+    final cap = CreditsPolicy.maxRewardedAdsForUser(false);
+    final dayProgress = cap <= 0 ? 0.0 : (adsToday / cap).clamp(0.0, 1.0);
+    final subtitle =
+        'Each rewarded ad adds call credits and updates number / OTP progress (server). Resets UTC daily.';
+    final filled = (dayProgress * 7).floor().clamp(0, 7);
 
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 16, 14, 14),
@@ -1278,7 +1459,7 @@ class _FreeAdRewardProgressCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Watch ads to unlock bonus',
+                      "Today's rewarded ads",
                       style: GoogleFonts.inter(
                         fontSize: 14,
                         fontWeight: FontWeight.w800,
@@ -1354,212 +1535,6 @@ class _FreeAdRewardProgressCard extends StatelessWidget {
             }),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _FreeGetMinutesCta extends StatelessWidget {
-  const _FreeGetMinutesCta({
-    required this.canTapAd,
-    required this.grantRewardPending,
-    required this.rewardedAdBusy,
-    required this.cooldownRemaining,
-    required this.dailyLimitReached,
-    required this.onWatchRewardedAd,
-    required this.lifetimeAdsWatched,
-    required this.adStreakCount,
-    required this.isPremium,
-  });
-
-  final bool canTapAd;
-  final bool grantRewardPending;
-  final bool rewardedAdBusy;
-  final int cooldownRemaining;
-  final bool dailyLimitReached;
-  final Future<void> Function() onWatchRewardedAd;
-  final ValueNotifier<int> lifetimeAdsWatched;
-  final ValueNotifier<int> adStreakCount;
-  /// Matches server ad grant tier (home ad row is only shown for non‑Pro; still pass for CTA copy).
-  final bool isPremium;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = canTapAd && !grantRewardPending;
-    final surface = Theme.of(context).cardTheme.color ??
-        Theme.of(context).colorScheme.surface;
-
-    return Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(26),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: enabled && !rewardedAdBusy ? onWatchRewardedAd : null,
-        borderRadius: BorderRadius.circular(26),
-        child: Ink(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(26),
-            gradient: enabled && !rewardedAdBusy && !dailyLimitReached
-                ? const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Color(0xFF00E676),
-                      Color(0xFF00C853),
-                      Color(0xFF69F0AE),
-                    ],
-                    stops: [0.0, 0.45, 1.0],
-                  )
-                : null,
-            color: enabled && !rewardedAdBusy && !dailyLimitReached
-                ? null
-                : cooldownRemaining > 0 && !dailyLimitReached
-                    ? AppColors.primary.withValues(alpha: 0.42)
-                    : surface.withValues(alpha: 0.65),
-            border: Border.all(
-              color: enabled && !rewardedAdBusy
-                  ? AppColors.primary.withValues(alpha: 0.35)
-                  : Colors.transparent,
-            ),
-            boxShadow: enabled && !rewardedAdBusy && cooldownRemaining <= 0
-                ? AppTheme.fintechPrimaryCtaShadow
-                : null,
-          ),
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
-          child: Row(
-            children: [
-              Icon(
-                Icons.card_giftcard_rounded,
-                size: 30,
-                color: AppColors.onPrimaryButton.withValues(alpha: 0.92),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: rewardedAdBusy || grantRewardPending
-                    ? Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          SizedBox(
-                            height: 22,
-                            width: 22,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2.5,
-                              color: AppColors.onPrimaryButton
-                                  .withValues(alpha: 0.95),
-                            ),
-                          ),
-                        ],
-                      )
-                    : dailyLimitReached
-                        ? Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                'Daily ad limit reached',
-                                style: GoogleFonts.inter(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w800,
-                                  color: AppColors.onPrimaryButton,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Back tomorrow for more rewards',
-                                style: GoogleFonts.inter(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.onPrimaryButton
-                                      .withValues(alpha: 0.78),
-                                ),
-                              ),
-                            ],
-                          )
-                        : cooldownRemaining > 0
-                            ? Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    'Next reward in ${cooldownRemaining}s',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w800,
-                                      color: AppColors.onPrimaryButton,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    'Hang tight — rewards stack fast',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.onPrimaryButton
-                                          .withValues(alpha: 0.82),
-                                    ),
-                                  ),
-                                ],
-                              )
-                            : ValueListenableBuilder<int>(
-                                valueListenable: lifetimeAdsWatched,
-                                builder: (context, lifetime, _) {
-                                  return ValueListenableBuilder<int>(
-                                    valueListenable: adStreakCount,
-                                    builder: (context, streak, _) {
-                                      final cta = RewardAdCtaCopy.homeOrDialer(
-                                        lifetimeAdsWatched: lifetime,
-                                        streakDays: streak,
-                                        isPremium: isPremium,
-                                      );
-                                      return Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            cta.title,
-                                            style: GoogleFonts.inter(
-                                              fontSize: 17,
-                                              fontWeight: FontWeight.w900,
-                                              letterSpacing: -0.2,
-                                              color: AppColors.onPrimaryButton,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            cta.subtitle,
-                                            style: GoogleFonts.inter(
-                                              fontSize: 12.5,
-                                              fontWeight: FontWeight.w600,
-                                              height: 1.25,
-                                              color: AppColors.onPrimaryButton
-                                                  .withValues(alpha: 0.82),
-                                            ),
-                                          ),
-                                        ],
-                                      );
-                                    },
-                                  );
-                                },
-                              ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withValues(alpha: 0.95),
-                ),
-                child: Icon(
-                  Icons.arrow_forward_rounded,
-                  color: AppColors.primary.withValues(alpha: 0.95),
-                  size: 22,
-                ),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -2047,8 +2022,10 @@ class _DashboardHomeTab extends StatefulWidget {
     required this.outboundCallsTotal,
     required this.totalCallTalkSeconds,
     required this.adStreakCount,
-    this.onDebugAddCredits,
-    required this.onWatchRewardedAd,
+    required this.purposeStripEmphasis,
+    this.repeatHabitPulseBoost = false,
+    required this.showRewardRecommendedBadge,
+    required this.onWatchPurposeAd,
     required this.onGoToDialer,
     required this.onOpenCallHistory,
   });
@@ -2074,8 +2051,10 @@ class _DashboardHomeTab extends StatefulWidget {
   final ValueNotifier<int> outboundCallsTotal;
   final ValueNotifier<int> totalCallTalkSeconds;
   final ValueNotifier<int> adStreakCount;
-  final Future<void> Function()? onDebugAddCredits;
-  final Future<void> Function() onWatchRewardedAd;
+  final GrantRewardPurpose purposeStripEmphasis;
+  final bool repeatHabitPulseBoost;
+  final bool showRewardRecommendedBadge;
+  final Future<void> Function(GrantRewardPurpose purpose) onWatchPurposeAd;
   final VoidCallback onGoToDialer;
   final VoidCallback onOpenCallHistory;
 
@@ -2094,8 +2073,8 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
   late final AnimationController _homeCardC;
   late final Animation<double> _homeCardScale;
 
-  late final AnimationController _homeUnlimitedBounceC;
-  late final Animation<double> _homeUnlimitedScale;
+  late final AnimationController _homeProMarkBounceC;
+  late final Animation<double> _homeProMarkScale;
 
   late final AnimationController _homeProGlowC;
   /// Horizontal shine sweep on the Pro home hero (Pro tier only).
@@ -2111,7 +2090,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
     if (status == AnimationStatus.completed &&
         FirestoreUserService.isPremiumTierLabel(
             widget.subscriptionTier.value)) {
-      _homeUnlimitedBounceC.forward(from: 0);
+      _homeProMarkBounceC.forward(from: 0);
     }
   }
 
@@ -2172,11 +2151,11 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
       CurvedAnimation(parent: _homeCardC, curve: Curves.easeOutCubic),
     );
 
-    _homeUnlimitedBounceC = AnimationController(
+    _homeProMarkBounceC = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 280),
     );
-    _homeUnlimitedScale = TweenSequence<double>([
+    _homeProMarkScale = TweenSequence<double>([
       TweenSequenceItem(
         tween: Tween<double>(begin: 1.0, end: 1.03)
             .chain(CurveTween(curve: Curves.easeOutCubic)),
@@ -2187,7 +2166,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
             .chain(CurveTween(curve: Curves.easeOutCubic)),
         weight: 50,
       ),
-    ]).animate(_homeUnlimitedBounceC);
+    ]).animate(_homeProMarkBounceC);
 
     _homeProGlowC = AnimationController(
       vsync: this,
@@ -2220,7 +2199,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
     _homeCardC.removeStatusListener(_onHomeCardStatus);
     _homeGreetingC.dispose();
     _homeCardC.dispose();
-    _homeUnlimitedBounceC.dispose();
+    _homeProMarkBounceC.dispose();
     _homeProGlowC.dispose();
     _premiumShineC.dispose();
     super.dispose();
@@ -2374,8 +2353,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
               valueListenable: widget.subscriptionTier,
               builder: (context, tier, _) {
                 final isPro = FirestoreUserService.isPremiumTierLabel(tier);
-                final canTapAd = !widget.rewardedAdBusy &&
-                    !widget.dailyLimitReached &&
+                final adSlotOpen = !widget.dailyLimitReached &&
                     widget.cooldownRemaining <= 0;
                 final remaining = math.max(
                   0,
@@ -2389,7 +2367,7 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
                       child: AnimatedBuilder(
                         animation: Listenable.merge([
                           _homeCardC,
-                          _homeUnlimitedBounceC,
+                          _homeProMarkBounceC,
                           _homeProGlowC,
                           _premiumShineC,
                         ]),
@@ -2408,87 +2386,48 @@ class _DashboardHomeTabState extends State<_DashboardHomeTab>
                                 ? _ProPremiumShineHeroCard(
                                     displayName: widget.displayName,
                                     credits: widget.credits,
-                                    onDebugLongPress: widget.onDebugAddCredits,
-                                    unlimitedScale: _homeUnlimitedScale.value,
+                                    proMarkBounceScale: _homeProMarkScale.value,
                                     proBorderGlowOpacity: glowOpacity,
                                     shine: _premiumShineC,
                                   )
                                 : _FreeMinutesStatusCard(
                                     credits: widget.credits,
-                                    onDebugLongPress: widget.onDebugAddCredits,
                                   ),
                           );
                         },
                       ),
                     ),
                     if (!isPro) ...[
-                      ValueListenableBuilder<int>(
-                        valueListenable: widget.adStreakCount,
-                        builder: (context, streak, _) {
-                          return Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: _FreeAdRewardProgressCard(
-                              streak: streak,
-                              adsToday: widget.adsToday,
-                            ),
-                          );
-                        },
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: _FreeAdRewardProgressCard(
+                          adsToday: widget.adsToday,
+                        ),
                       ),
                       const SizedBox(height: 22),
                       SoftPulse(
-                        enabled: canTapAd &&
+                        enabled: adSlotOpen &&
                             !widget.grantRewardPending &&
                             !widget.rewardedAdBusy,
+                        pulseBoost: widget.repeatHabitPulseBoost,
                         child: ScaleOnPress(
-                          child: _FreeGetMinutesCta(
-                            canTapAd: canTapAd,
+                          child: PurposeRewardedAdStrip(
+                            canTapAd: adSlotOpen,
                             grantRewardPending: widget.grantRewardPending,
                             rewardedAdBusy: widget.rewardedAdBusy,
                             cooldownRemaining: widget.cooldownRemaining,
                             dailyLimitReached: widget.dailyLimitReached,
-                            onWatchRewardedAd: widget.onWatchRewardedAd,
-                            lifetimeAdsWatched: widget.lifetimeAdsWatched,
-                            adStreakCount: widget.adStreakCount,
-                            isPremium: isPro,
+                            emphasizePurpose: widget.purposeStripEmphasis,
+                            showRewardRecommendedBadge:
+                                widget.showRewardRecommendedBadge,
+                            cooldownPolicySeconds:
+                                CreditsPolicy.adRewardCooldownSecondsForUser(
+                              isPro,
+                            ),
+                            onPurposeAd: widget.onWatchPurposeAd,
                           ),
                         ),
                       ),
-                      if (widget.cooldownRemaining > 0 &&
-                          !widget.dailyLimitReached) ...[
-                        const SizedBox(height: 10),
-                        ValueListenableBuilder<String>(
-                          valueListenable: widget.subscriptionTier,
-                          builder: (context, tier, _) {
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                CooldownRewardProgressBar(
-                                  remainingSeconds: widget.cooldownRemaining,
-                                  totalCooldownSeconds:
-                                      CreditsPolicy.adRewardCooldownSecondsForUser(
-                                    FirestoreUserService.isPremiumTierLabel(tier),
-                                  ),
-                                ),
-                                if (widget.cooldownRemaining > 0) ...[
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    MonetizationCopy.cooldownGoProHint,
-                                    textAlign: TextAlign.center,
-                                    style: GoogleFonts.inter(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w500,
-                                      height: 1.4,
-                                      letterSpacing: 0.02,
-                                      color: AppColors.textMutedOnDark
-                                          .withValues(alpha: 0.58),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            );
-                          },
-                        ),
-                      ],
                       const SizedBox(height: 14),
                       Text(
                         remaining == 0
@@ -2638,16 +2577,14 @@ class _ProPremiumShineHeroCard extends StatelessWidget {
   const _ProPremiumShineHeroCard({
     required this.displayName,
     required this.credits,
-    this.onDebugLongPress,
-    required this.unlimitedScale,
+    required this.proMarkBounceScale,
     required this.proBorderGlowOpacity,
     required this.shine,
   });
 
   final String displayName;
   final int credits;
-  final Future<void> Function()? onDebugLongPress;
-  final double unlimitedScale;
+  final double proMarkBounceScale;
   final double? proBorderGlowOpacity;
   final Animation<double> shine;
 
@@ -2785,8 +2722,6 @@ class _ProPremiumShineHeroCard extends StatelessWidget {
             Material(
               color: Colors.transparent,
               child: InkWell(
-                onLongPress:
-                    onDebugLongPress == null ? null : () => onDebugLongPress!(),
                 borderRadius: BorderRadius.circular(24),
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(18, 20, 18, 22),
@@ -2822,7 +2757,7 @@ class _ProPremiumShineHeroCard extends StatelessWidget {
                       const SizedBox(height: 14),
                       Center(
                         child: Transform.scale(
-                          scale: unlimitedScale,
+                          scale: proMarkBounceScale,
                           alignment: Alignment.center,
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
@@ -3139,7 +3074,7 @@ class _ProReferEarnBanner extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'Invite friends & get free rewards',
+                        'Invite friends to TalkFree',
                         style: GoogleFonts.inter(
                           fontWeight: FontWeight.w600,
                           fontSize: 12,

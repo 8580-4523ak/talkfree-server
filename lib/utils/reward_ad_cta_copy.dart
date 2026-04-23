@@ -16,10 +16,12 @@ abstract final class RewardAdCtaCopy {
     if (lifetimeAdsWatched == 0) {
       return (
         title: MonetizationCopy.watchAdEarn,
-        subtitle: 'Earn $perAd credits per ad',
+        subtitle: 'Earn $perAd call credits per ad',
       );
     }
-    if (next != null && next.day - streakDays == 1) {
+    if (isPremium &&
+        next != null &&
+        next.day - streakDays == 1) {
       return (
         title: '🔥 Unlock +${next.bonusCredits} BONUS now',
         subtitle: 'One more ad · streak pays off',
@@ -27,7 +29,7 @@ abstract final class RewardAdCtaCopy {
     }
     return (
       title: MonetizationCopy.watchAdEarn,
-      subtitle: 'Earn $perAd credits per ad',
+      subtitle: 'Earn $perAd call credits per ad',
     );
   }
 }

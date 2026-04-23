@@ -57,7 +57,16 @@ service cloud.firestore {
         && request.resource.data.totalCallTalkSeconds == resource.data.totalCallTalkSeconds
         && request.resource.data.welcomeCallingCreditsGranted == resource.data.welcomeCallingCreditsGranted
         && request.resource.data.ad_streak_count == resource.data.ad_streak_count
-        && request.resource.data.ad_streak_last_day == resource.data.ad_streak_last_day;
+        && request.resource.data.ad_streak_last_day == resource.data.ad_streak_last_day
+        && request.resource.data.ads_watched_count == resource.data.ads_watched_count
+        && request.resource.data.ads_watched_today == resource.data.ads_watched_today
+        && request.resource.data.first_call_reward_granted == resource.data.first_call_reward_granted
+        && request.resource.data.last_ad_timestamp == resource.data.last_ad_timestamp
+        && request.resource.data.number_ads_progress == resource.data.number_ads_progress
+        && request.resource.data.otp_ads_progress == resource.data.otp_ads_progress
+        && request.resource.data.paywall_ab_bucket == resource.data.paywall_ab_bucket
+        && request.resource.data.paywall_price_tier == resource.data.paywall_price_tier
+        && request.resource.data.is_high_value_user == resource.data.is_high_value_user;
       allow delete: if request.auth != null && request.auth.uid == userId;
 
       match /call_history/{callSid} {
@@ -69,11 +78,26 @@ service cloud.firestore {
         allow read: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
       }
+
+      // POST /grant-reward idempotency — Admin SDK only.
+      match /reward_keys/{keyId} {
+        allow read, write: if false;
+      }
     }
 
     // Twilio number reuse cooldown — server-only (Node janitor + purchase).
     match /released_numbers/{phoneId} {
       allow read, write: if false;
+    }
+
+    // Profit / engagement aggregates — Admin SDK writes; user may read own doc later.
+    match /user_stats/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+
+      match /paywall_metric_dedupe/{eventId} {
+        allow read, write: if false;
+      }
     }
   }
 }

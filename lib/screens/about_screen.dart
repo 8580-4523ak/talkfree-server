@@ -56,20 +56,20 @@ class AboutScreen extends StatelessWidget {
               if (uid == null)
                 _PitchProgressCard(
                   adsWatched: 0,
-                  maxAds: CreditsPolicy.assignNumberMinAdsWatched,
+                  maxAds: CreditsPolicy.numberUnlockAdsRequired,
                   onProTap: () => _openPro(context),
                 )
               else
                 StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
                   stream: FirestoreUserService.watchUserDocument(uid),
                   builder: (context, snap) {
-                    final raw = FirestoreUserService.lifetimeAdsWatchedFromUserData(
-                      snap.data?.data(),
+                    final doc = snap.data;
+                    final n = FirestoreUserService.numberAdsProgressFromUserData(
+                      doc?.data(),
                     );
-                    final n = raw.clamp(0, CreditsPolicy.assignNumberMinAdsWatched);
                     return _PitchProgressCard(
                       adsWatched: n,
-                      maxAds: CreditsPolicy.assignNumberMinAdsWatched,
+                      maxAds: CreditsPolicy.numberUnlockAdsRequired,
                       onProTap: () => _openPro(context),
                     );
                   },

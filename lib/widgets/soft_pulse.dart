@@ -6,10 +6,13 @@ class SoftPulse extends StatefulWidget {
     super.key,
     required this.child,
     this.enabled = true,
+    /// Stronger pulse when the user’s last grant purpose matches this screen’s default (repeat habit).
+    this.pulseBoost = false,
   });
 
   final Widget child;
   final bool enabled;
+  final bool pulseBoost;
 
   @override
   State<SoftPulse> createState() => _SoftPulseState();
@@ -53,7 +56,8 @@ class _SoftPulseState extends State<SoftPulse> with SingleTickerProviderStateMix
       animation: _c,
       builder: (context, child) {
         final t = Curves.easeOutCubic.transform(_c.value);
-        final s = 1.0 + 0.004 * t;
+        final amp = widget.pulseBoost ? 0.0085 : 0.004;
+        final s = 1.0 + amp * t;
         return Transform.scale(scale: s, alignment: Alignment.center, child: child);
       },
       child: widget.child,

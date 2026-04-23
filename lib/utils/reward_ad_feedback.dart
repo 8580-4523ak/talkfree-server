@@ -33,6 +33,15 @@ abstract final class RewardAdFeedback {
   /// Maps [GrantRewardException] and generic errors to short UI strings.
   static String forGrantError(Object error) {
     if (error is GrantRewardException) {
+      if (error.statusCode == 429) {
+        final m = error.message;
+        if (m.contains('Daily cap')) {
+          return dailyLimit;
+        }
+        if (error.waitSeconds != null && error.waitSeconds! > 0) {
+          return 'Wait ${error.waitSeconds}s to watch next ad';
+        }
+      }
       return _forStatus(error.statusCode, error.message);
     }
     if (_isNetworkLike(error)) return network;

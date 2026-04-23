@@ -230,7 +230,7 @@ class _NumberSelectionScreenState extends State<NumberSelectionScreen> {
         AppSnackBar.show(
           context,
           SnackBar(
-            content: const Text('Not enough credits (500 required).'),
+            content: Text('Not enough credits (${vn.price} required).'),
             behavior: SnackBarBehavior.floating,
             margin: AppTheme.snackBarFloatingMargin(context),
             duration: AppTheme.snackBarCalmDuration,

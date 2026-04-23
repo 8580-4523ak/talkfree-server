@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 
 import '../config/credits_policy.dart';
@@ -188,12 +189,4 @@ String formatDialInputToE164(
   final d = t.replaceAll(RegExp(r'\D'), '');
   if (d.isEmpty) return '';
   return '+$defaultCallingCode$d';
-}
-
-/// Spaces stripped; leading `+` preserved, otherwise prefix `+91`.
-String _normalizeCallNumberForApi(String raw) {
-  final noSpaces = raw.replaceAll(RegExp(r'\s'), '');
-  if (noSpaces.isEmpty) return '';
-  if (noSpaces.startsWith('+')) return noSpaces;
-  return '+91$noSpaces';
 }

@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../theme/app_colors.dart';
@@ -51,6 +52,157 @@ abstract final class EngagementOverlays {
       ),
     );
     overlay.insert(entry);
+  }
+
+  /// Short center “toast” after a purpose reward (number / OTP / small call nudges).
+  static void showRewardMicroToast(
+    BuildContext context, {
+    required String headline,
+    String? subline,
+    Duration hold = const Duration(milliseconds: 1650),
+  }) {
+    final overlay = Overlay.of(context, rootOverlay: true);
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (ctx) => _RewardMicroToastLayer(
+        headline: headline,
+        subline: subline,
+        hold: hold,
+        onDone: () => entry.remove(),
+      ),
+    );
+    overlay.insert(entry);
+  }
+}
+
+class _RewardMicroToastLayer extends StatefulWidget {
+  const _RewardMicroToastLayer({
+    required this.headline,
+    required this.subline,
+    required this.hold,
+    required this.onDone,
+  });
+
+  final String headline;
+  final String? subline;
+  final Duration hold;
+  final VoidCallback onDone;
+
+  @override
+  State<_RewardMicroToastLayer> createState() => _RewardMicroToastLayerState();
+}
+
+class _RewardMicroToastLayerState extends State<_RewardMicroToastLayer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 300),
+  );
+  late final Animation<double> _curve = CurvedAnimation(
+    parent: _c,
+    curve: Curves.easeOutCubic,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    HapticFeedback.lightImpact();
+    _c.forward();
+    Future<void>.delayed(widget.hold, () async {
+      if (!mounted) return;
+      await _c.reverse();
+      if (mounted) widget.onDone();
+    });
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Material(
+        color: Colors.transparent,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.14),
+                ),
+              ),
+            ),
+            AnimatedBuilder(
+              animation: _c,
+              builder: (context, _) {
+                final t = _curve.value.clamp(0.0, 1.0);
+                return Opacity(
+                  opacity: t,
+                  child: Transform.scale(
+                    scale: 0.88 + 0.12 * t,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 320),
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 28),
+                        padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          color: AppColors.cardDark,
+                          border: Border.all(
+                            color: AppColors.primary.withValues(alpha: 0.45),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.primary.withValues(alpha: 0.22),
+                              blurRadius: 22,
+                              offset: const Offset(0, 10),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              widget.headline,
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.inter(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: -0.35,
+                                color: Colors.white,
+                                height: 1.15,
+                              ),
+                            ),
+                            if (widget.subline != null &&
+                                widget.subline!.trim().isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                widget.subline!,
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.inter(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.35,
+                                  color: Colors.white.withValues(alpha: 0.78),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

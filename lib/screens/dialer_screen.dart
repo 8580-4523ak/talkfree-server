@@ -17,9 +17,9 @@ import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../services/call_service.dart';
 import '../services/firestore_user_service.dart';
-import '../utils/reward_ad_cta_copy.dart';
+import '../services/grant_reward_service.dart';
 import '../widgets/cooldown_reward_progress_bar.dart';
-import '../widgets/reward_cta_animated_label.dart';
+import '../widgets/recommended_ad_badge.dart';
 import '../utils/voip_runtime_permissions.dart';
 import '../widgets/premium_ios_dial_pad.dart';
 import '../widgets/scale_on_press.dart';
@@ -46,6 +46,9 @@ class DialerScreen extends StatefulWidget {
     required this.outboundCallsTotal,
     this.onOpenHistory,
     this.embedInShell = false,
+    this.emphasizeRewardPurpose = GrantRewardPurpose.call,
+    this.repeatHabitPulseBoost = false,
+    this.showRecommendedBadge = true,
   });
 
   final User user;
@@ -55,13 +58,22 @@ class DialerScreen extends StatefulWidget {
   final bool embedInShell;
   /// Pro subscribers: lower per-minute cost in billing (no per-minute credit UI here).
   final bool isPremium;
-  final Future<void> Function()? onEarnMinutes;
+  final Future<void> Function(GrantRewardPurpose purpose)? onEarnMinutes;
   final bool rewardedAdBusy;
   final int cooldownRemaining;
-  /// 24 ads/day cap from Firestore.
+  /// Daily ad cap from Firestore (10 free / 25 Pro per UTC day).
   final bool rewardDailyLimitReached;
   /// When > 0, first-call hint is hidden ([DashboardScreen] passes server total).
   final ValueNotifier<int> outboundCallsTotal;
+
+  /// Which rewarded-ad row reads as the “default” choice (dialer → call).
+  final GrantRewardPurpose emphasizeRewardPurpose;
+
+  /// Stronger strip pulse when last grant matches this screen’s default purpose.
+  final bool repeatHabitPulseBoost;
+
+  /// “⭐ Recommended” on the primary row (hidden after onboarding unless confused).
+  final bool showRecommendedBadge;
 
   @override
   State<DialerScreen> createState() => _DialerScreenState();
@@ -186,10 +198,35 @@ class _DialerScreenState extends State<DialerScreen>
         final bottom = MediaQuery.paddingOf(ctx).bottom;
         return Padding(
           padding: EdgeInsets.fromLTRB(24, 8, 24, 24 + bottom),
-          child: Column(
+          child: SingleChildScrollView(
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              Center(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: AppColors.primary.withValues(alpha: 0.38),
+                    ),
+                  ),
+                  child: Text(
+                    '🎯 Pick your reward  •  1 ad = 1 benefit',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.15,
+                      color: AppColors.primary,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
               Text(
                 MonetizationCopy.outOfCreditsTitle,
                 textAlign: TextAlign.center,
@@ -202,7 +239,7 @@ class _DialerScreenState extends State<DialerScreen>
               const SizedBox(height: 10),
               Text(
                 widget.onEarnMinutes != null
-                    ? 'Watch an ad for credits — or go Pro for faster, cheaper minutes.'
+                    ? 'Pick one reward per ad — or go Pro for faster, cheaper minutes.'
                     : 'Add credits in Premium to keep calling.',
                 textAlign: TextAlign.center,
                 style: GoogleFonts.inter(
@@ -211,33 +248,49 @@ class _DialerScreenState extends State<DialerScreen>
                   color: Colors.white70,
                 ),
               ),
-              const SizedBox(height: 22),
+              const SizedBox(height: 18),
               if (widget.onEarnMinutes != null) ...[
-                FilledButton(
-                  onPressed: () {
-                    Navigator.of(ctx).pop();
-                    widget.onEarnMinutes!();
-                  },
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: AppColors.onPrimaryButton,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    minimumSize: const Size.fromHeight(52),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: Text(
-                    '🎁 Get Credits',
-                    style: GoogleFonts.inter(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.2,
+                if (_rewardAdCooldownOnly) ...[
+                  _rewardAdCooldownBanner(),
+                  CooldownRewardProgressBar(
+                    remainingSeconds: widget.cooldownRemaining,
+                    totalCooldownSeconds:
+                        CreditsPolicy.adRewardCooldownSecondsForUser(
+                      widget.isPremium,
                     ),
                   ),
+                  const SizedBox(height: 12),
+                ],
+                _freeDialPurposeButton(
+                  purpose: GrantRewardPurpose.call,
+                  label: 'Watch Ad for Call Credits',
+                  subtitle: CreditsPolicy.rewardAdEmotionalSubtitleCall(
+                    widget.isPremium,
+                  ),
+                  isEmphasized:
+                      widget.emphasizeRewardPurpose == GrantRewardPurpose.call,
+                  preInvoke: () => Navigator.of(ctx).pop(),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 12),
+                _freeDialPurposeButton(
+                  purpose: GrantRewardPurpose.number,
+                  label: 'Watch Ad for Number Unlock',
+                  subtitle: CreditsPolicy.rewardAdEmotionalSubtitleNumber(),
+                  isEmphasized:
+                      widget.emphasizeRewardPurpose ==
+                          GrantRewardPurpose.number,
+                  preInvoke: () => Navigator.of(ctx).pop(),
+                ),
+                const SizedBox(height: 12),
+                _freeDialPurposeButton(
+                  purpose: GrantRewardPurpose.otp,
+                  label: 'Watch Ad for SMS OTP',
+                  subtitle: CreditsPolicy.rewardAdEmotionalSubtitleOtp(),
+                  isEmphasized:
+                      widget.emphasizeRewardPurpose == GrantRewardPurpose.otp,
+                  preInvoke: () => Navigator.of(ctx).pop(),
+                ),
+                const SizedBox(height: 14),
                 OutlinedButton(
                   onPressed: () {
                     Navigator.of(ctx).pop();
@@ -291,6 +344,7 @@ class _DialerScreenState extends State<DialerScreen>
                 ),
               ],
             ],
+          ),
           ),
         );
       },
@@ -517,79 +571,113 @@ class _DialerScreenState extends State<DialerScreen>
     );
   }
 
-  Widget _rewardedAdButtonLabelColumn(Map<String, dynamic>? userData) {
-    if (widget.rewardedAdBusy) {
-      return SizedBox(
-        height: 22,
-        width: 22,
-        child: CircularProgressIndicator(
-          strokeWidth: 2.5,
-          color: AppColors.onPrimaryButton.withValues(alpha: 0.95),
+  bool get _freePurposeAdsDisabled =>
+      widget.rewardedAdBusy ||
+      widget.rewardDailyLimitReached ||
+      widget.cooldownRemaining > 0;
+
+  bool get _rewardAdCooldownOnly =>
+      widget.cooldownRemaining > 0 &&
+      !widget.rewardDailyLimitReached &&
+      !widget.rewardedAdBusy;
+
+  Widget _rewardAdCooldownBanner() {
+    if (!_rewardAdCooldownOnly) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(
+        'Wait ${widget.cooldownRemaining}s to watch next ad',
+        textAlign: TextAlign.center,
+        style: GoogleFonts.inter(
+          fontSize: 13,
+          fontWeight: FontWeight.w800,
+          color: AppColors.primary,
         ),
-      );
-    }
-    if (widget.rewardDailyLimitReached) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'Daily limit reached',
-            textAlign: TextAlign.center,
-            style: GoogleFonts.inter(
-              fontWeight: FontWeight.w800,
-              fontSize: 14,
-              height: 1.2,
-            ),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            'Back tomorrow',
-            style: GoogleFonts.inter(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: AppColors.onPrimaryButton.withValues(alpha: 0.78),
-            ),
-          ),
-        ],
-      );
-    }
-    if (widget.cooldownRemaining > 0) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            '⏳ Next reward in ${widget.cooldownRemaining}s',
-            textAlign: TextAlign.center,
-            style: GoogleFonts.inter(
-              fontWeight: FontWeight.w800,
-              fontSize: 14,
-              height: 1.2,
-            ),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            'Rewards stack fast',
-            style: GoogleFonts.inter(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: AppColors.onPrimaryButton.withValues(alpha: 0.78),
-            ),
-          ),
-        ],
-      );
-    }
-    final cta = RewardAdCtaCopy.homeOrDialer(
-      lifetimeAdsWatched:
-          FirestoreUserService.lifetimeAdsWatchedFromUserData(userData),
-      streakDays: FirestoreUserService.adStreakCountFromUserData(userData),
-      isPremium: widget.isPremium,
+      ),
     );
-    return RewardCtaAnimatedLabel(
-      title: cta.title,
-      subtitle: cta.subtitle,
-      titleFontSize: 15,
-      subtitleFontSize: 11,
-      gap: 3,
+  }
+
+  Widget _freeDialPurposeButton({
+    required GrantRewardPurpose purpose,
+    required String label,
+    required String subtitle,
+    required bool isEmphasized,
+    VoidCallback? preInvoke,
+  }) {
+    final disabled =
+        _freePurposeAdsDisabled || widget.onEarnMinutes == null;
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(14),
+    );
+    final ButtonStyle primaryStyle = FilledButton.styleFrom(
+      backgroundColor: AppColors.primary,
+      foregroundColor: AppColors.onPrimaryButton,
+      disabledForegroundColor: AppColors.textMutedOnDark,
+      disabledBackgroundColor: AppColors.surfaceDark.withValues(alpha: 0.42),
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      minimumSize: const Size(double.infinity, 48),
+      shape: shape,
+      elevation: 0,
+      splashFactory: disabled ? NoSplash.splashFactory : null,
+    );
+    final ButtonStyle secondaryStyle = FilledButton.styleFrom(
+      backgroundColor: AppColors.surfaceDark.withValues(alpha: 0.94),
+      foregroundColor: AppColors.textOnDark,
+      disabledForegroundColor: AppColors.textMutedOnDark,
+      disabledBackgroundColor: AppColors.surfaceDark.withValues(alpha: 0.35),
+      side: BorderSide(color: AppColors.primary.withValues(alpha: 0.42)),
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      minimumSize: const Size(double.infinity, 48),
+      shape: shape,
+      elevation: 0,
+      splashFactory: disabled ? NoSplash.splashFactory : null,
+    );
+    final style = disabled
+        ? (isEmphasized ? primaryStyle : secondaryStyle)
+        : (isEmphasized ? primaryStyle : secondaryStyle);
+    return ScaleOnPress(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (isEmphasized && widget.showRecommendedBadge) ...[
+            const Center(child: RecommendedAdBadge()),
+            const SizedBox(height: 6),
+          ] else if (isEmphasized) ...[
+            const SizedBox(height: 4),
+          ],
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: disabled
+                  ? null
+                  : () {
+                      preInvoke?.call();
+                      unawaited(widget.onEarnMinutes!(purpose));
+                    },
+              style: style,
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.15,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            textAlign: TextAlign.center,
+            style: GoogleFonts.inter(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: AppColors.textMutedOnDark,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -625,7 +713,6 @@ class _DialerScreenState extends State<DialerScreen>
                                   creditSnap.data!,
                                 )
                               : 0;
-                          final userData = creditSnap.data?.data();
                           return Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
@@ -755,7 +842,12 @@ class _DialerScreenState extends State<DialerScreen>
                                 Padding(
                                   padding:
                                       const EdgeInsets.fromLTRB(0, 4, 0, 2),
-                                  child: Column(
+                                  child: SoftPulse(
+                                    enabled: !widget.rewardedAdBusy &&
+                                        !widget.rewardDailyLimitReached &&
+                                        widget.cooldownRemaining <= 0,
+                                    pulseBoost: widget.repeatHabitPulseBoost,
+                                    child: Column(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.stretch,
                                     children: [
@@ -769,101 +861,65 @@ class _DialerScreenState extends State<DialerScreen>
                                               .withValues(alpha: 0.92),
                                         ),
                                       ),
-                                      const SizedBox(height: 8),
-                                      ScaleOnPress(
-                                        child: SizedBox(
-                                          width: double.infinity,
-                                          child: FilledButton(
-                                            onPressed: widget.rewardedAdBusy ||
-                                                    widget
-                                                        .rewardDailyLimitReached ||
-                                                    widget.cooldownRemaining > 0
-                                                ? null
-                                                : () => unawaited(
-                                                      widget.onEarnMinutes!(),
-                                                    ),
-                                            style: FilledButton.styleFrom(
-                                              backgroundColor: AppColors.primary,
-                                              foregroundColor:
-                                                  AppColors.onPrimaryButton,
-                                              disabledForegroundColor:
-                                                  AppColors.onPrimaryButton
-                                                      .withValues(alpha: 0.88),
-                                              disabledBackgroundColor:
-                                                  widget.cooldownRemaining > 0 &&
-                                                          !widget
-                                                              .rewardDailyLimitReached
-                                                      ? AppColors.primary
-                                                          .withValues(
-                                                              alpha: 0.42)
-                                                      : (Theme.of(context)
-                                                                  .cardTheme
-                                                                  .color ??
-                                                              Theme.of(context)
-                                                                  .colorScheme
-                                                                  .surface)
-                                                          .withValues(
-                                                              alpha: 0.65),
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                vertical: 12,
-                                              ),
-                                              minimumSize: const Size(
-                                                double.infinity,
-                                                48,
-                                              ),
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(14),
-                                              ),
-                                              elevation: 0,
-                                            ),
-                                            child: _rewardedAdButtonLabelColumn(
-                                              userData,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      if (widget.cooldownRemaining > 0 &&
-                                          !widget.rewardDailyLimitReached) ...[
-                                        const SizedBox(height: 8),
+                                      const SizedBox(height: 6),
+                                      if (_rewardAdCooldownOnly) ...[
+                                        _rewardAdCooldownBanner(),
                                         CooldownRewardProgressBar(
                                           remainingSeconds:
                                               widget.cooldownRemaining,
-                                        ),
-                                      ],
-                                      Padding(
-                                        padding: const EdgeInsets.only(top: 4),
-                                        child: Center(
-                                          child: TextButton(
-                                            onPressed: widget.rewardedAdBusy ||
-                                                    widget
-                                                        .rewardDailyLimitReached ||
-                                                    widget.cooldownRemaining > 0
-                                                ? null
-                                                : () => unawaited(
-                                                      widget.onEarnMinutes!(),
-                                                    ),
-                                            style: TextButton.styleFrom(
-                                              foregroundColor: AppColors.primary,
-                                              padding: const EdgeInsets.symmetric(
-                                                horizontal: 12,
-                                                vertical: 4,
-                                              ),
-                                            ),
-                                            child: Text(
-                                              'Get credits',
-                                              style: GoogleFonts.inter(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w800,
-                                                letterSpacing: 0.2,
-                                              ),
-                                            ),
+                                          totalCooldownSeconds:
+                                              CreditsPolicy
+                                                  .adRewardCooldownSecondsForUser(
+                                            widget.isPremium,
                                           ),
                                         ),
+                                        const SizedBox(height: 10),
+                                      ] else ...[
+                                        Text(
+                                          'Pick one reward per ad',
+                                          textAlign: TextAlign.center,
+                                          style: GoogleFonts.inter(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                            color: AppColors.textMutedOnDark,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                      ],
+                                      _freeDialPurposeButton(
+                                        purpose: GrantRewardPurpose.call,
+                                        label: 'Watch ad → Get call credits',
+                                        subtitle:
+                                            CreditsPolicy.rewardAdEmotionalSubtitleCall(
+                                          widget.isPremium,
+                                        ),
+                                        isEmphasized: widget
+                                                .emphasizeRewardPurpose ==
+                                            GrantRewardPurpose.call,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      _freeDialPurposeButton(
+                                        purpose: GrantRewardPurpose.number,
+                                        label: 'Watch ad → Unlock number',
+                                        subtitle: CreditsPolicy
+                                            .rewardAdEmotionalSubtitleNumber(),
+                                        isEmphasized: widget
+                                                .emphasizeRewardPurpose ==
+                                            GrantRewardPurpose.number,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      _freeDialPurposeButton(
+                                        purpose: GrantRewardPurpose.otp,
+                                        label: 'Watch ad → Send SMS',
+                                        subtitle: CreditsPolicy
+                                            .rewardAdEmotionalSubtitleOtp(),
+                                        isEmphasized: widget
+                                                .emphasizeRewardPurpose ==
+                                            GrantRewardPurpose.otp,
                                       ),
                                     ],
                                   ),
+                                ),
                                 ),
                               ],
                               if (!widget.embedInShell)
@@ -879,85 +935,67 @@ class _DialerScreenState extends State<DialerScreen>
                                   enabled: !widget.rewardedAdBusy &&
                                       !widget.rewardDailyLimitReached &&
                                       widget.cooldownRemaining <= 0,
-                                  child: SizedBox(
-                                    width: double.infinity,
-                                      child: FilledButton(
-                                      onPressed: widget.rewardedAdBusy ||
-                                              widget.rewardDailyLimitReached ||
-                                              widget.cooldownRemaining > 0
-                                          ? null
-                                          : () => unawaited(
-                                                widget.onEarnMinutes!(),
-                                              ),
-                                      style: FilledButton.styleFrom(
-                                        backgroundColor: AppColors.primary,
-                                        foregroundColor: AppColors.onPrimaryButton,
-                                        disabledForegroundColor:
-                                            AppColors.onPrimaryButton
-                                                .withValues(alpha: 0.88),
-                                        disabledBackgroundColor:
-                                            widget.cooldownRemaining > 0 &&
-                                                    !widget.rewardDailyLimitReached
-                                                ? AppColors.primary
-                                                    .withValues(alpha: 0.42)
-                                                : (Theme.of(context)
-                                                            .cardTheme.color ??
-                                                        Theme.of(context)
-                                                            .colorScheme
-                                                            .surface)
-                                                    .withValues(alpha: 0.65),
-                                        padding: const EdgeInsets.symmetric(
-                                          vertical: 12,
-                                          horizontal: 14,
-                                        ),
-                                        minimumSize: const Size.fromHeight(52),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            14,
+                                  pulseBoost: widget.repeatHabitPulseBoost,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      if (_rewardAdCooldownOnly) ...[
+                                        _rewardAdCooldownBanner(),
+                                        CooldownRewardProgressBar(
+                                          remainingSeconds:
+                                              widget.cooldownRemaining,
+                                          totalCooldownSeconds:
+                                              CreditsPolicy
+                                                  .adRewardCooldownSecondsForUser(
+                                            widget.isPremium,
                                           ),
                                         ),
-                                        elevation: 0,
-                                      ),
-                                      child: _rewardedAdButtonLabelColumn(
-                                        userData,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                if (widget.cooldownRemaining > 0 &&
-                                    !widget.rewardDailyLimitReached) ...[
-                                  const SizedBox(height: 8),
-                                  CooldownRewardProgressBar(
-                                    remainingSeconds: widget.cooldownRemaining,
-                                  ),
-                                ],
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 4),
-                                  child: Center(
-                                    child: TextButton(
-                                      onPressed: widget.rewardedAdBusy ||
-                                              widget.rewardDailyLimitReached ||
-                                              widget.cooldownRemaining > 0
-                                          ? null
-                                          : () => unawaited(
-                                                widget.onEarnMinutes!(),
-                                              ),
-                                      style: TextButton.styleFrom(
-                                        foregroundColor: AppColors.primary,
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                          vertical: 4,
+                                        const SizedBox(height: 10),
+                                      ] else ...[
+                                        Text(
+                                          'Pick one reward per ad',
+                                          textAlign: TextAlign.center,
+                                          style: GoogleFonts.inter(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: AppColors.textMutedOnDark,
+                                          ),
                                         ),
-                                      ),
-                                      child: Text(
-                                        'Get credits',
-                                        style: GoogleFonts.inter(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w800,
-                                          letterSpacing: 0.2,
+                                        const SizedBox(height: 8),
+                                      ],
+                                      _freeDialPurposeButton(
+                                        purpose: GrantRewardPurpose.call,
+                                        label: 'Watch ad → Get call credits',
+                                        subtitle:
+                                            CreditsPolicy.rewardAdEmotionalSubtitleCall(
+                                          widget.isPremium,
                                         ),
+                                        isEmphasized: widget
+                                                .emphasizeRewardPurpose ==
+                                            GrantRewardPurpose.call,
                                       ),
-                                    ),
+                                      const SizedBox(height: 8),
+                                      _freeDialPurposeButton(
+                                        purpose: GrantRewardPurpose.number,
+                                        label: 'Watch ad → Unlock number',
+                                        subtitle: CreditsPolicy
+                                            .rewardAdEmotionalSubtitleNumber(),
+                                        isEmphasized: widget
+                                                .emphasizeRewardPurpose ==
+                                            GrantRewardPurpose.number,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      _freeDialPurposeButton(
+                                        purpose: GrantRewardPurpose.otp,
+                                        label: 'Watch ad → Send SMS',
+                                        subtitle: CreditsPolicy
+                                            .rewardAdEmotionalSubtitleOtp(),
+                                        isEmphasized: widget
+                                                .emphasizeRewardPurpose ==
+                                            GrantRewardPurpose.otp,
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ],

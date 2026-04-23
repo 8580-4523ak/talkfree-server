@@ -277,18 +277,50 @@ app.post("/call", async (req, res) => {
   res.send(voiceResponseDialPstn(to).toString());
 });
 
-/** Free tier credits per ad after first lifetime (env override: `REWARD_GRANT_CREDITS_FREE`). */
-const REWARD_GRANT_CREDITS_FREE = Number(
-  process.env.REWARD_GRANT_CREDITS_FREE ?? process.env.REWARD_GRANT_CREDITS ?? 10,
-);
+/** Free tier call credits per rewarded ad (env: `REWARD_GRANT_CREDITS_FREE`, default 2). */
+const REWARD_GRANT_CREDITS_FREE = Number(process.env.REWARD_GRANT_CREDITS_FREE ?? 2);
+/** First lifetime rewarded ad (call) — extra dopamine for onboarding (env: `FIRST_AD_GRANT_CREDITS_FREE`, default 3). */
+const FIRST_AD_GRANT_CREDITS_FREE = Number(process.env.FIRST_AD_GRANT_CREDITS_FREE ?? 3);
 /** Premium tier credits per ad after first lifetime. */
-const REWARD_GRANT_CREDITS_PREMIUM = Number(process.env.REWARD_GRANT_CREDITS_PREMIUM || 20);
-/** First lifetime rewarded ad (`ads_watched_count` was 0) — welcome hook (default 10). */
-const FIRST_AD_GRANT_CREDITS = Number(process.env.FIRST_AD_GRANT_CREDITS || 10);
-const MAX_ADS_PER_DAY_FREE = Number(process.env.MAX_ADS_PER_DAY_FREE || 10);
+const REWARD_GRANT_CREDITS_PREMIUM = Number(process.env.REWARD_GRANT_CREDITS_PREMIUM || 3);
+const MAX_ADS_PER_DAY_FREE = Number(process.env.MAX_ADS_PER_DAY_FREE || 25);
 const MAX_ADS_PER_DAY_PREMIUM = Number(process.env.MAX_ADS_PER_DAY_PREMIUM || 25);
 const AD_GAP_SECONDS_FREE = Number(process.env.AD_GAP_SECONDS_FREE || 45);
 const AD_GAP_SECONDS_PREMIUM = Number(process.env.AD_GAP_SECONDS_PREMIUM || 10);
+/** Optional INR micro-cost per rewarded-ad grant (infra); extend with call/SMS cost in other handlers. */
+const EST_COST_INR_PER_REWARDED_AD = Number(process.env.EST_COST_INR_PER_REWARDED_AD ?? 0);
+/** Rough rewarded-ad revenue per completion (INR); tune 0.3–0.5 for eCPM modeling. Profit ≈ this − `total_cost_estimated`. */
+const EST_REVENUE_INR_PER_REWARDED_AD = Number(process.env.EST_REVENUE_INR_PER_REWARDED_AD ?? 0.4);
+/** Rough Twilio PSTN cost model for analytics (INR per billed talk minute). */
+const EST_COST_INR_PER_CALL_MINUTE = Number(process.env.EST_COST_INR_PER_CALL_MINUTE ?? 2);
+/** Rough carrier cost per outbound SMS (INR) for `user_stats.total_cost_estimated`. */
+const EST_COST_INR_PER_OUTBOUND_SMS = Number(process.env.EST_COST_INR_PER_OUTBOUND_SMS ?? 2.5);
+/** One-time estimated lease/provisioning cost when a US line is assigned (INR). */
+const EST_NUMBER_PROVISION_COST_INR = Number(process.env.EST_NUMBER_PROVISION_COST_INR ?? 25);
+/** Same idempotency key dedupes within this window; older key rows may be overwritten (still capped by reward_keys ring). */
+const REWARD_IDEMPOTENCY_TTL_MS = Number(process.env.REWARD_IDEMPOTENCY_TTL_MS || 2 * 60 * 1000);
+/** `client` (default): require JSON `adVerified: true` after SDK reward. `ssv`: reserved until SSV webhook issues grants. */
+const AD_VERIFICATION_MODE = String(process.env.AD_VERIFICATION_MODE || "client")
+  .trim()
+  .toLowerCase();
+
+/** In-process counters for log/metrics scraping (Grafana/BigQuery friendly). */
+const grantRewardOutcomeMetrics = {
+  granted_count: 0,
+  deduped_count: 0,
+  blocked_cooldown_count: 0,
+  blocked_daily_cap_count: 0,
+};
+
+function bumpGrantRewardMetric(name) {
+  if (Object.prototype.hasOwnProperty.call(grantRewardOutcomeMetrics, name)) {
+    grantRewardOutcomeMetrics[name] += 1;
+  }
+}
+
+function grantRewardMetricSnapshot() {
+  return { ...grantRewardOutcomeMetrics };
+}
 
 function utcDayKey(d = new Date()) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
@@ -325,6 +357,26 @@ function readAdsWatchedToday(d, dayKey) {
   return Number(d.adRewardsCount || 0);
 }
 
+/** Daily ad count for caps / dynamic gap — server fields only (`ads_watched_today` + `adRewardsCount` legacy). */
+function readAdsWatchedTodayAuthoritative(d, dayKey) {
+  const reset = d.last_reset_date || d.adRewardsDayKey || "";
+  if (reset !== dayKey) return 0;
+  if (d.ads_watched_today !== undefined && d.ads_watched_today !== null) {
+    const n = Number(d.ads_watched_today);
+    if (Number.isFinite(n)) return Math.max(0, Math.floor(n));
+  }
+  const legacy = Number(d.adRewardsCount ?? 0);
+  return Number.isFinite(legacy) ? Math.max(0, Math.floor(legacy)) : 0;
+}
+
+function rewardKeyAtMillis(keyData) {
+  if (!keyData || typeof keyData !== "object") return 0;
+  const at = keyData.at;
+  if (at && typeof at.toMillis === "function") return at.toMillis();
+  const n = Number(at);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 function readAdProgress(d) {
   if (d.ad_progress !== undefined && d.ad_progress !== null) {
     return Number(d.ad_progress);
@@ -344,16 +396,47 @@ function readAdSubCounter(d) {
   return ((n % 4) + 4) % 4;
 }
 
-function readLastAdTimestamp(d) {
-  let best = null;
-  for (const k of ["last_ad_timestamp", "lastAdWatchTime", "lastAdRewardAt"]) {
-    const v = d[k];
-    if (v && typeof v.toDate === "function") {
-      const t = v.toDate();
-      if (!best || t > best) best = t;
-    }
+/** `/grant-reward` cooldown: only numeric `last_ad_grant_server_ms` (UI timestamp fields are not used for gap math). */
+function readLastAdGrantServerMs(d) {
+  if (!d || typeof d !== "object") return 0;
+  const n = Number(d.last_ad_grant_server_ms);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  return 0;
+}
+
+function readGrantAttemptsToday(d, dayKey) {
+  const reset = String(d.grant_attempts_day_key || "");
+  if (reset !== String(dayKey || "")) return 0;
+  const n = d.grant_attempts_today;
+  if (n === undefined || n === null || n === "") return 0;
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.max(0, Math.floor(x)) : 0;
+}
+
+/** Best-effort: count rate-limited grant tries (daily cap / cooldown) for abuse analytics. */
+async function incrementGrantAttemptsTodayForUid(uid) {
+  if (!firebaseAdmin || !uid) return;
+  const { Timestamp } = firebaseAdmin.firestore;
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  try {
+    await db.runTransaction(async (t) => {
+      const doc = await t.get(ref);
+      if (!doc.exists) return;
+      const d = doc.data();
+      const nowMs = Timestamp.now().toMillis();
+      const dayKey = utcDayKey(new Date(nowMs));
+      let ga = readGrantAttemptsToday(d, dayKey);
+      if (String(d.grant_attempts_day_key || "") !== dayKey) ga = 0;
+      ga += 1;
+      t.update(ref, {
+        grant_attempts_today: ga,
+        grant_attempts_day_key: dayKey,
+      });
+    });
+  } catch (_) {
+    /* ignore */
   }
-  return best;
 }
 
 function readFirestoreDate(d, keys) {
@@ -364,25 +447,37 @@ function readFirestoreDate(d, keys) {
   return null;
 }
 
+/** POST /grant-reward body: `purpose` must be `call` | `number` | `otp` (one reward per ad). */
+function normalizeGrantPurpose(raw) {
+  const s = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  if (s === "call" || s === "number" || s === "otp") return s;
+  return "";
+}
+
 /** Wrong HTTP method → not a silent 404 (helps debug mobile / proxies). */
 app.get("/grant-reward", (_req, res) => {
   res.set("Allow", "POST");
   return res.status(405).json({
     error: "Method not allowed",
-    message: "Use POST /grant-reward with header Authorization: Bearer <Firebase ID token>",
+    message:
+      "Use POST /grant-reward with JSON { purpose, idempotencyKey, adVerified: true } and Authorization: Bearer <Firebase ID token>",
   });
 });
 
 /**
- * POST /grant-reward — secured ad rewards (Flutter: GrantRewardService).
- * - Verifies Firebase ID token → uid.
- * - Each successful request adds `REWARD_GRANT_CREDITS_FREE` / `REWARD_GRANT_CREDITS_PREMIUM` (env; defaults 10 / 20) to reward credits — **1 ad = 1 grant**.
- * - Legacy cycle fields (`ad_sub_counter`, `ad_progress`) are cleared to 0 each time.
- * - Daily cap: 10 ads (free) / 25 (premium) per UTC day (`ads_watched_today`).
- * - Lifetime rewarded views: `ads_watched_count` += 1 each successful grant (Flutter unlock US number).
- * - Cooldown: 45s (free) / 10s (premium) since last ad timestamp or returns **Wait** (429).
- * - Streak: consecutive UTC days with ≥1 rewarded ad — `ad_streak_count` / `ad_streak_last_day`;
- *   milestone bonuses added to the same grant (see AD_STREAK_MILESTONE_BONUS).
+ * POST /grant-reward — JSON `{ "purpose", "idempotencyKey", "adVerified": true }` + `Authorization: Bearer <idToken>`.
+ * **Ad verification** — `AD_VERIFICATION_MODE=client` (default): JSON `adVerified: true` after SDK reward (**spoofable MVP**).
+ * `AD_VERIFICATION_MODE=ssv`: reserved (returns 501 until you implement SSV / mediation server grants).
+ * **Next level:** AdMob SSV — Google POSTs to your HTTPS URL with signed payload; grant only after that webhook.
+ * One rewarded ad ⇒ one reward only (no bundled credits + number + otp).
+ * Idempotency doc id = sha256(`idempotencyKey` + ":" + `purpose`) so the same key cannot replay across purposes.
+ * Fresh idempotency rows dedupe for `REWARD_IDEMPOTENCY_TTL_MS` (default 2m); older rows may be replaced on new grants.
+ * - **call** — adds call credits (free: `REWARD_GRANT_CREDITS_FREE`, first lifetime call: `FIRST_AD_GRANT_CREDITS_FREE`; premium: premium rate + streak bonuses).
+ * - **number** — `number_ads_progress += 1` (free, no assigned line, below cap).
+ * - **otp** — `otp_ads_progress += 1` capped at `OTP_ADS_REQUIRED_PER_SMS` (free).
+ * Premium: only `purpose: "call"` is allowed.
  */
 app.post("/grant-reward", async (req, res) => {
   if (!firebaseAdmin) {
@@ -404,11 +499,46 @@ app.post("/grant-reward", async (req, res) => {
     return res.status(401).json({ error: "Invalid or expired token" });
   }
 
+  const purposeIn = normalizeGrantPurpose(req.body != null ? req.body.purpose : undefined);
+  if (!["call", "number", "otp"].includes(purposeIn)) {
+    return res.status(400).json({
+      error: "Invalid purpose",
+      expected: ["call", "number", "otp"],
+    });
+  }
+
+  const idemRaw = req.body != null ? req.body.idempotencyKey : undefined;
+  const idemKey = String(idemRaw ?? "").trim();
+  if (idemKey.length < 8 || idemKey.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(idemKey)) {
+    return res.status(400).json({
+      error: "Missing or invalid idempotencyKey",
+      hint: "Send 8–128 chars [A-Za-z0-9_-] per completed ad (e.g. UUID).",
+    });
+  }
+
+  if (AD_VERIFICATION_MODE === "ssv") {
+    return res.status(501).json({
+      error: "AD_VERIFICATION_MODE=ssv not implemented",
+      message:
+        "Use server-side ad verification (e.g. AdMob SSV) to mint a short-lived grant token, then accept it here instead of client adVerified — or set AD_VERIFICATION_MODE=client.",
+    });
+  }
+
+  const adVerified = req.body != null && req.body.adVerified === true;
+  if (!adVerified) {
+    return res.status(400).json({
+      error: "Ad not verified",
+      hint: "Send adVerified: true only after the rewarded ad SDK onUserEarnedReward (or equivalent). Future: AdMob SSV / ironSource server callbacks.",
+    });
+  }
+
   const { FieldValue, Timestamp } = firebaseAdmin.firestore;
   const db = firebaseAdmin.firestore();
 
   let out = {
     ok: true,
+    deduped: false,
+    purpose: purposeIn,
     creditsAdded: 0,
     baseCredits: 0,
     streakBonus: 0,
@@ -417,51 +547,115 @@ app.post("/grant-reward", async (req, res) => {
     adsWatchedToday: 0,
     remainingDailyAds: 0,
     firstLifetimeAd: false,
+    numberAdsProgress: null,
+    otpAdsProgress: null,
   };
 
   let grantFirstLifetimeAd = false;
+  let postGrantLog = { result: "granted", reason: "ok", waitMs: 0 };
 
   try {
     await db.runTransaction(async (t) => {
       const ref = db.collection("users").doc(uid);
+      const idKeyHash = crypto
+        .createHash("sha256")
+        .update(`${idemKey}:${purposeIn}`)
+        .digest("hex");
+      const keyRef = ref.collection("reward_keys").doc(idKeyHash);
+      const statsRef = db.collection("user_stats").doc(uid);
+
       const doc = await t.get(ref);
-      const now = new Date();
+      const keySnap = await t.get(keyRef);
+      await t.get(statsRef);
+      const txNowMs = Timestamp.now().toMillis();
+
+      const d0 = doc.exists ? doc.data() : {};
+      const keyAt0 = keySnap.exists ? rewardKeyAtMillis(keySnap.data()) : 0;
+      const keyAgeMs = keyAt0 > 0 ? txNowMs - keyAt0 : Number.POSITIVE_INFINITY;
+      // Fresh dedupe: same idKeyHash (includes purpose) within TTL. If stale/missing `at`, fall through — no cross-purpose
+      // collision because doc id is purpose-scoped; `t.set` below writes a fresh `at` to reset the TTL window.
+      if (keySnap.exists && keyAgeMs < REWARD_IDEMPOTENCY_TTL_MS) {
+        const nowMs0 = txNowMs;
+        const nowDate0 = new Date(nowMs0);
+        const dayKey0 = utcDayKey(nowDate0);
+        const prem0 = readEffectivePremiumUser(d0, nowDate0);
+        const max0 = prem0 ? MAX_ADS_PER_DAY_PREMIUM : MAX_ADS_PER_DAY_FREE;
+        const at0 = readAdsWatchedTodayAuthoritative(d0, dayKey0);
+        out = {
+          ok: true,
+          deduped: true,
+          message: "Reward already granted",
+          purpose: purposeIn,
+          creditsAdded: 0,
+          baseCredits: 0,
+          streakBonus: 0,
+          streakCount: Number(d0.ad_streak_count || 0),
+          adSubCounter: 0,
+          adsWatchedToday: at0,
+          remainingDailyAds: Math.max(0, max0 - at0),
+          firstLifetimeAd: false,
+          numberAdsProgress: readNumberAdsProgress(d0),
+          otpAdsProgress: readOtpAdsProgress(d0),
+        };
+        grantFirstLifetimeAd = false;
+        if (doc.exists) {
+          let g0 = readGrantAttemptsToday(d0, dayKey0);
+          if (String(d0.grant_attempts_day_key || "") !== dayKey0) g0 = 0;
+          g0 += 1;
+          t.update(ref, {
+            grant_attempts_today: g0,
+            grant_attempts_day_key: dayKey0,
+          });
+        }
+        postGrantLog = { result: "deduped", reason: "ok", waitMs: 0 };
+        return;
+      }
+
+      const nowMs = txNowMs;
+      const now = new Date(nowMs);
       const dayKey = utcDayKey(now);
 
       const d = doc.exists ? doc.data() : {};
+      if (!doc.exists && purposeIn !== "call") {
+        throw Object.assign(new Error("User profile not found"), { http: 404 });
+      }
       const premiumExpired = isPremiumSubscriptionExpired(d, now);
       const premium = readEffectivePremiumUser(d, now);
+
+      if (premium && purposeIn !== "call") {
+        throw Object.assign(new Error("Premium users only use purpose call"), { http: 400 });
+      }
+
       const maxAds = premium ? MAX_ADS_PER_DAY_PREMIUM : MAX_ADS_PER_DAY_FREE;
-      const adGap = premium ? AD_GAP_SECONDS_PREMIUM : AD_GAP_SECONDS_FREE;
 
       const lifetimeAdsBefore = Number(d.ads_watched_count ?? 0);
       grantFirstLifetimeAd = lifetimeAdsBefore === 0;
 
-      let adsToday = readAdsWatchedToday(d, dayKey);
+      let adsToday = readAdsWatchedTodayAuthoritative(d, dayKey);
       let storedDay = d.last_reset_date || d.adRewardsDayKey || "";
       if (storedDay !== dayKey) {
         adsToday = 0;
         storedDay = dayKey;
       }
 
+      // Daily cap before cooldown so 429 body matches user expectation when both apply.
       if (adsToday >= maxAds) {
-        throw Object.assign(new Error("Limit Reached"), { http: 403 });
+        throw Object.assign(new Error("Daily cap reached"), { http: 429 });
       }
 
-      const lastAd = readLastAdTimestamp(d);
-      if (lastAd) {
-        const elapsedSec = (now - lastAd) / 1000;
-        if (elapsedSec < adGap) {
-          const waitSeconds = Math.ceil(adGap - elapsedSec);
-          throw Object.assign(new Error("Wait"), { http: 429, waitSeconds });
-        }
-      }
+      const gapSec = premium
+        ? AD_GAP_SECONDS_PREMIUM
+        : adsToday > 15
+          ? 60
+          : AD_GAP_SECONDS_FREE;
+      const gapMs = gapSec * 1000;
 
-      const baseCredits = grantFirstLifetimeAd
-        ? FIRST_AD_GRANT_CREDITS
-        : premium
-          ? REWARD_GRANT_CREDITS_PREMIUM
-          : REWARD_GRANT_CREDITS_FREE;
+      const lastMs = readLastAdGrantServerMs(d);
+      if (lastMs > 0 && nowMs - lastMs < gapMs) {
+        const waitMs = Math.max(1, Math.ceil(gapMs - (nowMs - lastMs)));
+        const waitSeconds = Math.max(1, Math.ceil(waitMs / 1000));
+        throw Object.assign(new Error("Cooldown active"), { http: 429, waitMs, waitSeconds });
+      }
 
       const lastStreakDay = String(d.ad_streak_last_day || "");
       let streakCount = Number(d.ad_streak_count || 0);
@@ -474,13 +668,14 @@ app.post("/grant-reward", async (req, res) => {
         } else {
           streakCount = 1;
         }
-        const mb = AD_STREAK_MILESTONE_BONUS[streakCount];
-        if (mb != null) streakBonus = mb;
+        if (premium && purposeIn === "call") {
+          const mb = AD_STREAK_MILESTONE_BONUS[streakCount];
+          if (mb != null) streakBonus = mb;
+        }
       }
 
-      const creditsAdded = baseCredits + streakBonus;
-
-      const adsTodayNew = adsToday + 1;
+      let creditsAdded = 0;
+      let baseCredits = 0;
 
       let paid = Number(d.paidCredits ?? 0);
       let reward = Number(d.rewardCredits ?? 0);
@@ -494,10 +689,29 @@ app.post("/grant-reward", async (req, res) => {
         reward = 0;
       }
 
-      reward += creditsAdded;
+      const firstCallBonusConsumed =
+        d.first_call_reward_granted === true || d.firstCallRewardGranted === true;
+      const firstCallBonusEligible =
+        !premium &&
+        purposeIn === "call" &&
+        !firstCallBonusConsumed &&
+        lifetimeAdsBefore === 0;
+
+      if (purposeIn === "call") {
+        const base = premium
+          ? REWARD_GRANT_CREDITS_PREMIUM
+          : firstCallBonusEligible
+            ? FIRST_AD_GRANT_CREDITS_FREE
+            : REWARD_GRANT_CREDITS_FREE;
+        baseCredits = base;
+        creditsAdded = baseCredits + streakBonus;
+        reward += creditsAdded;
+      }
+
+      const adsTodayNew = adsToday + 1;
 
       let rewardExp = null;
-      if (reward > 0) {
+      if (purposeIn === "call" && reward > 0) {
         if (creditsAdded > 0) {
           rewardExp = Timestamp.fromDate(new Date(now.getTime() + 24 * 60 * 60 * 1000));
         } else if (expTs && expTs.toDate && expTs.toDate() >= now) {
@@ -507,62 +721,155 @@ app.post("/grant-reward", async (req, res) => {
         }
       }
 
+      const grantTs = Timestamp.fromMillis(nowMs);
+      const lifeAfterGrant = lifetimeAdsBefore + 1;
       const patch = {
         ad_sub_counter: 0,
         ad_progress: 0,
         adRewardCycleCount: 0,
         ads_watched_today: adsTodayNew,
         adRewardsCount: adsTodayNew,
-        /** Lifetime total — Flutter reads `ads_watched_count` for US number unlock (50 ads). */
         ads_watched_count: FieldValue.increment(1),
         last_reset_date: storedDay,
         adRewardsDayKey: storedDay,
-        last_ad_timestamp: FieldValue.serverTimestamp(),
-        lastAdWatchTime: FieldValue.serverTimestamp(),
-        lastAdRewardAt: FieldValue.serverTimestamp(),
+        last_ad_timestamp: grantTs,
+        lastAdWatchTime: grantTs,
+        lastAdRewardAt: grantTs,
+        last_ad_grant_server_ms: nowMs,
         ad_streak_count: streakCount,
         ad_streak_last_day: lastStreakDay === dayKey ? lastStreakDay : dayKey,
-        paidCredits: paid,
-        rewardCredits: reward,
-        rewardCreditsExpiresAt: rewardExp,
-        credits: paid + reward,
       };
+      if (lifeAfterGrant > 100) {
+        patch.is_high_value_user = true;
+      }
 
-      const assignedForRenew = String(d.assigned_number ?? "").trim();
-      let renewProg = Number(d.number_renew_ad_progress || 0);
-      if (assignedForRenew && assignedForRenew.toLowerCase() !== "none") {
-        const expR = readNumberExpiryDate(d);
-        if (!expR || expR.getTime() - now.getTime() <= 7 * 86400000) {
-          renewProg = Math.min(NUMBER_RENEW_ADS_REQUIRED, renewProg + 1);
+      if (purposeIn === "call") {
+        patch.paidCredits = paid;
+        patch.rewardCredits = reward;
+        patch.rewardCreditsExpiresAt = reward > 0 ? rewardExp : null;
+        patch.credits = paid + reward;
+        if (firstCallBonusEligible && creditsAdded > 0) {
+          patch.first_call_reward_granted = true;
+        }
+        if (creditsAdded > 0) {
+          patch.last_grant_reward_at = FieldValue.serverTimestamp();
+          patch.last_grant_at_ads_watched_today = adsTodayNew;
+        }
+
+        const assignedForRenew = String(d.assigned_number ?? "").trim();
+        let renewProg = Number(d.number_renew_ad_progress || 0);
+        if (assignedForRenew && assignedForRenew.toLowerCase() !== "none") {
+          const expR = readNumberExpiryDate(d);
+          if (!expR || expR.getTime() - now.getTime() <= 7 * 86400000) {
+            renewProg = Math.min(NUMBER_RENEW_ADS_REQUIRED, renewProg + 1);
+          } else {
+            renewProg = 0;
+          }
         } else {
           renewProg = 0;
         }
-      } else {
-        renewProg = 0;
+        patch.number_renew_ad_progress = renewProg;
       }
-      patch.number_renew_ad_progress = renewProg;
+
+      if (purposeIn === "number") {
+        const assignedStr = String(d.assigned_number ?? "").trim();
+        const hasAssignedLine = assignedStr && assignedStr.toLowerCase() !== "none";
+        if (hasAssignedLine) {
+          throw Object.assign(new Error("Number already assigned"), { http: 400 });
+        }
+        const numProg = readNumberAdsProgress(d);
+        if (numProg >= NUMBER_UNLOCK_ADS_REQUIRED) {
+          throw Object.assign(new Error("Number unlock already complete"), { http: 400 });
+        }
+        const numProgOut = Math.max(
+          0,
+          Math.min(NUMBER_UNLOCK_ADS_REQUIRED, Math.floor(numProg) + 1),
+        );
+        patch.number_ads_progress = numProgOut;
+      }
+
+      if (purposeIn === "otp") {
+        const otpProg = readOtpAdsProgress(d);
+        if (otpProg >= OTP_ADS_REQUIRED_PER_SMS) {
+          throw Object.assign(new Error("OTP ads bank full — send an SMS first"), { http: 400 });
+        }
+        const otpProgOut = Math.max(
+          0,
+          Math.min(OTP_ADS_REQUIRED_PER_SMS, Math.floor(otpProg) + 1),
+        );
+        patch.otp_ads_progress = otpProgOut;
+      }
 
       if (lastStreakDay === dayKey) {
         delete patch.ad_streak_count;
         delete patch.ad_streak_last_day;
       }
 
-      if (creditsAdded > 0) {
-        patch.last_grant_reward_at = FieldValue.serverTimestamp();
-        patch.last_grant_at_ads_watched_today = adsTodayNew;
-      }
-
       if (premiumExpired) {
         Object.assign(patch, PREMIUM_SUBSCRIPTION_DEMOTE_FIELDS);
       }
 
+      let ga = readGrantAttemptsToday(d, dayKey);
+      if (String(d.grant_attempts_day_key || "") !== dayKey) ga = 0;
+      ga += 1;
+      patch.grant_attempts_today = ga;
+      patch.grant_attempts_day_key = dayKey;
+
+      const keysCol = ref.collection("reward_keys");
+      // If deploy warns, ensure `users/*/reward_keys` has a single-field index on `at` ascending (often auto-created).
+      const keysSnap = await t.get(keysCol.orderBy("at", "asc").limit(51));
+      const ringSize = keysSnap.size;
+      if (ringSize >= 50) {
+        const toDelete = keysSnap.docs.slice(0, ringSize - 49);
+        for (const kdoc of toDelete) {
+          t.delete(kdoc.ref);
+        }
+      }
+
+      // idKeyHash = sha256(idemKey + ":" + purpose) → different purposes never share a doc. Stale TTL overwrites
+      // always use fresh server millis on `at` so the dedupe TTL window resets from this write.
+      const rewardKeyAtMs = Timestamp.now().toMillis();
+      t.set(keyRef, {
+        at: Timestamp.fromMillis(rewardKeyAtMs),
+        purpose: purposeIn,
+        idKeyHash,
+      });
       if (doc.exists) {
         t.update(ref, patch);
       } else {
         t.set(ref, patch, { merge: true });
       }
+
+      const creditsInt = Math.max(0, Math.floor(Number(creditsAdded) || 0));
+      const costInc = Number.isFinite(EST_COST_INR_PER_REWARDED_AD)
+        ? EST_COST_INR_PER_REWARDED_AD
+        : 0;
+      const revInc = Number.isFinite(EST_REVENUE_INR_PER_REWARDED_AD)
+        ? EST_REVENUE_INR_PER_REWARDED_AD
+        : 0;
+      // `user_stats/{uid}`: this path — ads/credits/revenue micro + cost micro. Twilio: `settleOutboundCallBill` →
+      // `total_call_minutes` + call cost; `POST /send-sms` → `total_sms_sent` + SMS cost; assign-number success →
+      // `total_number_cost` + same into `total_cost_estimated`.
+      t.set(
+        statsRef,
+        {
+          total_ads_watched: FieldValue.increment(1),
+          total_credits_given: FieldValue.increment(creditsInt),
+          total_estimated_ad_revenue_inr: FieldValue.increment(revInc),
+          total_cost_estimated: FieldValue.increment(costInc),
+          stats_updated_at: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      const numOut =
+        purposeIn === "number" ? patch.number_ads_progress : readNumberAdsProgress(d);
+      const otpOut = purposeIn === "otp" ? patch.otp_ads_progress : readOtpAdsProgress(d);
+
       out = {
         ok: true,
+        deduped: false,
+        purpose: purposeIn,
         creditsAdded,
         baseCredits,
         streakBonus,
@@ -571,16 +878,100 @@ app.post("/grant-reward", async (req, res) => {
         adsWatchedToday: adsTodayNew,
         remainingDailyAds: Math.max(0, maxAds - adsTodayNew),
         firstLifetimeAd: grantFirstLifetimeAd,
+        numberAdsProgress: numOut,
+        otpAdsProgress: otpOut,
       };
+      postGrantLog = { result: "granted", reason: "ok", waitMs: 0 };
+    });
+    if (postGrantLog.result === "deduped") {
+      bumpGrantRewardMetric("deduped_count");
+    } else {
+      bumpGrantRewardMetric("granted_count");
+    }
+    const mSnap = grantRewardMetricSnapshot();
+    console.info("grant-reward", {
+      uid,
+      purpose: purposeIn,
+      result: postGrantLog.result,
+      reason: postGrantLog.reason,
+      waitMs: postGrantLog.waitMs,
+      granted_count: mSnap.granted_count,
+      deduped_count: mSnap.deduped_count,
+      blocked_cooldown_count: mSnap.blocked_cooldown_count,
+      blocked_daily_cap_count: mSnap.blocked_daily_cap_count,
     });
   } catch (e) {
     const code = e.http || 500;
-    if (code === 429 && e.waitSeconds != null) {
-      return res.status(429).json({
-        error: "Wait",
-        message: `Please wait ${e.waitSeconds} second(s) since the last ad.`,
-        waitSeconds: e.waitSeconds,
+    if (code === 429) {
+      if (String(e.message || "").includes("Daily cap")) {
+        await incrementGrantAttemptsTodayForUid(uid);
+        bumpGrantRewardMetric("blocked_daily_cap_count");
+        const mSnapD = grantRewardMetricSnapshot();
+        console.info("grant-reward", {
+          uid,
+          purpose: purposeIn,
+          result: "blocked",
+          reason: "daily_cap",
+          waitMs: 0,
+          granted_count: mSnapD.granted_count,
+          deduped_count: mSnapD.deduped_count,
+          blocked_cooldown_count: mSnapD.blocked_cooldown_count,
+          blocked_daily_cap_count: mSnapD.blocked_daily_cap_count,
+        });
+        return res.status(429).json({
+          error: "Daily cap reached",
+          reason: "daily_cap",
+          waitMs: 0,
+          waitSeconds: 0,
+          retryAfterSeconds: 0,
+        });
+      }
+      if (e.waitSeconds != null || e.waitMs != null) {
+        await incrementGrantAttemptsTodayForUid(uid);
+        bumpGrantRewardMetric("blocked_cooldown_count");
+        const ws =
+          e.waitSeconds != null
+            ? e.waitSeconds
+            : Math.max(1, Math.ceil(Number(e.waitMs || 0) / 1000));
+        const wm =
+          e.waitMs != null ? Number(e.waitMs) : Math.max(1000, ws * 1000);
+        const mSnapC = grantRewardMetricSnapshot();
+        console.info("grant-reward", {
+          uid,
+          purpose: purposeIn,
+          result: "blocked",
+          reason: "cooldown",
+          waitMs: wm,
+          granted_count: mSnapC.granted_count,
+          deduped_count: mSnapC.deduped_count,
+          blocked_cooldown_count: mSnapC.blocked_cooldown_count,
+          blocked_daily_cap_count: mSnapC.blocked_daily_cap_count,
+        });
+        res.set("Retry-After", String(Math.ceil(wm / 1000)));
+        res.set("Retry-After-Ms", String(Math.ceil(wm)));
+        return res.status(429).json({
+          error: "Cooldown active",
+          reason: "cooldown",
+          message: `Please wait ${ws} second(s) since the last ad.`,
+          waitSeconds: ws,
+          waitMs: wm,
+          retryAfterSeconds: ws,
+        });
+      }
+      await incrementGrantAttemptsTodayForUid(uid);
+      const mSnapR = grantRewardMetricSnapshot();
+      console.info("grant-reward", {
+        uid,
+        purpose: purposeIn,
+        result: "blocked",
+        reason: "rate_limited",
+        waitMs: 0,
+        granted_count: mSnapR.granted_count,
+        deduped_count: mSnapR.deduped_count,
+        blocked_cooldown_count: mSnapR.blocked_cooldown_count,
+        blocked_daily_cap_count: mSnapR.blocked_daily_cap_count,
       });
+      return res.status(429).json({ error: String(e.message || "Too many requests") });
     }
     if (code >= 400 && code < 500) {
       return res.status(code).json({ error: String(e.message || e) });
@@ -589,6 +980,261 @@ app.post("/grant-reward", async (req, res) => {
     return res.status(500).json({ error: String(e.message || e) });
   }
   return res.status(200).json(out);
+});
+
+/** `PAYWALL_EXPERIMENT` wins over legacy `PAYWALL_VARIANT`. Values: A | B | AB | PRICE3 */
+function getPaywallExperimentEnv() {
+  return String(process.env.PAYWALL_EXPERIMENT || process.env.PAYWALL_VARIANT || "A")
+    .trim()
+    .toUpperCase();
+}
+
+/**
+ * Sticky bucket once per user (`paywall_ab_bucket` / `paywall_price_tier`) when mode is AB / PRICE3.
+ * @returns {{ ab: string, tier: string }}
+ */
+async function ensurePaywallExperimentAssignment(uid) {
+  const exp = getPaywallExperimentEnv();
+  const db = firebaseAdmin.firestore();
+  const ref = db.collection("users").doc(uid);
+  const snap = await ref.get();
+  if (!snap.exists) {
+    return { ab: exp === "B" ? "B" : "A", tier: exp === "PRICE3" ? "mid" : "" };
+  }
+  const d = snap.data() || {};
+  const updates = {};
+  let ab = String(d.paywall_ab_bucket || "").toUpperCase();
+  let tier = String(d.paywall_price_tier || "").toLowerCase();
+
+  if (exp === "PRICE3") {
+    if (tier !== "cheap" && tier !== "mid" && tier !== "high") {
+      const r = Math.floor(Math.random() * 3);
+      tier = r === 0 ? "cheap" : r === 1 ? "mid" : "high";
+      updates.paywall_price_tier = tier;
+    }
+  } else if (exp === "AB") {
+    if (ab !== "A" && ab !== "B") {
+      ab = Math.random() < 0.5 ? "A" : "B";
+      updates.paywall_ab_bucket = ab;
+    }
+  } else if (exp === "B") {
+    ab = "B";
+    if (d.paywall_ab_bucket !== "B") updates.paywall_ab_bucket = "B";
+  } else {
+    ab = "A";
+    if (d.paywall_ab_bucket && String(d.paywall_ab_bucket).toUpperCase() !== "A") {
+      updates.paywall_ab_bucket = "A";
+    } else if (!d.paywall_ab_bucket) {
+      updates.paywall_ab_bucket = "A";
+    }
+  }
+
+  if (Object.keys(updates).length) {
+    await ref.set(updates, { merge: true });
+  }
+
+  if (exp === "PRICE3") {
+    const t2 = String(
+      (updates.paywall_price_tier ?? d.paywall_price_tier ?? tier) || "mid",
+    ).toLowerCase();
+    const tierOut = ["cheap", "mid", "high"].includes(t2) ? t2 : "mid";
+    return { ab: "A", tier: tierOut };
+  }
+  if (exp === "AB") {
+    const a2 = String((updates.paywall_ab_bucket ?? d.paywall_ab_bucket ?? ab) || "A").toUpperCase();
+    return { ab: a2 === "B" ? "B" : "A", tier: "" };
+  }
+  return { ab: exp === "B" ? "B" : "A", tier: "" };
+}
+
+/** Suffix for `total_paywall_*_{suffix}` — must match paywall-config buckets. */
+function paywallMetricSuffixFromUserData(d) {
+  const exp = getPaywallExperimentEnv();
+  if (exp === "PRICE3") {
+    const tier = String(d?.paywall_price_tier || "").toLowerCase();
+    if (tier === "cheap" || tier === "mid" || tier === "high") return tier;
+    return "mid";
+  }
+  if (exp === "AB") {
+    const ab = String(d?.paywall_ab_bucket || "A").toUpperCase();
+    return ab === "B" ? "B" : "A";
+  }
+  return exp === "B" ? "B" : "A";
+}
+
+/**
+ * @param {{ ab: string, tier: string }} p
+ */
+function buildPaywallConfigPayload({ ab, tier }) {
+  const exp = getPaywallExperimentEnv();
+  const ctaLabel = String(process.env.PAYWALL_CTA_LABEL || "View packs").trim() || "View packs";
+  if (exp === "PRICE3" && (tier === "cheap" || tier === "mid" || tier === "high")) {
+    const priceCheap = Number(process.env.PAYWALL_PRICE_CHEAP ?? 39);
+    const priceMid = Number(process.env.PAYWALL_PRICE_MID ?? 59);
+    const priceHigh = Number(process.env.PAYWALL_PRICE_HIGH ?? 79);
+    const pNum = tier === "cheap" ? priceCheap : tier === "high" ? priceHigh : priceMid;
+    const priceFloor = Number.isFinite(pNum)
+      ? Math.floor(pNum)
+      : tier === "cheap"
+        ? 39
+        : tier === "high"
+          ? 79
+          : 59;
+    const threshold = Number(
+      tier === "cheap"
+        ? process.env.PAYWALL_THRESHOLD_CHEAP ?? 35
+        : tier === "high"
+          ? process.env.PAYWALL_THRESHOLD_HIGH ?? 45
+          : process.env.PAYWALL_THRESHOLD_MID ?? 40,
+    );
+    const saveHint = String(
+      tier === "cheap"
+        ? process.env.PAYWALL_SAVE_HINT_CHEAP || process.env.PAYWALL_SAVE_HINT || ""
+        : tier === "high"
+          ? process.env.PAYWALL_SAVE_HINT_HIGH || process.env.PAYWALL_SAVE_HINT || ""
+          : process.env.PAYWALL_SAVE_HINT_MID || process.env.PAYWALL_SAVE_HINT || "",
+    ).trim();
+    return {
+      experiment: "PRICE3",
+      variant: tier,
+      metricBucket: tier,
+      lifetimeAdsThreshold: Number.isFinite(threshold) ? Math.max(1, Math.floor(threshold)) : 40,
+      priceLabel: `₹${priceFloor}`,
+      saveVsAdsHint: saveHint,
+      ctaLabel,
+    };
+  }
+  const isB = exp === "B" || (exp === "AB" && ab === "B");
+  const threshold = Number(
+    isB ? process.env.PAYWALL_THRESHOLD_B ?? 30 : process.env.PAYWALL_THRESHOLD_A ?? 40,
+  );
+  const priceNum = Number(
+    isB ? process.env.PAYWALL_PRICE_B ?? 49 : process.env.PAYWALL_PRICE_A ?? 59,
+  );
+  const priceFloor = Number.isFinite(priceNum) ? Math.floor(priceNum) : isB ? 49 : 59;
+  const saveHint = String(process.env.PAYWALL_SAVE_HINT || "").trim();
+  const modeLabel = exp === "AB" ? "AB" : isB ? "B" : "A";
+  return {
+    experiment: modeLabel,
+    variant: isB ? "B" : "A",
+    metricBucket: isB ? "B" : "A",
+    lifetimeAdsThreshold: Number.isFinite(threshold) ? Math.max(1, Math.floor(threshold)) : isB ? 30 : 40,
+    priceLabel: `₹${priceFloor}`,
+    saveVsAdsHint: saveHint,
+    ctaLabel,
+  };
+}
+
+app.get("/paywall-config", async (req, res) => {
+  const exp = getPaywallExperimentEnv();
+  let ab = exp === "B" ? "B" : "A";
+  let tier = exp === "PRICE3" ? "mid" : "";
+  if (firebaseAdmin) {
+    const auth = req.headers.authorization || "";
+    const m = /^Bearer\s+(.+)$/i.exec(auth);
+    if (m) {
+      try {
+        const uid = (await firebaseAdmin.auth().verifyIdToken(m[1])).uid;
+        const a = await ensurePaywallExperimentAssignment(uid);
+        ab = a.ab;
+        tier = a.tier || (exp === "PRICE3" ? "mid" : "");
+      } catch (_) {
+        /* invalid token → defaults */
+      }
+    }
+  }
+  return res.status(200).json(buildPaywallConfigPayload({ ab, tier }));
+});
+
+/** AdMob SSV — placeholder until signature verification + minted grants are implemented. */
+app.get("/ad-ssv-callback", (_req, res) => {
+  return res
+    .status(501)
+    .type("text/plain")
+    .send(
+      "SSV stub — implement Google rewarded SSV (query signature + user_id) then mint server-side grant; set AD_VERIFICATION_MODE=ssv when ready.",
+    );
+});
+
+/**
+ * Idempotent paywall funnel write: `user_stats/{uid}/paywall_metric_dedupe/{eventId}` (retry-safe).
+ * @param {string} uid
+ * @param {"impression"|"intent_click"|"conversion"} type
+ * @param {string} eventId
+ */
+async function recordPaywallMetricDeduped(uid, type, eventId) {
+  if (!firebaseAdmin) {
+    throw new Error("Firebase Admin not configured");
+  }
+  const db = firebaseAdmin.firestore();
+  const { FieldValue } = firebaseAdmin.firestore;
+  const statsRef = db.collection("user_stats").doc(uid);
+  const dedupeRef = statsRef.collection("paywall_metric_dedupe").doc(eventId);
+  let deduped = false;
+  await db.runTransaction(async (t) => {
+    const userRef = db.collection("users").doc(uid);
+    const userSnap = await t.get(userRef);
+    const dedupeSnap = await t.get(dedupeRef);
+    if (dedupeSnap.exists) {
+      deduped = true;
+      return;
+    }
+    const ud = userSnap.exists ? userSnap.data() : {};
+    const sk = paywallMetricSuffixFromUserData(ud);
+    t.set(dedupeRef, { at: FieldValue.serverTimestamp(), type, bucket: sk });
+    const patch = {
+      stats_updated_at: FieldValue.serverTimestamp(),
+    };
+    if (type === "impression") {
+      patch.total_paywall_impressions = FieldValue.increment(1);
+      patch[`total_paywall_impressions_${sk}`] = FieldValue.increment(1);
+    } else if (type === "intent_click") {
+      patch.total_paywall_intent_clicks = FieldValue.increment(1);
+      patch[`total_paywall_intent_clicks_${sk}`] = FieldValue.increment(1);
+    } else {
+      patch.total_paywall_conversions = FieldValue.increment(1);
+      patch[`total_paywall_conversions_${sk}`] = FieldValue.increment(1);
+    }
+    t.set(statsRef, patch, { merge: true });
+  });
+  return { deduped };
+}
+
+/**
+ * POST /record-paywall — Firebase Bearer; JSON `{ "type", "eventId" }`.
+ * `type`: impression | intent_click (View packs) | conversion (reserved; also set from verify-payment).
+ * Dedupes by `eventId` under `user_stats/{uid}/paywall_metric_dedupe/{eventId}`.
+ */
+app.post("/record-paywall", async (req, res) => {
+  if (!firebaseAdmin) {
+    return res.status(503).json({ error: "Firebase Admin not configured" });
+  }
+  const uid = await getUidFromBearer(req, res);
+  if (!uid) return;
+  const eventId = String(req.body != null ? req.body.eventId : "")
+    .trim();
+  if (eventId.length < 8 || eventId.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(eventId)) {
+    return res.status(400).json({
+      error: "Missing or invalid eventId",
+      hint: "Send 8–128 chars [A-Za-z0-9_-] per event (e.g. UUID) so retries do not double-count.",
+    });
+  }
+  const type = String(req.body != null ? req.body.type : "")
+    .trim()
+    .toLowerCase();
+  if (!["impression", "intent_click", "conversion"].includes(type)) {
+    return res.status(400).json({
+      error: "Invalid type",
+      expected: ["impression", "intent_click", "conversion"],
+    });
+  }
+  try {
+    const { deduped } = await recordPaywallMetricDeduped(uid, type, eventId);
+    return res.status(200).json({ ok: true, deduped });
+  } catch (e) {
+    console.error("record-paywall:", e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
 });
 
 /**
@@ -618,9 +1264,9 @@ const SUBSCRIPTION_PLAN_AMOUNTS_USD = {
   starter_credits: 99,
 };
 
-const PREMIUM_WELCOME_BONUS = Number(process.env.PREMIUM_WELCOME_BONUS || 500);
-const STARTER_PACK_CREDITS = Number(process.env.STARTER_PACK_CREDITS || 135);
-const PREMIUM_MONTHLY_BONUS_CREDITS = Number(process.env.PREMIUM_MONTHLY_BONUS_CREDITS || 400);
+const PREMIUM_WELCOME_BONUS = Number(process.env.PREMIUM_WELCOME_BONUS || 100);
+const STARTER_PACK_CREDITS = Number(process.env.STARTER_PACK_CREDITS || 80);
+const PREMIUM_MONTHLY_BONUS_CREDITS = Number(process.env.PREMIUM_MONTHLY_BONUS_CREDITS || 200);
 
 function subscriptionExpiryFromPlan(plan) {
   const now = Date.now();
@@ -895,6 +1541,34 @@ app.post("/verify-payment", async (req, res) => {
       t.update(ref, premiumPatch);
       return { ok: true, idempotent: false, plan, welcomeBonus: bonus };
     });
+    if (!out.idempotent) {
+      try {
+        const { FieldValue: Fv } = firebaseAdmin.firestore;
+        const statsRef = db.collection("user_stats").doc(uid);
+        const cur = String(process.env.RAZORPAY_CURRENCY || "INR")
+          .trim()
+          .toUpperCase();
+        if (cur === "INR") {
+          const inr = Number(payment.amount) / 100;
+          if (Number.isFinite(inr) && inr > 0) {
+            await statsRef.set(
+              {
+                total_user_revenue_inr: Fv.increment(inr),
+                stats_updated_at: Fv.serverTimestamp(),
+              },
+              { merge: true },
+            );
+          }
+        }
+      } catch (e) {
+        console.warn("total_user_revenue_inr (verify-payment):", e.message || e);
+      }
+      try {
+        await recordPaywallMetricDeduped(uid, "conversion", `vp_${razorpay_payment_id}`);
+      } catch (e) {
+        console.warn("record-paywall conversion (verify-payment):", e.message || e);
+      }
+    }
     return res.status(200).json(out);
   } catch (e) {
     const code = e.http || 500;
@@ -1005,7 +1679,7 @@ app.post("/claim-premium-monthly-bonus", async (req, res) => {
   }
 });
 
-const BROWSE_NUMBER_PRICE = Number(process.env.BROWSE_NUMBER_PRICE || 500);
+const BROWSE_NUMBER_PRICE = Number(process.env.BROWSE_NUMBER_PRICE || 150);
 
 /**
  * POST /purchase-browse-number — Firebase Bearer; body `{ "phoneNumber": "+1…", "price": <int> }`.
@@ -1305,18 +1979,48 @@ function readLifetimeAdsWatched(d) {
   return Number.isFinite(x) ? x : 0;
 }
 
+/** Free US line unlock — `number_ads_progress` (default 80); migrates from lifetime ads if unset. */
+const NUMBER_UNLOCK_ADS_REQUIRED = Math.max(
+  1,
+  Math.min(500, Number(process.env.NUMBER_UNLOCK_ADS_REQUIRED || 80)),
+);
+/** Free outbound SMS: bank this many rewarded ads per send (default 5). */
+const OTP_ADS_REQUIRED_PER_SMS = Math.max(
+  1,
+  Math.min(20, Number(process.env.OTP_ADS_REQUIRED_PER_SMS || 5)),
+);
+
+function readNumberAdsProgress(d) {
+  if (!d || typeof d !== "object") return 0;
+  const raw = d.number_ads_progress;
+  if (raw !== undefined && raw !== null && raw !== "") {
+    const x = Number(raw);
+    if (Number.isFinite(x)) return Math.max(0, Math.min(NUMBER_UNLOCK_ADS_REQUIRED, x));
+  }
+  return Math.min(NUMBER_UNLOCK_ADS_REQUIRED, readLifetimeAdsWatched(d));
+}
+
+function readOtpAdsProgress(d) {
+  if (!d || typeof d !== "object") return 0;
+  const x = Number(d.otp_ads_progress ?? 0);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(OTP_ADS_REQUIRED_PER_SMS, x));
+}
+
 const ASSIGN_NUMBER_MIN_CREDITS = Number(process.env.ASSIGN_NUMBER_MIN_CREDITS || 100);
-const ASSIGN_NUMBER_MIN_ADS_WATCHED = Number(process.env.ASSIGN_NUMBER_MIN_ADS_WATCHED || 50);
+const ASSIGN_NUMBER_MIN_ADS_WATCHED = Number(
+  process.env.ASSIGN_NUMBER_MIN_ADS_WATCHED || NUMBER_UNLOCK_ADS_REQUIRED,
+);
 const ASSIGN_NUMBER_AREA_CODE = process.env.ASSIGN_NUMBER_AREA_CODE
   ? Number.parseInt(String(process.env.ASSIGN_NUMBER_AREA_CODE).trim(), 10)
   : null;
 
 /** Credits charged for leasing a Twilio number by plan (premium users: cost 0). */
 const PLAN_ASSIGN_CREDITS = {
-  daily: Number(process.env.PLAN_DAILY_CREDITS || 50),
-  weekly: Number(process.env.PLAN_WEEKLY_CREDITS || 200),
-  monthly: Number(process.env.PLAN_MONTHLY_CREDITS || 700),
-  yearly: Number(process.env.PLAN_YEARLY_CREDITS || 5000),
+  daily: Number(process.env.PLAN_DAILY_CREDITS || 30),
+  weekly: Number(process.env.PLAN_WEEKLY_CREDITS || 150),
+  monthly: Number(process.env.PLAN_MONTHLY_CREDITS || 400),
+  yearly: Number(process.env.PLAN_YEARLY_CREDITS || 3000),
 };
 
 /** Lease duration from assignment time (ms). */
@@ -1429,6 +2133,16 @@ async function refundSmsCredits(uid, cost) {
   await ref.update({
     paidCredits: FieldValue.increment(cost),
     credits: FieldValue.increment(cost),
+  });
+}
+
+/** Restore free-tier OTP ad bank after Twilio failure (see POST /send-sms). */
+async function refundOtpAdsProgress(uid, delta) {
+  if (!firebaseAdmin || !delta || delta <= 0) return;
+  const { FieldValue } = firebaseAdmin.firestore;
+  const ref = firebaseAdmin.firestore().collection("users").doc(uid);
+  await ref.update({
+    otp_ads_progress: FieldValue.increment(delta),
   });
 }
 
@@ -1927,7 +2641,7 @@ app.get("/browse-available-numbers", async (req, res) => {
 });
 
 /**
- * GET /api/twilio/available-numbers — Premium OR ad-unlock (lifetime ads ≥ ASSIGN_NUMBER_MIN_ADS_WATCHED).
+ * GET /api/twilio/available-numbers — **Pro only** (free unlock uses auto-assign after NUMBER_UNLOCK_ADS_REQUIRED ads).
  * Local or Mobile inventory by country.
  * Authorization: Bearer <Firebase ID token>.
  * Query: country=US (ISO 3166-1 alpha-2), numberType=local|mobile, optional areaCode=415
@@ -1954,12 +2668,10 @@ app.get("/api/twilio/available-numbers", async (req, res) => {
     const d = snap.data() || {};
     const nowAvail = new Date();
     const premium = readEffectivePremiumUser(d, nowAvail);
-    const adsOk = readLifetimeAdsWatched(d) >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
-    if (!premium && !adsOk) {
+    if (!premium) {
       return res.status(403).json({
-        error: "Eligibility required",
-        message:
-          "Browse available numbers after subscribing or completing the rewarded-ad unlock progress.",
+        error: "Premium required",
+        message: `Browse inventory is included with Pro. Free accounts receive an auto-assigned US line after ${NUMBER_UNLOCK_ADS_REQUIRED} rewarded ads.`,
       });
     }
   } catch (e) {
@@ -2236,6 +2948,27 @@ async function respondAfterTwilioAssignSuccess(
     });
   }
 
+  try {
+    const db = firebaseAdmin.firestore();
+    const { FieldValue } = firebaseAdmin.firestore;
+    const numCost = Number.isFinite(EST_NUMBER_PROVISION_COST_INR)
+      ? EST_NUMBER_PROVISION_COST_INR
+      : 0;
+    await db
+      .collection("user_stats")
+      .doc(uid)
+      .set(
+        {
+          total_number_cost: FieldValue.increment(numCost),
+          total_cost_estimated: FieldValue.increment(numCost),
+          stats_updated_at: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+  } catch (e) {
+    console.warn("user_stats (assign-number):", e.message || e);
+  }
+
   return res.status(200).json({
     ok: true,
     assigned_number: e164,
@@ -2258,7 +2991,7 @@ async function respondAfterTwilioAssignSuccess(
 
 /**
  * POST /assign-free-number — **free tier only**; auto-picks first US local from Twilio inventory.
- * Eligible if lifetime ads ≥ min OR usable credits ≥ ASSIGN_NUMBER_MIN_CREDITS, and balance covers plan.
+ * Eligible if `number_ads_progress` ≥ NUMBER_UNLOCK_ADS_REQUIRED (default 80). No call-credit spend.
  * Body: `{ "planType": "monthly" }` (optional).
  */
 app.post("/assign-free-number", async (req, res) => {
@@ -2323,18 +3056,16 @@ app.post("/assign-free-number", async (req, res) => {
     });
   }
 
-  const usable = usableCreditsFromUserDoc(d);
   const adsLifetime = readLifetimeAdsWatched(d);
-  const enoughAds = adsLifetime >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
-  const enoughCreditsGate = usable >= ASSIGN_NUMBER_MIN_CREDITS;
-  if (!enoughAds && !enoughCreditsGate) {
+  const numberAds = readNumberAdsProgress(d);
+  const enoughAds = numberAds >= NUMBER_UNLOCK_ADS_REQUIRED;
+  if (!enoughAds) {
     return res.status(403).json({
       error: "Not eligible for free auto-assign",
-      detail: `Watch ${ASSIGN_NUMBER_MIN_ADS_WATCHED} rewarded ads or reach ${ASSIGN_NUMBER_MIN_CREDITS} credits.`,
-      usableCredits: usable,
+      detail: `Watch ${NUMBER_UNLOCK_ADS_REQUIRED} rewarded ads to unlock a free US line (separate from call credits).`,
       adsWatchedLifetime: adsLifetime,
-      minAdsWatched: ASSIGN_NUMBER_MIN_ADS_WATCHED,
-      minCreditsGate: ASSIGN_NUMBER_MIN_CREDITS,
+      numberAdsProgress: numberAds,
+      minAdsWatched: NUMBER_UNLOCK_ADS_REQUIRED,
     });
   }
 
@@ -2348,18 +3079,7 @@ app.post("/assign-free-number", async (req, res) => {
     });
   }
 
-  const planCredits = Number(PLAN_ASSIGN_CREDITS[planType] ?? NaN);
-  if (!Number.isFinite(planCredits) || planCredits < 0) {
-    return res.status(500).json({ error: "Plan credit configuration invalid" });
-  }
-  if (usable < planCredits) {
-    return res.status(402).json({
-      error: "Insufficient credits for this plan",
-      planType,
-      requiredCredits: planCredits,
-      usableCredits: usable,
-    });
-  }
+  const planCredits = 0;
 
   const leaseMs = FREE_TIER_NUMBER_LEASE_MS;
   if (!Number.isFinite(leaseMs) || leaseMs <= 0) {
@@ -2423,7 +3143,7 @@ app.post("/assign-free-number", async (req, res) => {
 
   const { FieldValue } = firebaseAdmin.firestore;
   const now = new Date();
-  const enoughCredits = usable >= ASSIGN_NUMBER_MIN_CREDITS;
+  const enoughCredits = false;
   return respondAfterTwilioAssignSuccess(res, {
     uid,
     ref,
@@ -2696,65 +3416,40 @@ app.post("/assign-number", async (req, res) => {
     });
   }
 
+  const premium = readEffectivePremiumUser(d, nowAssign);
+  if (!premium) {
+    return res.status(403).json({
+      error: "Premium required",
+      message: `Free accounts unlock an auto-assigned US line after ${NUMBER_UNLOCK_ADS_REQUIRED} rewarded ads in the app. Upgrade to Pro to pick a number from inventory.`,
+    });
+  }
+
   const usable = usableCreditsFromUserDoc(d);
   const adsLifetime = readLifetimeAdsWatched(d);
-  const enoughCredits = usable >= ASSIGN_NUMBER_MIN_CREDITS;
-  const enoughAds = adsLifetime >= ASSIGN_NUMBER_MIN_ADS_WATCHED;
-  const premium = readEffectivePremiumUser(d, nowAssign);
+  const enoughCredits = true;
+  const enoughAds = true;
 
-  if (!premium && !enoughAds && !enoughCredits) {
-    return res.status(403).json({
-      error: "Not eligible to assign a number",
-      detail: `Free tier: watch ${ASSIGN_NUMBER_MIN_ADS_WATCHED} rewarded ads or reach ${ASSIGN_NUMBER_MIN_CREDITS} credits, or upgrade to Premium.`,
-      usableCredits: usable,
-      adsWatchedLifetime: adsLifetime,
-      minAdsWatched: ASSIGN_NUMBER_MIN_ADS_WATCHED,
-      minCreditsGate: ASSIGN_NUMBER_MIN_CREDITS,
-      isPremium: false,
-    });
-  }
-
-  const planCredits = premium ? 0 : Number(PLAN_ASSIGN_CREDITS[planType] ?? NaN);
-  if (!premium && (!Number.isFinite(planCredits) || planCredits < 0)) {
-    return res.status(500).json({ error: "Plan credit configuration invalid" });
-  }
-  if (usable < planCredits) {
-    return res.status(402).json({
-      error: "Insufficient credits for this plan",
-      planType,
-      requiredCredits: planCredits,
-      usableCredits: usable,
-    });
-  }
+  const planCredits = 0;
 
   let leaseMs = Number(PLAN_ASSIGN_MS[planType] ?? NaN);
   if (!Number.isFinite(leaseMs) || leaseMs <= 0) {
     return res.status(500).json({ error: "Plan duration configuration invalid" });
   }
-  if (!premium) {
-    leaseMs = FREE_TIER_NUMBER_LEASE_MS;
-  }
 
   let tierReq = String(req.body?.numberTier ?? "")
     .trim()
     .toLowerCase();
-  if (!tierReq) tierReq = premium ? "premium" : "vip";
+  if (!tierReq) tierReq = "premium";
   if (tierReq === "normal") {
     return res.status(400).json({
       error: "Use POST /assign-free-number for Normal tier",
-      hint: "POST /assign-number accepts numberTier vip (credits) or premium (Pro).",
+      hint: "POST /assign-number is for Pro users picking inventory (premium tier).",
     });
   }
   if (tierReq !== "vip" && tierReq !== "premium") {
     return res.status(400).json({
       error: "Invalid numberTier",
       expected: ["vip", "premium"],
-    });
-  }
-  if (tierReq === "premium" && !premium) {
-    return res.status(403).json({
-      error: "Premium tier requires Pro",
-      message: "Upgrade to Pro or choose VIP (credit-based).",
     });
   }
 
@@ -2820,7 +3515,7 @@ app.post("/assign-number", async (req, res) => {
 });
 
 const CALL_CREDITS_PER_MINUTE = Number(process.env.CALL_CREDITS_PER_MINUTE || 10);
-const CALL_CREDITS_PER_MINUTE_PREMIUM = Number(process.env.CALL_CREDITS_PER_MINUTE_PREMIUM || 7);
+const CALL_CREDITS_PER_MINUTE_PREMIUM = Number(process.env.CALL_CREDITS_PER_MINUTE_PREMIUM || 15);
 
 /** Matches Flutter [FirestoreUserService.isPremiumFromUserData]. */
 function readIsPremium(d) {
@@ -3207,6 +3902,7 @@ async function settleOutboundCallBill({
 
   await db.runTransaction(async (t) => {
     const userRef = db.collection("users").doc(uid);
+    const statsRef = db.collection("user_stats").doc(uid);
     const historyRef = userRef.collection("call_history").doc(callSid);
     const liveRef = userRef.collection("voice_active_calls").doc(callSid);
 
@@ -3219,6 +3915,8 @@ async function settleOutboundCallBill({
     if (!userSnap.exists) {
       throw Object.assign(new Error("User document missing"), { http: 404 });
     }
+
+    await t.get(statsRef);
 
     const liveSnap = await t.get(liveRef);
     const prepaid = Number(liveSnap.exists ? liveSnap.data()?.liveDeductedCredits || 0 : 0);
@@ -3285,6 +3983,28 @@ async function settleOutboundCallBill({
       totalOutboundCalls: FieldValue.increment(1),
       totalCallTalkSeconds: FieldValue.increment(ds),
     });
+
+    // Fractional minutes = trend; whole-minute ceil = billing-ish sidecar (`total_cost_estimated_rounded`).
+    const talkMinutes = ds > 0 ? ds / 60 : 0;
+    const callCostInr =
+      talkMinutes > 0 && Number.isFinite(EST_COST_INR_PER_CALL_MINUTE)
+        ? talkMinutes * EST_COST_INR_PER_CALL_MINUTE
+        : 0;
+    const wholeMinutes = ds > 0 ? Math.ceil(ds / 60) : 0;
+    const callCostRounded =
+      wholeMinutes > 0 && Number.isFinite(EST_COST_INR_PER_CALL_MINUTE)
+        ? wholeMinutes * EST_COST_INR_PER_CALL_MINUTE
+        : 0;
+    t.set(
+      statsRef,
+      {
+        total_call_minutes: FieldValue.increment(talkMinutes),
+        total_cost_estimated: FieldValue.increment(callCostInr),
+        total_cost_estimated_rounded: FieldValue.increment(callCostRounded),
+        stats_updated_at: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
 
     t.set(
       historyRef,
@@ -3983,24 +4703,55 @@ app.post("/send-sms", async (req, res) => {
     }
   }
 
+  const premiumSms = readEffectivePremiumUser(userData, new Date());
+
   let smsDeducted = 0;
   let newBalanceAfterSms = null;
+  let otpAdsDebited = 0;
   try {
-    if (SMS_OUTBOUND_CREDIT_COST > 0) {
-      const dr = await deductCreditsForSms(uid, SMS_OUTBOUND_CREDIT_COST);
-      newBalanceAfterSms = dr.newBalance;
-      smsDeducted = SMS_OUTBOUND_CREDIT_COST;
+    if (premiumSms) {
+      if (SMS_OUTBOUND_CREDIT_COST > 0) {
+        const dr = await deductCreditsForSms(uid, SMS_OUTBOUND_CREDIT_COST);
+        newBalanceAfterSms = dr.newBalance;
+        smsDeducted = SMS_OUTBOUND_CREDIT_COST;
+      }
+    } else {
+      const refOtp = db.collection("users").doc(uid);
+      await db.runTransaction(async (t) => {
+        const snap = await t.get(refOtp);
+        const ud = snap.exists ? snap.data() || {} : {};
+        const otpNow = readOtpAdsProgress(ud);
+        if (otpNow < OTP_ADS_REQUIRED_PER_SMS) {
+          throw Object.assign(new Error("INSUFFICIENT_OTP_ADS"), {
+            http: 402,
+            otpAdsProgress: otpNow,
+            requiredOtpAds: OTP_ADS_REQUIRED_PER_SMS,
+          });
+        }
+        t.update(refOtp, {
+          otp_ads_progress: otpNow - OTP_ADS_REQUIRED_PER_SMS,
+        });
+      });
+      otpAdsDebited = OTP_ADS_REQUIRED_PER_SMS;
     }
   } catch (deductErr) {
     if (deductErr && deductErr.http === 402) {
+      if (String(deductErr.message || "") === "INSUFFICIENT_OTP_ADS") {
+        return res.status(402).json({
+          error: "Insufficient rewarded ads for SMS",
+          message: `Free tier: watch ${OTP_ADS_REQUIRED_PER_SMS} rewarded ads per outbound SMS (no credits used).`,
+          otpAdsProgress: deductErr.otpAdsProgress,
+          requiredOtpAds: deductErr.requiredOtpAds,
+        });
+      }
       return res.status(402).json({
         error: String(deductErr.message || "Insufficient credits"),
         usableCredits: deductErr.usableCredits,
         requiredCredits: deductErr.requiredCredits,
       });
     }
-    console.error("[send-sms] credit deduct:", deductErr);
-    return res.status(500).json({ error: "Could not apply SMS credit charge" });
+    console.error("[send-sms] charge (credits or OTP ads):", deductErr);
+    return res.status(500).json({ error: "Could not apply SMS charge" });
   }
 
   try {
@@ -4010,6 +4761,25 @@ app.post("/send-sms", async (req, res) => {
       body,
     });
     console.log("[send-sms] step 8: Twilio OK sid=", msg.sid, "status=", msg.status);
+    try {
+      const { FieldValue } = firebaseAdmin.firestore;
+      const smsCost = Number.isFinite(EST_COST_INR_PER_OUTBOUND_SMS)
+        ? EST_COST_INR_PER_OUTBOUND_SMS
+        : 0;
+      await db
+        .collection("user_stats")
+        .doc(uid)
+        .set(
+          {
+            total_sms_sent: FieldValue.increment(1),
+            total_cost_estimated: FieldValue.increment(smsCost),
+            stats_updated_at: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+    } catch (statsErr) {
+      console.warn("[send-sms] user_stats:", statsErr.message || statsErr);
+    }
     return res.status(200).json({
       ok: true,
       sid: msg.sid,
@@ -4019,6 +4789,7 @@ app.post("/send-sms", async (req, res) => {
       fromSource: resolved.source,
       creditsDeducted: smsDeducted || undefined,
       newBalance: newBalanceAfterSms,
+      otpAdsDebited: otpAdsDebited || undefined,
     });
   } catch (err) {
     if (smsDeducted > 0) {
@@ -4026,6 +4797,13 @@ app.post("/send-sms", async (req, res) => {
         await refundSmsCredits(uid, smsDeducted);
       } catch (re) {
         console.error("[send-sms] refund after Twilio failure:", re);
+      }
+    }
+    if (otpAdsDebited > 0) {
+      try {
+        await refundOtpAdsProgress(uid, otpAdsDebited);
+      } catch (re) {
+        console.error("[send-sms] OTP ad refund after Twilio failure:", re);
       }
     }
     const code = err.code;
